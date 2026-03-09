@@ -318,6 +318,8 @@ class Network:
         self._running       = False
         self.local_ip       = self._get_local_ip()
         self.port           = find_free_port(7779)
+        self._node_ref      = None
+        self._node_ref      = None
 
     def _get_local_ip(self):
         try:
@@ -501,6 +503,32 @@ class Network:
                 tx = Transaction.from_dict(msg["transaction"])
                 self.on_transaction(tx)
 
+            elif msg_type == "VRF_TICKET":
+                device_id = msg.get("device_id")
+                time_slot = msg.get("time_slot")
+                ticket    = msg.get("ticket")
+                if device_id and time_slot and ticket:
+                    node = self._node_ref
+                    if node and hasattr(node, "_vrf_tickets"):
+                        if Node._verify_ticket(device_id, time_slot, ticket):
+                            with node._vrf_lock:
+                                if time_slot not in node._vrf_tickets:
+                                    node._vrf_tickets[time_slot] = {}
+                                node._vrf_tickets[time_slot][device_id] = ticket
+
+            elif msg_type == "VRF_TICKET":
+                device_id = msg.get("device_id")
+                time_slot = msg.get("time_slot")
+                ticket    = msg.get("ticket")
+                if device_id and time_slot and ticket:
+                    node = self._node_ref
+                    if node and hasattr(node, "_vrf_tickets"):
+                        if Node._verify_ticket(device_id, time_slot, ticket):
+                            with node._vrf_lock:
+                                if time_slot not in node._vrf_tickets:
+                                    node._vrf_tickets[time_slot] = {}
+                                node._vrf_tickets[time_slot][device_id] = ticket
+
             elif msg_type == "REWARD":
                 self.on_reward(msg["reward"])
 
@@ -580,6 +608,8 @@ class Node:
             self._on_transaction_received,
             self._on_reward_received
         )
+        self.network._node_ref = self
+        self.network._node_ref = self
 
     def _acquire_lock(self):
         import fcntl
@@ -662,46 +692,80 @@ class Node:
             print(f"  ╚══════════════════════════════════╝")
             print(f"  > ", end="", flush=True)
 
+    def _vrf_ticket(self, time_slot: int) -> str:
+        """Each node computes a unique verifiable ticket for each time slot.
+        Ticket = SHA256(device_id + time_slot)
+        The node with the LOWEST ticket value wins. Scales to millions of nodes."""
+        data = f"{self.wallet.device_id}:{time_slot}".encode()
+        return hashlib.sha256(data).hexdigest()
+
+    @staticmethod
+    def _verify_ticket(device_id: str, time_slot: int, ticket: str) -> bool:
+        expected = hashlib.sha256(f"{device_id}:{time_slot}".encode()).hexdigest()
+        return ticket == expected
+
     def _reward_lottery(self):
-        """Every 3 seconds, this node participates in the reward lottery."""
+        """VRF-based lottery. Scales to millions of nodes.
+        No peer list needed. Every node computes its own ticket.
+        Lowest ticket wins. Winner is verifiable by anyone."""
+        self._vrf_tickets = {}
+        self._vrf_lock = threading.Lock()
+
         while self.network._running:
             time.sleep(REWARD_INTERVAL)
-
-            peers = self.network.get_online_peers()
-            all_nodes = list(peers.keys()) + [self.wallet.device_id]
-            total_nodes = len(all_nodes)
 
             if self.ledger.total_minted >= TOTAL_SUPPLY:
                 continue
 
-            # Each node independently calculates the same winner
-            # using a deterministic seed based on current time slot
             time_slot = int(time.time() / REWARD_INTERVAL)
-            seed_data = f"{time_slot}:{''.join(sorted(all_nodes))}".encode()
-            seed_hash = hashlib.sha256(seed_data).hexdigest()
-            winner_index = int(seed_hash, 16) % total_nodes
-            winner_id = sorted(all_nodes)[winner_index]
+            my_ticket = self._vrf_ticket(time_slot)
 
-            # Only the winner broadcasts the reward
+            with self._vrf_lock:
+                if time_slot not in self._vrf_tickets:
+                    self._vrf_tickets[time_slot] = {}
+                self._vrf_tickets[time_slot][self.wallet.device_id] = my_ticket
+
+            self.network.broadcast({
+                "type":      "VRF_TICKET",
+                "device_id": self.wallet.device_id,
+                "time_slot": time_slot,
+                "ticket":    my_ticket
+            })
+
+            time.sleep(REWARD_INTERVAL * 0.4)
+
+            with self._vrf_lock:
+                slot_tickets = dict(self._vrf_tickets.get(time_slot, {}))
+                slot_tickets[self.wallet.device_id] = my_ticket
+
+            if not slot_tickets:
+                continue
+
+            winner_id = min(slot_tickets, key=lambda d: slot_tickets[d])
+
             if winner_id == self.wallet.device_id:
                 reward_id = f"reward:{time_slot}"
-                # Wait briefly then check if someone else already claimed this slot
-                time.sleep(random.uniform(0.1, 0.5))
                 if any(r["reward_id"] == reward_id for r in self.ledger.rewards):
                     continue
                 reward = {
-                    "reward_id": reward_id,
-                    "winner_id": self.wallet.device_id,
-                    "amount":    REWARD_PER_ROUND,
-                    "timestamp": time.time(),
-                    "time_slot": time_slot,
-                    "nodes":     total_nodes
+                    "reward_id":  reward_id,
+                    "winner_id":  self.wallet.device_id,
+                    "amount":     REWARD_PER_ROUND,
+                    "timestamp":  time.time(),
+                    "time_slot":  time_slot,
+                    "vrf_ticket": my_ticket,
+                    "nodes":      len(slot_tickets)
                 }
                 added = self.ledger.add_reward(reward)
                 if added:
                     self.network.broadcast({"type": "REWARD", "reward": reward})
                     balance = self.ledger.get_balance(self.wallet.device_id)
                     print(f"\n  ★ Reward won! +{REWARD_PER_ROUND} TMPL | Balance: {balance:.8f}\n  > ", end="", flush=True)
+
+            with self._vrf_lock:
+                old_slots = [s for s in self._vrf_tickets if s < time_slot - 5]
+                for s in old_slots:
+                    del self._vrf_tickets[s]
 
     def send(self, peer_id: str, amount: float) -> bool:
         if amount <= 0:

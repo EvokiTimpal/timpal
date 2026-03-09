@@ -850,5 +850,66 @@ class Node:
 
 
 if __name__ == "__main__":
-    node = Node()
-    node.start()
+    import sys
+
+    if len(sys.argv) >= 2 and sys.argv[1] == "send":
+        if len(sys.argv) != 4:
+            print("Usage: python3 timpal.py send <address> <amount>")
+            sys.exit(1)
+        recipient_id = sys.argv[2]
+        try:
+            amount = float(sys.argv[3])
+        except ValueError:
+            print("Invalid amount.")
+            sys.exit(1)
+        wallet = Wallet()
+        ledger = Ledger()
+        if not os.path.exists(WALLET_FILE):
+            print("No wallet found. Run python3 timpal.py first.")
+            sys.exit(1)
+        wallet.load()
+        balance = ledger.get_balance(wallet.device_id)
+        if amount <= 0 or balance < amount:
+            print(f"Insufficient balance. You have {balance:.8f} TMPL.")
+            sys.exit(1)
+        network = Network(wallet, ledger)
+        network.connect_to_bootstrap()
+        time.sleep(2)
+        peers = network.get_online_peers()
+        if not peers:
+            print("No peers online. Make sure your node is running first.")
+            sys.exit(1)
+        tx = {
+            "tx_id":        hashlib.sha256(f"{wallet.device_id}{recipient_id}{amount}{time.time()}".encode()).hexdigest(),
+            "sender_id":    wallet.device_id,
+            "recipient_id": recipient_id,
+            "amount":       amount,
+            "timestamp":    time.time(),
+            "public_key":   wallet.get_public_key_hex(),
+        }
+        msg = f"{tx['sender_id']}{tx['recipient_id']}{tx['amount']}{tx['timestamp']}"
+        tx["signature"] = wallet.sign(msg.encode())
+        if ledger.add_transaction(tx):
+            network.broadcast({"type": "transaction", "data": tx})
+            print(f"Sent {amount:.8f} TMPL to {recipient_id[:24]}...")
+            print(f"New balance: {ledger.get_balance(wallet.device_id):.8f} TMPL")
+        else:
+            print("Transaction failed.")
+        network.stop()
+        sys.exit(0)
+
+    elif len(sys.argv) >= 2 and sys.argv[1] == "balance":
+        wallet = Wallet()
+        ledger = Ledger()
+        if not os.path.exists(WALLET_FILE):
+            print("No wallet found. Run python3 timpal.py first.")
+            sys.exit(1)
+        wallet.load()
+        balance = ledger.get_balance(wallet.device_id)
+        print(f"Balance : {balance:.8f} TMPL")
+        print(f"Address : {wallet.device_id}")
+        sys.exit(0)
+
+    else:
+        node = Node()
+        node.start()

@@ -573,12 +573,23 @@ class Node:
         self.wallet  = Wallet()
         self.ledger  = Ledger()
         self.network = None
+        self._acquire_lock()
         self._load_or_create_wallet()
         self.network = Network(
             self.wallet, self.ledger,
             self._on_transaction_received,
             self._on_reward_received
         )
+
+    def _acquire_lock(self):
+        import fcntl
+        lock_path = __import__("os").path.join(__import__("os").path.expanduser("~"), ".timpal.lock")
+        self._lock_file = open(lock_path, "w")
+        try:
+            fcntl.flock(self._lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print("\n  TIMPAL IS ALREADY RUNNING. Only one node per device.\n")
+            exit(0)
 
     def _load_or_create_wallet(self):
         if os.path.exists(WALLET_FILE):

@@ -1,0 +1,7 @@
+wallet.json
+ledger.json
+*.lock
+__pycache__/
+*.pyc
+.timpal_wallet.json
+.timpal_ledger.json

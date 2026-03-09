@@ -10,12 +10,17 @@ TIMPAL is a peer-to-peer payment protocol. No banks. No servers. No company. No 
 
 ## Quick start
 
-**Install the one dependency:**
+**Step 1 — Install the dependency:**
 ```bash
 pip3 install dilithium-py
 ```
 
-**Run your node:**
+**Step 2 — Download TIMPAL:**
+```bash
+curl -O https://raw.githubusercontent.com/EvokiTimpal/timpal/main/timpal.py
+```
+
+**Step 3 — Run your node:**
 ```bash
 python3 timpal.py
 ```
@@ -71,7 +76,7 @@ Your node starts, creates a quantum-resistant wallet, connects to the worldwide 
 
 ## Roadmap
 
-- [ ] Android app (Termux support)
+- [ ] Android app
 - [ ] iOS app
 - [ ] GUI desktop client
 - [ ] Mesh network support (Bluetooth + WiFi Direct)
@@ -81,6 +86,12 @@ Your node starts, creates a quantum-resistant wallet, connects to the worldwide 
 ## Bootstrap node
 
 `5.78.187.91:7777` — door to the network. Stores no value. Controls nothing.
+
+---
+
+## Whitepaper
+
+See `TIMPAL_Whitepaper.docx` in this repository.
 
 ---
 

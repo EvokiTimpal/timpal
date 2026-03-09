@@ -872,7 +872,7 @@ if __name__ == "__main__":
         if amount <= 0 or balance < amount:
             print(f"Insufficient balance. You have {balance:.8f} TMPL.")
             sys.exit(1)
-        network = Network(wallet, ledger)
+        network = Network(wallet, ledger, on_transaction=lambda x: None, on_reward=lambda x: None)
         network.connect_to_bootstrap()
         time.sleep(2)
         peers = network.get_online_peers()

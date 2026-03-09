@@ -885,7 +885,7 @@ if __name__ == "__main__":
             sys.exit(1)
         network = Network(wallet, ledger, on_transaction=lambda x: None, on_reward=lambda x: None)
         network.start()
-        time.sleep(2)
+        time.sleep(6)
         peers = network.get_online_peers()
         if not peers:
             print("No peers online. Make sure your node is running first.")

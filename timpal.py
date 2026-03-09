@@ -814,6 +814,69 @@ class Node:
         print(f"  New balance: {new_balance:.8f} TMPL")
         return True
 
+    def _control_server(self):
+        """Local control socket — lets CLI commands talk to the running node."""
+        import socket as _socket
+        srv = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        srv.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        try:
+            srv.bind(("127.0.0.1", 7780))
+            srv.listen(5)
+            srv.settimeout(1.0)
+        except Exception:
+            return  # Port in use, skip
+        while self.network._running:
+            try:
+                conn, _ = srv.accept()
+                data = b""
+                while True:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                    if data.endswith(b"\n"):
+                        break
+                try:
+                    cmd = json.loads(data.decode().strip())
+                    response = self._handle_control(cmd)
+                except Exception as e:
+                    response = {"ok": False, "error": str(e)}
+                conn.sendall((json.dumps(response) + "\n").encode())
+                conn.close()
+            except Exception:
+                continue
+        srv.close()
+
+    def _handle_control(self, cmd: dict) -> dict:
+        """Handle a command from the CLI control socket."""
+        action = cmd.get("action")
+
+        if action == "balance":
+            balance = self.ledger.get_balance(self.wallet.device_id)
+            return {"ok": True, "balance": balance, "address": self.wallet.device_id}
+
+        elif action == "send":
+            peer_id = cmd.get("peer_id")
+            amount  = float(cmd.get("amount", 0))
+            peers   = self.network.get_online_peers()
+            if peer_id not in peers:
+                return {"ok": False, "error": "Peer not online"}
+            ok = self.send(peer_id, amount)
+            return {"ok": ok}
+
+        elif action == "network":
+            summary = self.ledger.get_summary()
+            peers   = self.network.get_online_peers()
+            return {
+                "ok":           True,
+                "peers":        len(peers),
+                "transactions": summary.get("total_transactions", 0),
+                "minted":       summary.get("total_minted", 0),
+                "remaining":    250000000 - summary.get("total_minted", 0)
+            }
+
+        return {"ok": False, "error": "Unknown action"}
+
     def start(self):
         print("\n" + "═" * 52)
         print("  TIMPAL v2.0 — Plan B for Humanity")
@@ -832,6 +895,7 @@ class Node:
         print("═" * 52 + "\n")
 
         threading.Thread(target=self._reward_lottery, daemon=True).start()
+        threading.Thread(target=self._control_server, daemon=True).start()
         self._cli()
 
     def _cli(self):
@@ -953,31 +1017,32 @@ if __name__ == "__main__":
         if amount <= 0 or balance < amount:
             print(f"Insufficient balance. You have {balance:.8f} TMPL.")
             sys.exit(1)
-        network = Network(wallet, ledger, on_transaction=lambda x: None, on_reward=lambda x: None)
-        network.start()
-        time.sleep(6)
-        peers = network.get_online_peers()
-        if not peers:
-            print("No peers online. Make sure your node is running first.")
-            sys.exit(1)
-        tx = {
-            "tx_id":        hashlib.sha256(f"{wallet.device_id}{recipient_id}{amount}{time.time()}".encode()).hexdigest(),
-            "sender_id":    wallet.device_id,
-            "recipient_id": recipient_id,
-            "amount":       amount,
-            "timestamp":    time.time(),
-            "public_key":   wallet.get_public_key_hex(),
-        }
-        msg = f"{tx['sender_id']}{tx['recipient_id']}{tx['amount']}{tx['timestamp']}"
-        tx["signature"] = wallet.sign(msg.encode())
-        if ledger.add_transaction(tx):
-            network.broadcast({"type": "TRANSACTION", "transaction": tx})
-            time.sleep(2)  # Give peers time to receive and record it
-            print(f"Sent {amount:.8f} TMPL to {recipient_id[:24]}...")
-            print(f"New balance: {ledger.get_balance(wallet.device_id):.8f} TMPL")
-        else:
-            print("Transaction failed.")
-        network.stop()
+        # Send via control socket to running node — one ledger, one source of truth
+        import socket as _socket
+        try:
+            sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+            sock.settimeout(5.0)
+            sock.connect(("127.0.0.1", 7780))
+            cmd = json.dumps({"action": "send", "peer_id": recipient_id, "amount": amount}) + "\n"
+            sock.sendall(cmd.encode())
+            resp = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk: break
+                resp += chunk
+                if resp.endswith(b"\n"): break
+            sock.close()
+            result = json.loads(resp.decode().strip())
+            if result.get("ok"):
+                ledger2 = Ledger()
+                print(f"  > Sent {amount:.8f} TMPL to {recipient_id[:24]}...")
+                print(f"New balance: {ledger2.get_balance(wallet.device_id):.8f} TMPL")
+            else:
+                print(f"  Transaction failed: {result.get('error', 'unknown error')}")
+        except ConnectionRefusedError:
+            print("  Node is not running. Start your node first with: python3 timpal.py")
+        except Exception as e:
+            print(f"  Error: {e}")
         sys.exit(0)
 
     elif len(sys.argv) >= 2 and sys.argv[1] == "balance":

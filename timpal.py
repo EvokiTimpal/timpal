@@ -39,8 +39,8 @@ BOOTSTRAP_HOST     = "5.78.187.91"   # Hetzner bootstrap node
 BOOTSTRAP_PORT     = 7777
 BROADCAST_PORT     = 7778
 DISCOVERY_INTERVAL = 5
-WALLET_FILE        = "wallet.json"
-LEDGER_FILE        = "ledger.json"
+WALLET_FILE        = __import__("os").path.join(__import__("os").path.expanduser("~"), ".timpal_wallet.json")
+LEDGER_FILE        = __import__("os").path.join(__import__("os").path.expanduser("~"), ".timpal_ledger.json")
 
 # Supply constants
 TOTAL_SUPPLY       = 250_000_000.0   # 250 million TMPL total

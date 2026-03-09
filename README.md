@@ -4,17 +4,7 @@
 
 **Quantum-resistant. Worldwide. Instant. Free.**
 
-TIMPAL is a peer-to-peer payment protocol built for the people banks forgot. It works on a $50 Android phone. It works during a blackout. It works when governments collapse, banks freeze, or the internet goes down on your street but not the next one.
-
-No banks. No servers. No company. No control. Just people sending value directly to each other.
-
----
-
-## Why TIMPAL exists
-
-A person in Manila, Nairobi, or Caracas with a $50 phone should be able to send money instantly to anyone on Earth — for free, without asking permission from a bank, a government, or a corporation.
-
-TIMPAL is that protocol.
+TIMPAL is a peer-to-peer payment protocol. No banks. No servers. No company. No control. Just people sending value directly to each other.
 
 ---
 
@@ -75,20 +65,22 @@ Your node starts, creates a quantum-resistant wallet, connects to the worldwide 
 ## Requirements
 
 - Python 3.8+
-- Mac, Linux, Windows, Raspberry Pi
-- Android via Termux
+- Mac, Linux, Windows
+
+---
+
+## Roadmap
+
+- [ ] Android app (Termux support)
+- [ ] iOS app
+- [ ] GUI desktop client
+- [ ] Mesh network support (Bluetooth + WiFi Direct)
 
 ---
 
 ## Bootstrap node
 
 `5.78.187.91:7777` — door to the network. Stores no value. Controls nothing.
-
----
-
-## Philosophy
-
-TIMPAL is not a company. It is a protocol — like TCP/IP. Nobody owns it. The rules are in the code and the code is open.
 
 ---
 

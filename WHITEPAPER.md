@@ -10,7 +10,7 @@
 
 ## Abstract
 
-TIMPAL is a peer-to-peer payment protocol designed to function without banks, payment processors, or centralized infrastructure. It uses quantum-resistant Dilithium3 cryptography, a distributed append-only ledger, and a VRF-based node reward lottery to create a fair, decentralized monetary system with a fixed supply of 250 million TMPL distributed over 37.5 years.
+TIMPAL is a peer-to-peer payment protocol designed to function without banks, payment processors, or centralized infrastructure. It uses quantum-resistant Dilithium3 cryptography, a distributed append-only ledger, a VRF-based node reward lottery, and a two-era economic model to create a fair, decentralized monetary system with a fixed supply of 250 million TMPL distributed over 37.5 years.
 
 The protocol enforces one node per physical device, preventing Sybil attacks and ensuring that participation in the reward system remains fair regardless of computational resources. Transactions are free and confirm instantly. No pre-mine. No insider allocation. No central authority.
 
@@ -75,7 +75,7 @@ Every 3 seconds, one node wins 0.6345 TMPL. The winner is selected using a Verif
 4. The winner broadcasts the reward with the ticket as cryptographic proof
 5. Every node independently verifies the ticket before accepting the reward
 
-This design scales to millions of nodes because no peer list is required. Every node computes its own ticket independently. The winner is determined by pure mathematics — not by voting, not by coordination, not by any central authority. Any node can verify any reward by recomputing the ticket from the winner's device ID and the time slot.
+This design scales to millions of nodes because no peer list is required. Every node computes its own ticket independently. The winner is determined by pure mathematics — not by voting, not by coordination, not by any central authority.
 
 ### 3.5 One Node Per Device
 
@@ -83,20 +83,44 @@ An OS-level file lock prevents more than one node running per device. Any second
 
 ### 3.6 Ledger Conflict Resolution
 
-Each three-second time slot has exactly one winner. If two nodes claim the same slot, the reward with the earlier timestamp is canonical. The later claim is discarded. Total minted supply is recalculated from scratch after every merge — never trusted from incremental additions.
+Each three-second time slot has exactly one winner. If two nodes claim the same slot, the reward with the earlier timestamp is canonical. The later claim is discarded. Total minted supply is recalculated from scratch after every merge.
 
 ---
 
-## 4. Tokenomics
+## 4. Two-Era Economic Model
+
+TIMPAL operates in two distinct economic eras. The transition is automatic and encoded in the protocol.
+
+### Era 1 — Distribution (Years 0 to 37.5)
+
+- All transactions are **free**
+- Nodes earn through the VRF lottery: 0.6345 TMPL every 3 seconds
+- Total of 250,000,000 TMPL minted over 37.5 years
+- No pre-mine, no insider allocation, no founder rewards
+
+### Era 2 — Sustaining (Year 37.5 onwards)
+
+- No new TMPL can ever be created — supply is fixed at 250,000,000
+- Every transaction carries a fee of **0.0005 TMPL**
+- The fee goes to the node that first broadcast the transaction to the network — the node that did the work
+- The more the network is used, the more node operators earn
+- The protocol is self-sustaining forever with no inflation
+
+The transition between eras is seamless. When the last TMPL is minted, the lottery stops and fee collection begins automatically. No upgrade required. No vote needed.
+
+---
+
+## 5. Tokenomics
 
 | Property | Value |
 |----------|-------|
 | Total Supply | 250,000,000 TMPL |
-| Reward Per Round | 0.6345 TMPL |
+| Reward Per Round (Era 1) | 0.6345 TMPL |
 | Round Interval | Every 3 seconds |
 | Distribution Period | 37.5 years |
-| Transaction Fee (Year 0–37.5) | Free |
-| Transaction Fee (After Year 37.5) | 0.0005 TMPL |
+| Transaction Fee (Era 1) | Free |
+| Transaction Fee (Era 2) | 0.0005 TMPL |
+| Fee Recipient | Node that broadcast the transaction |
 | Pre-mine | None |
 | Insider Allocation | None |
 ```
@@ -104,32 +128,30 @@ Each three-second time slot has exactly one winner. If two nodes claim the same 
 250,000,000 ÷ 6,669,864 = 37.48 years
 ```
 
-After distribution completes, supply is fixed forever. Transaction fees sustain node operators indefinitely.
-
 ---
 
-## 5. Security Model
+## 6. Security Model
 
-### 5.1 Sybil Resistance
+### 6.1 Sybil Resistance
 One node per device enforced at the OS level. More rewards require more physical devices — the same constraint for everyone.
 
-### 5.2 Double-Spend Prevention
+### 6.2 Double-Spend Prevention
 Every node validates sender balance against the full ledger before accepting any transaction.
 
-### 5.3 Quantum Resistance
+### 6.3 Quantum Resistance
 Dilithium3 protects all signatures against both classical and quantum computer attacks.
 
-### 5.4 VRF Verification
+### 6.4 VRF Verification
 Every reward includes a cryptographic ticket. Any node can verify the winner is legitimate by recomputing `SHA256(device_id + time_slot)` and confirming it is the lowest value seen for that slot.
 
-### 5.5 Bootstrap Server
+### 6.5 Bootstrap Server
 Single point of failure for new node discovery only — not for network operation. Existing nodes continue peer-to-peer if bootstrap goes offline. Multiple community bootstrap servers are planned.
 
 ---
 
-## 6. Roadmap
+## 7. Roadmap
 
-- **Phase 1 — Live (March 2026):** Core protocol, quantum-resistant wallets, distributed ledger, VRF lottery, one-node-per-device, bootstrap server, GitHub.
+- **Phase 1 — Live (March 2026):** Core protocol, quantum-resistant wallets, distributed ledger, VRF lottery, two-era economic model, one-node-per-device, bootstrap server, GitHub.
 - **Phase 2 — Resilience:** Multiple independent bootstrap servers, offline transaction queuing.
 - **Phase 3 — Mobile:** Android and iOS applications, GUI desktop client.
 - **Phase 4 — Mesh:** Bluetooth and WiFi Direct — no internet required.
@@ -137,11 +159,11 @@ Single point of failure for new node discovery only — not for network operatio
 
 ---
 
-## 7. Conclusion
+## 8. Conclusion
 
 TIMPAL is not a company. It is a protocol. Nobody owns it. Nobody controls it. The rules are in the code and the code is open.
 
-The VRF lottery ensures that whether there are 2 nodes or 2 million nodes on the network, every participant has a fair, cryptographically provable chance of winning each round. No mining rigs. No staking pools. Just run the software.
+The two-era model ensures the network is self-sustaining forever — first through the VRF lottery, then through transaction fees. Whether there are 2 nodes or 2 million nodes, the protocol works the same way.
 
 - GitHub: https://github.com/EvokiTimpal/timpal
 - Website: https://timpal.org

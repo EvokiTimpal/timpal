@@ -768,7 +768,7 @@ class Node:
             elif raw == "balance":
                 balance = self.ledger.get_balance(self.wallet.device_id)
                 print(f"\n  Balance: {balance:.8f} TMPL")
-                print(f"  Device : {self.wallet.device_id[:24]}...\n")
+                print(f"  Device : {self.wallet.device_id}\n")
 
             elif raw == "peers":
                 peers = self.network.get_online_peers()

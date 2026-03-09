@@ -49,6 +49,12 @@ REWARD_INTERVAL    = 3.0             # Seconds between reward rounds
 TX_FEE             = 0.0             # Free for first 37.5 years
 TX_FEE_ERA2        = 0.0005          # Fee after all coins distributed
 
+def get_current_fee(total_minted: float) -> float:
+    """Era 1 (0-250M minted): Free. Era 2 (250M minted): 0.0005 TMPL to broadcaster."""
+    if total_minted >= TOTAL_SUPPLY:
+        return TX_FEE_ERA2
+    return TX_FEE
+
 
 def find_free_port(start=7779):
     for port in range(start, start + 20):

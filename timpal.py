@@ -971,7 +971,8 @@ if __name__ == "__main__":
         msg = f"{tx['sender_id']}{tx['recipient_id']}{tx['amount']}{tx['timestamp']}"
         tx["signature"] = wallet.sign(msg.encode())
         if ledger.add_transaction(tx):
-            network.broadcast({"type": "transaction", "data": tx})
+            network.broadcast({"type": "TRANSACTION", "transaction": tx})
+            time.sleep(2)  # Give peers time to receive and record it
             print(f"Sent {amount:.8f} TMPL to {recipient_id[:24]}...")
             print(f"New balance: {ledger.get_balance(wallet.device_id):.8f} TMPL")
         else:

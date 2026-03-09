@@ -206,6 +206,12 @@ class Wallet:
         self.device_id = self._derive_device_id()
         print(f"\n  New quantum-resistant wallet created.")
         print(f"  Device ID: {self.device_id[:24]}...")
+        print(f"")
+        print(f"  WARNING - BACK UP YOUR WALLET FILE:")
+        print(f"  {WALLET_FILE}")
+        print(f"  This file contains your private key.")
+        print(f"  If you delete it your TMPL is gone forever.")
+        print(f"  Copy it somewhere safe.")
 
     def _derive_device_id(self):
         return hashlib.sha256(self.public_key).hexdigest()

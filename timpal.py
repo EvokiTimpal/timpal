@@ -129,12 +129,18 @@ class Ledger:
         with self._lock:
             if any(r["reward_id"] == reward_dict["reward_id"] for r in self.rewards):
                 return False
+            slot = reward_dict.get("time_slot")
+            if slot and any(r.get("time_slot") == slot for r in self.rewards):
+                return False
             if self.total_minted + reward_dict["amount"] > TOTAL_SUPPLY:
                 return False
             self.rewards.append(reward_dict)
             self.total_minted += reward_dict["amount"]
             self.save()
             return True
+
+    def recalculate_totals(self):
+        self.total_minted = round(sum(r["amount"] for r in self.rewards), 8)
 
     def get_summary(self):
         return {
@@ -152,19 +158,35 @@ class Ledger:
         }
 
     def merge(self, other_ledger: dict):
-        """Merge another node's ledger with ours. Longer ledger wins."""
+        """Merge — one winner per time_slot, earliest timestamp wins conflict."""
         with self._lock:
             changed = False
             for tx in other_ledger.get("transactions", []):
                 if not self.has_transaction(tx["tx_id"]):
-                    self.transactions.append(tx)
-                    changed = True
+                    if self.can_spend(tx["sender_id"], tx["amount"]):
+                        self.transactions.append(tx)
+                        changed = True
+            existing_slots = {r.get("time_slot"): r for r in self.rewards}
             for reward in other_ledger.get("rewards", []):
-                if not any(r["reward_id"] == reward["reward_id"] for r in self.rewards):
+                rid  = reward["reward_id"]
+                slot = reward.get("time_slot")
+                if any(r["reward_id"] == rid for r in self.rewards):
+                    continue
+                if slot and slot in existing_slots:
+                    existing = existing_slots[slot]
+                    if reward.get("timestamp", 0) < existing.get("timestamp", 0):
+                        self.rewards = [r for r in self.rewards if r.get("time_slot") != slot]
+                        self.rewards.append(reward)
+                        existing_slots[slot] = reward
+                        changed = True
+                    continue
+                if self.total_minted + reward["amount"] <= TOTAL_SUPPLY:
                     self.rewards.append(reward)
-                    self.total_minted += reward["amount"]
+                    if slot:
+                        existing_slots[slot] = reward
                     changed = True
             if changed:
+                self.recalculate_totals()
                 self.save()
             return changed
 

@@ -102,3 +102,21 @@ MIT
 ---
 
 *Built March 8, 2026. First transaction sent the same day.*
+
+---
+
+## Sending TMPL from the command line
+
+While your node is running in one terminal, open a second terminal to send:
+```bash
+# Check your balance and full address
+python3 timpal.py balance
+
+# Send TMPL to another node
+python3 timpal.py send <recipient_address> <amount>
+```
+
+Example:
+```bash
+python3 timpal.py send c9da12e12fcb8782dbf7660a... 10.0
+```

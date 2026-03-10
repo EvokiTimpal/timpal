@@ -1065,12 +1065,16 @@
       <div class="explorer-stat-value" id="exp-remaining">—</div>
     </div>
     <div class="explorer-stat">
-      <div class="explorer-stat-label">Total Rewards</div>
+      <div class="explorer-stat-label">VRF Rounds</div>
       <div class="explorer-stat-value" id="exp-rewards">—</div>
     </div>
     <div class="explorer-stat">
       <div class="explorer-stat-label">Transactions</div>
       <div class="explorer-stat-value green" id="exp-txs">—</div>
+    </div>
+    <div class="explorer-stat">
+      <div class="explorer-stat-label">Active Nodes</div>
+      <div class="explorer-stat-value" id="exp-nodes">—</div>
     </div>
   </div>
 
@@ -1277,7 +1281,7 @@ function scrollToDoc(id) {
 }
 
 // ── EXPLORER ──────────────────────────────────
-const API = 'http://5.78.187.91:7781';
+const API = 'https://timpal.org/api';
 let explorerRunning = false;
 
 function startExplorer() {
@@ -1302,7 +1306,8 @@ async function fetchExplorer() {
 
     document.getElementById('exp-minted').textContent    = minted.toLocaleString(undefined, {minimumFractionDigits: 4, maximumFractionDigits: 4}) + ' TMPL';
     document.getElementById('exp-remaining').textContent = (data.remaining || 0).toLocaleString(undefined, {maximumFractionDigits: 0}) + ' TMPL';
-    document.getElementById('exp-rewards').textContent   = (data.total_rewards || 0).toLocaleString();
+    document.getElementById('exp-rewards').textContent   = (data.vrf_rounds || data.total_rewards || 0).toLocaleString();
+    document.getElementById('exp-nodes').textContent    = (data.active_nodes || 0).toLocaleString();
     document.getElementById('exp-txs').textContent       = data.total_txs || 0;
     document.getElementById('exp-pct').textContent       = pct + '%';
     document.getElementById('exp-bar').style.width       = pct + '%';

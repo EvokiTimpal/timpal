@@ -328,6 +328,16 @@ class Network:
         self._node_ref      = None
 
     def _get_local_ip(self):
+        # Try to get public IP first (for server deployments)
+        try:
+            import urllib.request
+            public_ip = urllib.request.urlopen(
+                'https://api.ipify.org', timeout=3
+            ).read().decode('utf-8').strip()
+            if public_ip:
+                return public_ip
+        except Exception:
+            pass
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
@@ -349,9 +359,48 @@ class Network:
 
     # ── Bootstrap connection ────────────────────
 
+    def _connect_to_server_node(self):
+        """Directly connect to the always-on server node as a peer.
+        This bypasses NAT issues — clients connect TO the server, not vice versa."""
+        time.sleep(3)
+        server_id = None
+        while self._running:
+            try:
+                # Don't connect to ourselves
+                if self.local_ip == BOOTSTRAP_HOST:
+                    return
+                # Check if already connected
+                if any(p.get("ip") == BOOTSTRAP_HOST for p in self.peers.values()):
+                    time.sleep(30)
+                    continue
+                # Connect to server node
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(5.0)
+                sock.connect((BOOTSTRAP_HOST, BOOTSTRAP_NODE_PORT))
+                sock.sendall(json.dumps({"type": "HELLO", "device_id": self.wallet.device_id}).encode())
+                resp = sock.recv(4096)
+                sock.close()
+                data = json.loads(resp.decode())
+                if data.get("type") == "HELLO_ACK":
+                    server_id = data.get("device_id")
+                    if server_id and server_id != self.wallet.device_id:
+                        self.peers[server_id] = {
+                            "ip":        BOOTSTRAP_HOST,
+                            "port":      BOOTSTRAP_NODE_PORT,
+                            "last_seen": time.time()
+                        }
+                        print(f"\n  [+] Connected to server node\n  > ", end="", flush=True)
+                        threading.Thread(target=self._sync_ledger, daemon=True).start()
+            except Exception:
+                pass
+            time.sleep(30)
+
     def _bootstrap_connect(self):
         """Connect to bootstrap server and get initial peer list."""
         time.sleep(2)
+        # Also connect directly to the bootstrap node as a peer
+        # This ensures server and clients are always connected
+        threading.Thread(target=self._connect_to_server_node, daemon=True).start()
         while self._running:
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -505,7 +554,23 @@ class Network:
             msg = json.loads(data.decode())
             msg_type = msg.get("type")
 
-            if msg_type == "TRANSACTION":
+            if msg_type == "HELLO":
+                # Peer introducing itself directly
+                peer_id = msg.get("device_id")
+                if peer_id and peer_id != self.wallet.device_id:
+                    self.peers[peer_id] = {
+                        "ip":        addr[0],
+                        "port":      msg.get("port", 7779),
+                        "last_seen": time.time()
+                    }
+                    response = json.dumps({
+                        "type":      "HELLO_ACK",
+                        "device_id": self.wallet.device_id
+                    }).encode()
+                    conn.sendall(response)
+                    threading.Thread(target=self._sync_ledger, daemon=True).start()
+
+            elif msg_type == "TRANSACTION":
                 tx = Transaction.from_dict(msg["transaction"])
                 self.on_transaction(tx)
 
@@ -899,6 +964,17 @@ class Node:
         self._cli()
 
     def _cli(self):
+        import sys
+        if not sys.stdin.isatty():
+            # Running as daemon — no terminal, just keep alive
+            import signal
+            def shutdown(sig, frame):
+                self.network.stop()
+            signal.signal(signal.SIGTERM, shutdown)
+            signal.signal(signal.SIGINT, shutdown)
+            while self.network._running:
+                time.sleep(1)
+            return
         while True:
             try:
                 raw = input("  > ").strip().lower()

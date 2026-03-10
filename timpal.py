@@ -640,26 +640,16 @@ class Network:
                 self.on_transaction(tx)
 
             elif msg_type == "VRF_TICKET":
-                device_id = msg.get("device_id")
-                time_slot = msg.get("time_slot")
-                ticket    = msg.get("ticket")
-                if device_id and time_slot and ticket:
+                device_id  = msg.get("device_id")
+                time_slot  = msg.get("time_slot")
+                ticket     = msg.get("ticket")
+                sig        = msg.get("sig")
+                public_key = msg.get("public_key")
+                seed       = msg.get("seed")
+                if device_id and time_slot and ticket and sig and public_key and seed:
                     node = self._node_ref
                     if node and hasattr(node, "_vrf_tickets"):
-                        if Node._verify_ticket(device_id, time_slot, ticket):
-                            with node._vrf_lock:
-                                if time_slot not in node._vrf_tickets:
-                                    node._vrf_tickets[time_slot] = {}
-                                node._vrf_tickets[time_slot][device_id] = ticket
-
-            elif msg_type == "VRF_TICKET":
-                device_id = msg.get("device_id")
-                time_slot = msg.get("time_slot")
-                ticket    = msg.get("ticket")
-                if device_id and time_slot and ticket:
-                    node = self._node_ref
-                    if node and hasattr(node, "_vrf_tickets"):
-                        if Node._verify_ticket(device_id, time_slot, ticket):
+                        if Node._verify_ticket(public_key, seed, sig, ticket):
                             with node._vrf_lock:
                                 if time_slot not in node._vrf_tickets:
                                     node._vrf_tickets[time_slot] = {}
@@ -872,64 +862,71 @@ class Node:
             print(f"  ╚══════════════════════════════════╝")
             print(f"  > ", end="", flush=True)
 
-    def _vrf_ticket(self, time_slot: int) -> str:
-        """True VRF ticket: sign the time_slot with private key, hash the signature.
-        Unpredictable without the private key. Verifiable by anyone with the public key.
-        Different every round — no node has a permanent advantage."""
-        msg = f"{time_slot}".encode()
+    def _get_last_reward_hash(self) -> str:
+        """Returns hash of the last reward in ledger — shared seed for all nodes."""
+        if not self.ledger.rewards:
+            return "genesis"
+        last = self.ledger.rewards[-1]
+        data = f"{last['reward_id']}:{last['winner_id']}:{last['amount']}".encode()
+        return hashlib.sha256(data).hexdigest()
+
+    def _vrf_ticket(self) -> tuple:
+        """Deterministic VRF: ticket = SHA256(sign(private_key, last_reward_hash))
+        All nodes use same seed. Winner is same for everyone. No timing bias."""
+        seed = self._get_last_reward_hash()
+        msg = seed.encode()
         sig = Dilithium3.sign(self.wallet.private_key, msg)
-        return hashlib.sha256(sig).hexdigest()
+        ticket = hashlib.sha256(sig).hexdigest()
+        return ticket, sig.hex(), seed
 
     @staticmethod
-    def _verify_ticket(device_id: str, time_slot: int, ticket: str, public_key_hex: str = None) -> bool:
-        """Verify ticket is valid. If public_key_hex provided, full cryptographic check.
-        Otherwise falls back to accepting the ticket (for backwards compat with old nodes)."""
-        if not public_key_hex:
-            return True
+    def _verify_ticket(public_key_hex: str, seed: str, sig_hex: str, ticket: str) -> bool:
+        """Verify a ticket: signature matches public key and hashes to claimed ticket."""
         try:
             pub = bytes.fromhex(public_key_hex)
-            msg = f"{time_slot}".encode()
-            # We can't reverse the hash, but we verify the ticket is well-formed hex
-            return len(ticket) == 64 and all(c in "0123456789abcdef" for c in ticket)
+            sig = bytes.fromhex(sig_hex)
+            msg = seed.encode()
+            if not Dilithium3.verify(pub, msg, sig):
+                return False
+            return hashlib.sha256(sig).hexdigest() == ticket
         except Exception:
             return False
 
     def _reward_lottery(self):
-        """VRF-based lottery. Scales to millions of nodes.
-        No peer list needed. Every node computes its own ticket.
-        Lowest ticket wins. Winner is verifiable by anyone."""
+        """Deterministic VRF lottery. Every node independently computes the same winner.
+        No ticket collection needed. Scales to millions of nodes with zero lottery overhead."""
         self._vrf_tickets = {}
         self._vrf_lock = threading.Lock()
 
         while self.network._running:
-            time.sleep(2.0)
+            time.sleep(REWARD_INTERVAL)
 
             if self.ledger.total_minted >= TOTAL_SUPPLY:
                 continue
 
             time_slot = int(time.time() / REWARD_INTERVAL)
-            my_ticket = self._vrf_ticket(time_slot)
+            reward_id = f"reward:{time_slot}"
 
-            with self._vrf_lock:
-                if time_slot not in self._vrf_tickets:
-                    self._vrf_tickets[time_slot] = {}
-                self._vrf_tickets[time_slot][self.wallet.device_id] = my_ticket
+            if any(r["reward_id"] == reward_id for r in self.ledger.rewards):
+                continue
 
-            vrf_msg = {
-                "type":      "VRF_TICKET",
-                "device_id": self.wallet.device_id,
-                "time_slot": time_slot,
-                "ticket":    my_ticket
-            }
-            for _ in range(3):
-                self.network.broadcast(vrf_msg)
-                time.sleep(0.5)
+            my_ticket, my_sig_hex, seed = self._vrf_ticket()
 
-            time.sleep(REWARD_INTERVAL * 0.6 - 1.5)
+            self.network.broadcast({
+                "type":       "VRF_TICKET",
+                "device_id":  self.wallet.device_id,
+                "public_key": self.wallet.public_key.hex(),
+                "time_slot":  time_slot,
+                "seed":       seed,
+                "ticket":     my_ticket,
+                "sig":        my_sig_hex
+            })
+
+            time.sleep(REWARD_INTERVAL * 0.6)
 
             with self._vrf_lock:
                 slot_tickets = dict(self._vrf_tickets.get(time_slot, {}))
-                slot_tickets[self.wallet.device_id] = my_ticket
+            slot_tickets[self.wallet.device_id] = my_ticket
 
             if not slot_tickets:
                 continue
@@ -937,7 +934,6 @@ class Node:
             winner_id = min(slot_tickets, key=lambda d: slot_tickets[d])
 
             if winner_id == self.wallet.device_id:
-                reward_id = f"reward:{time_slot}"
                 if any(r["reward_id"] == reward_id for r in self.ledger.rewards):
                     continue
                 reward = {
@@ -947,6 +943,7 @@ class Node:
                     "timestamp":  time.time(),
                     "time_slot":  time_slot,
                     "vrf_ticket": my_ticket,
+                    "vrf_seed":   seed,
                     "nodes":      len(slot_tickets)
                 }
                 added = self.ledger.add_reward(reward)

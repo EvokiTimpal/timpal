@@ -35,8 +35,9 @@ except ImportError:
 # PROTOCOL CONSTANTS — NEVER CHANGE
 # ─────────────────────────────────────────────
 VERSION            = "2.0"
-BOOTSTRAP_HOST     = "5.78.187.91"   # Hetzner bootstrap node
-BOOTSTRAP_PORT     = 7777
+BOOTSTRAP_HOST      = "5.78.187.91"   # Hetzner bootstrap node
+BOOTSTRAP_PORT      = 7777
+BOOTSTRAP_NODE_PORT = 7779            # Server node — always online
 BROADCAST_PORT     = 7778
 DISCOVERY_INTERVAL = 5
 WALLET_FILE        = __import__("os").path.join(__import__("os").path.expanduser("~"), ".timpal_wallet.json")

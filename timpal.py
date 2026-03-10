@@ -360,15 +360,6 @@ class Network:
 
     # ── Bootstrap connection ────────────────────
 
-    def _periodic_ledger_sync(self):
-        """Re-sync ledger every 5 minutes to catch up on missed history."""
-        time.sleep(60)  # Wait for initial connection first
-        while self.network._running:
-            peers = self.network.get_online_peers()
-            if peers:
-                self._sync_ledger()
-            time.sleep(300)  # Every 5 minutes
-
     def _connect_to_server_node(self):
         """Directly connect to the always-on server node as a peer.
         This bypasses NAT issues — clients connect TO the server, not vice versa."""
@@ -946,6 +937,15 @@ class Node:
             }
 
         return {"ok": False, "error": "Unknown action"}
+
+    def _periodic_ledger_sync(self):
+        """Re-sync ledger every 5 minutes to catch up on missed history."""
+        time.sleep(60)
+        while self.network._running:
+            peers = self.network.get_online_peers()
+            if peers:
+                self.network._sync_ledger()
+            time.sleep(300)
 
     def start(self):
         print("\n" + "═" * 52)

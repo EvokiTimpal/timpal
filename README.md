@@ -120,3 +120,24 @@ Example:
 ```bash
 python3 timpal.py send c9da12e12fcb8782dbf7660a... 10.0
 ```
+
+## Auto-start on boot
+
+Run your node automatically every time your computer starts.
+
+**Mac:**
+```
+bash autostart_mac.sh
+```
+
+**Linux:**
+```
+bash autostart_linux.sh
+```
+
+**Windows:**
+```
+autostart_windows.bat
+```
+
+To stop auto-start, see instructions printed after running the script.

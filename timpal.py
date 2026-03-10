@@ -378,6 +378,7 @@ class Network:
                 sock.settimeout(5.0)
                 sock.connect((BOOTSTRAP_HOST, BOOTSTRAP_NODE_PORT))
                 sock.sendall(json.dumps({"type": "HELLO", "device_id": self.wallet.device_id}).encode())
+                sock.shutdown(socket.SHUT_WR)  # Signal end of message
                 resp = sock.recv(4096)
                 sock.close()
                 data = json.loads(resp.decode())

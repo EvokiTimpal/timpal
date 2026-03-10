@@ -1191,13 +1191,16 @@ python3 timpal.py send &lt;address&gt; &lt;amount&gt;</div>
       <div class="docs-section" id="doc-vrf">
         <div class="docs-h2">VRF Lottery</div>
         <p class="docs-p">Every 5 seconds, one node wins 1.0575 TMPL. The winner is selected by a Verifiable Random Function:</p>
-        <div class="docs-code"><span class="comment"># Each node computes its own ticket</span>
-ticket = SHA256(device_id + time_slot)
+        <div class="docs-code"><span class="comment"># Each node signs the time slot with its private key</span>
+signature = Dilithium3.sign(private_key, time_slot)
+
+<span class="comment"># Ticket is the hash of that signature — unpredictable without the private key</span>
+ticket = SHA256(signature)
 
 <span class="comment"># The node with the lowest ticket wins</span>
 winner = node with minimum(ticket)</div>
-        <p class="docs-p">This scales to millions of nodes because no peer list is required. Every node independently computes its ticket. The winner is determined by pure mathematics — no voting, no coordination, no central authority.</p>
-        <p class="docs-p">Every reward includes the VRF ticket as cryptographic proof. Any node can verify the winner is legitimate by recomputing <span class="inline-code">SHA256(winner_id + time_slot)</span> and confirming it is the lowest value for that round.</p>
+        <p class="docs-p">This scales to millions of nodes because no peer list is required. Every node independently computes its ticket. Because the ticket is derived from a private key signature, it is different every round — no node has a permanent advantage over any other.</p>
+        <p class="docs-p">Every reward includes the VRF ticket as cryptographic proof. Any node can verify the winner is legitimate by confirming the ticket is the lowest value submitted for that round.</p>
       </div>
 
       <div class="docs-section" id="doc-ledger">

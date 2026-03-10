@@ -47,7 +47,7 @@ Your node starts, creates a quantum-resistant wallet, connects to the worldwide 
 - **Distributed ledger** — Every node holds a full copy. No single point of failure.
 - **Quantum-resistant cryptography** — Dilithium3, NIST 2024 post-quantum standard.
 - **Instant finality** — Transactions confirm immediately.
-- **Node reward lottery** — Every 3 seconds, one random node wins 0.6345 TMPL.
+- **Node reward lottery** — Every 5 seconds, one random node wins 1.0575 TMPL.
 - **One node per device** — Fairness enforced by the protocol.
 - **250 million TMPL total supply** — Over 37.5 years. No pre-mine. No insider allocation.
 
@@ -58,8 +58,8 @@ Your node starts, creates a quantum-resistant wallet, connects to the worldwide 
 | Property | Value |
 |----------|-------|
 | Total supply | 250,000,000 TMPL |
-| Reward per round | 0.6345 TMPL |
-| Round interval | 3 seconds |
+| Reward per round | 1.0575 TMPL |
+| Round interval | 5 seconds |
 | Distribution period | 37.5 years |
 | Transaction fee | Free (first 37.5 years) |
 | Pre-mine | None |

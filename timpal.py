@@ -783,13 +783,19 @@ class Node:
         )
         self.network._node_ref = self
         self.network._node_ref = self
+        self._sending = False
 
     def _acquire_lock(self):
-        import fcntl
+        import sys
         lock_path = __import__("os").path.join(__import__("os").path.expanduser("~"), ".timpal.lock")
         self._lock_file = open(lock_path, "w")
         try:
-            fcntl.flock(self._lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if sys.platform == "win32":
+                import msvcrt
+                msvcrt.locking(self._lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self._lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             print("\n  TIMPAL IS ALREADY RUNNING. Only one node per device.\n")
             exit(0)
@@ -858,7 +864,8 @@ class Node:
             balance = self.ledger.get_balance(self.wallet.device_id)
             print(f"\n")
             print(f"  ╔══════════════════════════════════╗")
-            print(f"  ║       REWARD WON! ★              ║")
+            if not self._sending:
+                print(f"  ║       REWARD WON! ★              ║")
             print(f"  ╠══════════════════════════════════╣")
             print(f"  ║  Amount  : {reward['amount']:.8f} TMPL")
             print(f"  ║  Balance : {balance:.8f} TMPL")
@@ -933,7 +940,8 @@ class Node:
                 if added:
                     self.network.broadcast({"type": "REWARD", "reward": reward})
                     balance = self.ledger.get_balance(self.wallet.device_id)
-                    print(f"\n  ★ Reward won! +{REWARD_PER_ROUND} TMPL | Balance: {balance:.8f}\n  > ", end="", flush=True)
+                    if not self._sending:
+                        print(f"\n  ★ Reward won! +{REWARD_PER_ROUND} TMPL | Balance: {balance:.8f}\n  > ", end="", flush=True)
 
             with self._vrf_lock:
                 old_slots = [s for s in self._vrf_tickets if s < time_slot - 5]
@@ -1124,6 +1132,7 @@ class Node:
                 print(f"  Bootstrap         : {BOOTSTRAP_HOST}:{BOOTSTRAP_PORT}\n")
 
             elif raw == "send":
+                self._sending = True
                 peers = self.network.get_online_peers()
                 if not peers:
                     print("\n  No peers online yet.\n")
@@ -1150,6 +1159,7 @@ class Node:
                     print("  Invalid amount.\n")
                     continue
                 self.send(peer_id, amount)
+                self._sending = False
 
             elif raw == "history":
                 my_id = self.wallet.device_id

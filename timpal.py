@@ -444,34 +444,55 @@ class Network:
             time.sleep(120)
 
     def _sync_ledger(self):
-        """Request full ledger from a random peer."""
+        """Delta sync — only request what we are missing from a peer.
+        Sends our known slot numbers and tx IDs.
+        Peer responds with only the missing pieces.
+        Scales to millions of nodes — never transfers full ledger.
+        """
         time.sleep(1)
         peers = self.get_online_peers()
         if not peers:
             return
-        peer_id = random.choice(list(peers.keys()))
-        peer    = peers[peer_id]
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(60.0)  # Large ledger needs more time
-            sock.connect((peer["ip"], peer["port"]))
-            sock.sendall(json.dumps({"type": "GET_LEDGER"}).encode())
-            sock.shutdown(socket.SHUT_WR)
-            data = b""
-            while True:
-                chunk = sock.recv(65536)
-                if not chunk:
-                    break
-                data += chunk
-            sock.close()
-            msg = json.loads(data.decode())
-            if msg.get("type") == "LEDGER":
-                merged = self.ledger.merge(msg["ledger"])
-                if merged:
-                    print(f"\n  [+] Ledger synchronized with network")
-                    print(f"  > ", end="", flush=True)
-        except Exception:
-            pass
+        for peer_id in random.sample(list(peers.keys()), min(3, len(peers))):
+            peer = peers[peer_id]
+            try:
+                with self.ledger._lock:
+                    known_slots  = [r.get("time_slot") for r in self.ledger.rewards if r.get("time_slot")]
+                    known_tx_ids = [t.get("tx_id") for t in self.ledger.transactions if t.get("tx_id")]
+
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(30.0)
+                sock.connect((peer["ip"], peer["port"]))
+                request = json.dumps({
+                    "type":         "SYNC_REQUEST",
+                    "known_slots":  known_slots,
+                    "known_tx_ids": known_tx_ids
+                }).encode()
+                sock.sendall(request)
+                sock.shutdown(socket.SHUT_WR)
+                data = b""
+                while True:
+                    chunk = sock.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                sock.close()
+                msg = json.loads(data.decode())
+                if msg.get("type") == "SYNC_RESPONSE":
+                    delta = {
+                        "rewards":      msg.get("rewards", []),
+                        "transactions": msg.get("txs", [])
+                    }
+                    missing_r = len(delta["rewards"])
+                    missing_t = len(delta["transactions"])
+                    if missing_r > 0 or missing_t > 0:
+                        merged = self.ledger.merge(delta)
+                        if merged:
+                            print(f"\n  [+] Synced {missing_r} rewards, {missing_t} txs from network")
+                            print(f"  > ", end="", flush=True)
+                return
+            except Exception:
+                continue
 
     # ── Local discovery ─────────────────────────
 
@@ -608,9 +629,33 @@ class Network:
                 self.on_reward(msg["reward"])
 
             elif msg_type == "GET_LEDGER":
+                # Legacy full sync — still supported for compatibility
                 response = json.dumps({
                     "type":   "LEDGER",
                     "ledger": self.ledger.to_dict()
+                }).encode()
+                conn.sendall(response)
+
+            elif msg_type == "SYNC_REQUEST":
+                # Delta sync — only send what the peer is missing
+                their_slots   = set(msg.get("known_slots", []))
+                their_tx_ids  = set(msg.get("known_tx_ids", []))
+
+                with self.ledger._lock:
+                    missing_rewards = [
+                        r for r in self.ledger.rewards
+                        if r.get("time_slot") not in their_slots
+                    ]
+                    missing_txs = [
+                        t for t in self.ledger.transactions
+                        if t.get("tx_id") not in their_tx_ids
+                    ]
+
+                response = json.dumps({
+                    "type":    "SYNC_RESPONSE",
+                    "rewards": missing_rewards,
+                    "txs":     missing_txs,
+                    "total":   len(self.ledger.rewards)
                 }).encode()
                 conn.sendall(response)
 

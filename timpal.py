@@ -502,6 +502,34 @@ class Network:
                         if merged:
                             print(f"\n  [+] Synced {missing_r} rewards, {missing_t} txs from network")
                             print(f"  > ", end="", flush=True)
+
+                    # Push back what the peer told us they need
+                    we_need_slots  = set(msg.get("we_need_slots", []))
+                    we_need_tx_ids = set(msg.get("we_need_tx_ids", []))
+                    if we_need_slots or we_need_tx_ids:
+                        with self.ledger._lock:
+                            push_rewards = [
+                                r for r in self.ledger.rewards
+                                if r.get("time_slot") in we_need_slots
+                            ]
+                            push_txs = [
+                                t for t in self.ledger.transactions
+                                if t.get("tx_id") in we_need_tx_ids
+                            ]
+                        if push_rewards or push_txs:
+                            try:
+                                s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                                s2.settimeout(30.0)
+                                s2.connect((peer["ip"], peer["port"]))
+                                s2.sendall(json.dumps({
+                                    "type":    "SYNC_PUSH",
+                                    "rewards": push_rewards,
+                                    "txs":     push_txs
+                                }).encode())
+                                s2.shutdown(socket.SHUT_WR)
+                                s2.close()
+                            except Exception:
+                                pass
                 return
             except Exception:
                 continue
@@ -640,6 +668,15 @@ class Network:
             elif msg_type == "REWARD":
                 self.on_reward(msg["reward"])
 
+            elif msg_type == "SYNC_PUSH":
+                # Peer is pushing rewards/txs we asked for
+                delta = {
+                    "rewards":      msg.get("rewards", []),
+                    "transactions": msg.get("txs", [])
+                }
+                if delta["rewards"] or delta["transactions"]:
+                    self.ledger.merge(delta)
+
             elif msg_type == "GET_LEDGER":
                 # Legacy full sync — still supported for compatibility
                 response = json.dumps({
@@ -649,11 +686,17 @@ class Network:
                 conn.sendall(response)
 
             elif msg_type == "SYNC_REQUEST":
-                # Delta sync — only send what the peer is missing
+                # Delta sync — bidirectional
+                # 1. Send peer what they are missing
+                # 2. Tell peer what WE are missing so they can push it to us
                 their_slots   = set(msg.get("known_slots", []))
                 their_tx_ids  = set(msg.get("known_tx_ids", []))
 
                 with self.ledger._lock:
+                    our_slots = set(r.get("time_slot") for r in self.ledger.rewards if r.get("time_slot"))
+                    our_tx_ids = set(t.get("tx_id") for t in self.ledger.transactions if t.get("tx_id"))
+
+                    # What peer is missing (we have, they don't)
                     missing_rewards = [
                         r for r in self.ledger.rewards
                         if r.get("time_slot") not in their_slots
@@ -663,11 +706,17 @@ class Network:
                         if t.get("tx_id") not in their_tx_ids
                     ]
 
+                    # What WE are missing (they have, we don't)
+                    we_need_slots  = list(their_slots - our_slots)
+                    we_need_tx_ids = list(their_tx_ids - our_tx_ids)
+
                 response = json.dumps({
-                    "type":    "SYNC_RESPONSE",
-                    "rewards": missing_rewards,
-                    "txs":     missing_txs,
-                    "total":   len(self.ledger.rewards)
+                    "type":        "SYNC_RESPONSE",
+                    "rewards":     missing_rewards,
+                    "txs":         missing_txs,
+                    "total":       len(self.ledger.rewards),
+                    "we_need_slots":  we_need_slots,
+                    "we_need_tx_ids": we_need_tx_ids
                 }).encode()
                 conn.sendall(response)
 

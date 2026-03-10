@@ -915,14 +915,17 @@ class Node:
                     self._vrf_tickets[time_slot] = {}
                 self._vrf_tickets[time_slot][self.wallet.device_id] = my_ticket
 
-            self.network.broadcast({
+            vrf_msg = {
                 "type":      "VRF_TICKET",
                 "device_id": self.wallet.device_id,
                 "time_slot": time_slot,
                 "ticket":    my_ticket
-            })
+            }
+            for _ in range(3):
+                self.network.broadcast(vrf_msg)
+                time.sleep(0.5)
 
-            time.sleep(REWARD_INTERVAL * 0.6)
+            time.sleep(REWARD_INTERVAL * 0.6 - 1.5)
 
             with self._vrf_lock:
                 slot_tickets = dict(self._vrf_tickets.get(time_slot, {}))

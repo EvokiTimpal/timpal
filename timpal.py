@@ -902,7 +902,7 @@ class Node:
         self._vrf_lock = threading.Lock()
 
         while self.network._running:
-            time.sleep(REWARD_INTERVAL)
+            time.sleep(2.0)
 
             if self.ledger.total_minted >= TOTAL_SUPPLY:
                 continue

@@ -45,8 +45,8 @@ LEDGER_FILE        = __import__("os").path.join(__import__("os").path.expanduser
 
 # Supply constants
 TOTAL_SUPPLY       = 250_000_000.0   # 250 million TMPL total
-REWARD_PER_ROUND   = 0.6345          # TMPL per 3-second round
-REWARD_INTERVAL    = 3.0             # Seconds between reward rounds
+REWARD_PER_ROUND   = 1.0575          # TMPL per 5-second round
+REWARD_INTERVAL    = 5.0             # Seconds between reward rounds (increased from 3s for fair ticket collection)
 TX_FEE             = 0.0             # Free for first 37.5 years
 TX_FEE_ERA2        = 0.0005          # Fee after all coins distributed
 
@@ -922,7 +922,7 @@ class Node:
                 "ticket":    my_ticket
             })
 
-            time.sleep(REWARD_INTERVAL * 0.4)
+            time.sleep(REWARD_INTERVAL * 0.6)
 
             with self._vrf_lock:
                 slot_tickets = dict(self._vrf_tickets.get(time_slot, {}))

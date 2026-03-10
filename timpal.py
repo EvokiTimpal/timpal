@@ -610,15 +610,7 @@ class Network:
                 }).encode()
                 conn.sendall(response)
 
-            elif msg_type == "HELLO":
-                peer_id   = msg.get("device_id", "")
-                peer_port = msg.get("port", 7779)
-                if peer_id and peer_id != self.wallet.device_id:
-                    self.peers[peer_id] = {
-                        "ip":        addr[0],
-                        "port":      peer_port,
-                        "last_seen": time.time()
-                    }
+
 
         except Exception:
             pass

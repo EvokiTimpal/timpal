@@ -453,9 +453,10 @@ class Network:
         peer    = peers[peer_id]
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(10.0)
+            sock.settimeout(60.0)  # Large ledger needs more time
             sock.connect((peer["ip"], peer["port"]))
             sock.sendall(json.dumps({"type": "GET_LEDGER"}).encode())
+            sock.shutdown(socket.SHUT_WR)
             data = b""
             while True:
                 chunk = sock.recv(65536)

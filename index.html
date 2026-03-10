@@ -902,7 +902,7 @@
     </div>
     <div class="stat-item">
       <div class="stat-label">Reward Interval</div>
-      <div class="stat-value">3 seconds</div>
+      <div class="stat-value">5 seconds</div>
     </div>
     <div class="stat-item">
       <div class="stat-label">Transaction Fee</div>
@@ -975,7 +975,7 @@
         <div class="feature">
           <div class="feature-icon">🎲</div>
           <div class="feature-title">VRF Lottery</div>
-          <div class="feature-desc">Every 3 seconds, one node wins 0.6345 TMPL. Selected by Verifiable Random Function — pure cryptographic fairness. Scales to millions of nodes.</div>
+          <div class="feature-desc">Every 5 seconds, one node wins 1.0575 TMPL. Selected by Verifiable Random Function — pure cryptographic fairness. Scales to millions of nodes.</div>
         </div>
         <div class="feature">
           <div class="feature-icon">🖥️</div>
@@ -1006,7 +1006,7 @@
         <div class="era-badge">Era 1 · Now → Year 37.5</div>
         <div class="era-title">Distribution</div>
         <div class="era-desc">
-          All transactions are free. Nodes earn through the VRF lottery: 0.6345 TMPL every 3 seconds. 
+          All transactions are free. Nodes earn through the VRF lottery: 1.0575 TMPL every 5 seconds. 
           250 million TMPL distributed over 37.5 years. No pre-mine. No insider allocation. Zero.
         </div>
       </div>
@@ -1023,8 +1023,8 @@
     <table class="token-table">
       <tr><th>Property</th><th>Value</th></tr>
       <tr><td class="prop">Total Supply</td><td class="val">250,000,000 TMPL</td></tr>
-      <tr><td class="prop">Reward Per Round</td><td class="val accent">0.6345 TMPL</td></tr>
-      <tr><td class="prop">Round Interval</td><td class="val">Every 3 seconds</td></tr>
+      <tr><td class="prop">Reward Per Round</td><td class="val accent">1.0575 TMPL</td></tr>
+      <tr><td class="prop">Round Interval</td><td class="val">Every 5 seconds</td></tr>
       <tr><td class="prop">Distribution Period</td><td class="val">37.5 years</td></tr>
       <tr><td class="prop">Transaction Fee (Era 1)</td><td class="val green">Free</td></tr>
       <tr><td class="prop">Transaction Fee (Era 2)</td><td class="val">0.0005 TMPL</td></tr>
@@ -1149,7 +1149,7 @@ python3 timpal.py</div>
         <div class="docs-h2">Running a Node</div>
         <p class="docs-p">When you start TIMPAL for the first time, it creates a quantum-resistant wallet and connects to the worldwide network automatically.</p>
         <div class="docs-callout">⚠️ Keep your Mac awake while the node is running. Use <span class="inline-code">caffeinate -i python3 timpal.py</span> on Mac to prevent sleep.</div>
-        <p class="docs-p">Your node immediately joins the VRF lottery. Every 3 seconds, one node wins 0.6345 TMPL. You don't need to do anything — just keep it running.</p>
+        <p class="docs-p">Your node immediately joins the VRF lottery. Every 5 seconds, one node wins 1.0575 TMPL. You don't need to do anything — just keep it running.</p>
         <div class="docs-callout">Only one node can run per device. If you try to open a second terminal, the protocol blocks it immediately.</div>
       </div>
 
@@ -1190,7 +1190,7 @@ python3 timpal.py send &lt;address&gt; &lt;amount&gt;</div>
 
       <div class="docs-section" id="doc-vrf">
         <div class="docs-h2">VRF Lottery</div>
-        <p class="docs-p">Every 3 seconds, one node wins 0.6345 TMPL. The winner is selected by a Verifiable Random Function:</p>
+        <p class="docs-p">Every 5 seconds, one node wins 1.0575 TMPL. The winner is selected by a Verifiable Random Function:</p>
         <div class="docs-code"><span class="comment"># Each node computes its own ticket</span>
 ticket = SHA256(device_id + time_slot)
 
@@ -1223,8 +1223,8 @@ winner = node with minimum(ticket)</div>
         <table class="docs-table">
           <tr><th>Property</th><th>Value</th></tr>
           <tr><td>Total Supply</td><td>250,000,000 TMPL</td></tr>
-          <tr><td>Reward Per Round</td><td>0.6345 TMPL</td></tr>
-          <tr><td>Round Interval</td><td>Every 3 seconds</td></tr>
+          <tr><td>Reward Per Round</td><td>1.0575 TMPL</td></tr>
+          <tr><td>Round Interval</td><td>Every 5 seconds</td></tr>
           <tr><td>Distribution Period</td><td>37.5 years</td></tr>
           <tr><td>Transaction Fee (Era 1)</td><td>Free</td></tr>
           <tr><td>Transaction Fee (Era 2)</td><td>0.0005 TMPL</td></tr>

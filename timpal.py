@@ -364,35 +364,36 @@ class Network:
         """Directly connect to the always-on server node as a peer.
         This bypasses NAT issues — clients connect TO the server, not vice versa."""
         time.sleep(3)
-        server_id = None
         while self._running:
             try:
                 # Don't connect to ourselves
                 if self.local_ip == BOOTSTRAP_HOST:
                     return
-                # Check if already connected
-                if any(p.get("ip") == BOOTSTRAP_HOST for p in self.peers.values()):
-                    time.sleep(30)
-                    continue
-                # Connect to server node
+                # Always send HELLO to server node so it knows about us
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(5.0)
                 sock.connect((BOOTSTRAP_HOST, BOOTSTRAP_NODE_PORT))
-                sock.sendall(json.dumps({"type": "HELLO", "device_id": self.wallet.device_id}).encode())
-                sock.shutdown(socket.SHUT_WR)  # Signal end of message
+                sock.sendall(json.dumps({
+                    "type":      "HELLO",
+                    "device_id": self.wallet.device_id,
+                    "port":      self.port
+                }).encode())
+                sock.shutdown(socket.SHUT_WR)
                 resp = sock.recv(4096)
                 sock.close()
                 data = json.loads(resp.decode())
                 if data.get("type") == "HELLO_ACK":
                     server_id = data.get("device_id")
                     if server_id and server_id != self.wallet.device_id:
+                        already = server_id in self.peers
                         self.peers[server_id] = {
                             "ip":        BOOTSTRAP_HOST,
                             "port":      BOOTSTRAP_NODE_PORT,
                             "last_seen": time.time()
                         }
-                        print(f"\n  [+] Connected to server node\n  > ", end="", flush=True)
-                        threading.Thread(target=self._sync_ledger, daemon=True).start()
+                        if not already:
+                            print(f"\n  [+] Connected to server node\n  > ", end="", flush=True)
+                            threading.Thread(target=self._sync_ledger, daemon=True).start()
             except Exception:
                 pass
             time.sleep(30)

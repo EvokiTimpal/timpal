@@ -354,6 +354,7 @@ class Network:
         threading.Thread(target=self._listen_discovery,  daemon=True).start()
         threading.Thread(target=self._broadcast_loop,    daemon=True).start()
         threading.Thread(target=self._bootstrap_connect, daemon=True).start()
+        threading.Thread(target=self._periodic_sync, daemon=True).start()
 
     def stop(self):
         self._running = False
@@ -441,6 +442,17 @@ class Network:
                 pass
 
             # Re-register with bootstrap every 2 minutes
+            time.sleep(120)
+
+    def _periodic_sync(self):
+        """Run delta sync every 2 minutes to keep ledger fully up to date."""
+        time.sleep(30)
+        while self._running:
+            try:
+                if self.get_online_peers():
+                    self._sync_ledger()
+            except Exception:
+                pass
             time.sleep(120)
 
     def _sync_ledger(self):

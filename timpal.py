@@ -498,14 +498,18 @@ class Network:
                     missing_r = len(delta["rewards"])
                     missing_t = len(delta["transactions"])
                     if missing_r > 0 or missing_t > 0:
+                        # Record known tx_ids before merge to detect truly new ones
+                        known_tx_ids_before = set(t.get("tx_id") for t in self.ledger.transactions)
                         merged = self.ledger.merge(delta)
                         if merged:
                             print(f"\n  [+] Synced {missing_r} rewards, {missing_t} txs from network")
                             print(f"  > ", end="", flush=True)
-                            # Notify if any synced transactions are for us
+                            # Notify only for transactions not seen before this sync
                             node = self._node_ref
                             if node:
                                 for tx in delta["transactions"]:
+                                    if tx.get("tx_id") in known_tx_ids_before:
+                                        continue
                                     if tx.get("recipient_id") == node.wallet.device_id:
                                         balance = self.ledger.get_balance(node.wallet.device_id)
                                         print(f"\n  ╔══════════════════════════════════╗")

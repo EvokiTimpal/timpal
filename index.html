@@ -1316,7 +1316,7 @@ async function fetchExplorer() {
       rList.innerHTML = data.recent_rewards.map(r =>
         `<div class="explorer-row">
           <span class="row-id">${r.id}</span>
-          <span class="row-amount reward">+${Number(r.amount).toFixed(4)} TMPL</span>
+          <span class="row-amount reward">+${Number(r.amount).toFixed(8)} TMPL</span>
           <span class="row-time">${r.time}</span>
         </div>`
       ).join('');
@@ -1330,7 +1330,7 @@ async function fetchExplorer() {
       tList.innerHTML = data.recent_txs.map(t =>
         `<div class="explorer-row">
           <span class="row-id">${t.id}</span>
-          <span class="row-amount tx">${Number(t.amount).toFixed(4)} TMPL</span>
+          <span class="row-amount tx">${Number(t.amount).toFixed(8)} TMPL</span>
           <span class="row-time">${t.time}</span>
         </div>`
       ).join('');

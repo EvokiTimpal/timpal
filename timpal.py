@@ -502,6 +502,20 @@ class Network:
                         if merged:
                             print(f"\n  [+] Synced {missing_r} rewards, {missing_t} txs from network")
                             print(f"  > ", end="", flush=True)
+                            # Notify if any synced transactions are for us
+                            node = self._node_ref
+                            if node:
+                                for tx in delta["transactions"]:
+                                    if tx.get("recipient_id") == node.wallet.device_id:
+                                        balance = self.ledger.get_balance(node.wallet.device_id)
+                                        print(f"\n  ╔══════════════════════════════════╗")
+                                        print(f"  ║       TMPL RECEIVED              ║")
+                                        print(f"  ╠══════════════════════════════════╣")
+                                        print(f"  ║  Amount  : {tx['amount']:.8f} TMPL")
+                                        print(f"  ║  From    : {tx['sender_id'][:20]}...")
+                                        print(f"  ║  Balance : {balance:.8f} TMPL")
+                                        print(f"  ╚══════════════════════════════════╝")
+                                        print(f"  > ", end="", flush=True)
 
                     # Push back what the peer told us they need
                     we_need_slots  = set(msg.get("we_need_slots", []))

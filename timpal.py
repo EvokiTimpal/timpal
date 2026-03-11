@@ -862,18 +862,12 @@ class Node:
             print(f"  ╚══════════════════════════════════╝")
             print(f"  > ", end="", flush=True)
 
-    def _get_last_reward_hash(self) -> str:
-        """Returns hash of the last reward in ledger — shared seed for all nodes."""
-        if not self.ledger.rewards:
-            return "genesis"
-        last = self.ledger.rewards[-1]
-        data = f"{last['reward_id']}:{last['winner_id']}:{last['amount']}".encode()
-        return hashlib.sha256(data).hexdigest()
-
-    def _vrf_ticket(self) -> tuple:
-        """Deterministic VRF: ticket = SHA256(sign(private_key, last_reward_hash))
-        All nodes use same seed. Winner is same for everyone. No timing bias."""
-        seed = self._get_last_reward_hash()
+    def _vrf_ticket(self, time_slot: int) -> tuple:
+        """VRF ticket using time_slot as shared seed.
+        seed = time_slot — identical for every node on the planet, no sync needed.
+        ticket = SHA256(sign(private_key, seed)) — unique per node, unpredictable.
+        No ledger dependency. No forks ever possible."""
+        seed = str(time_slot)
         msg = seed.encode()
         sig = Dilithium3.sign(self.wallet.private_key, msg)
         ticket = hashlib.sha256(sig).hexdigest()
@@ -910,7 +904,7 @@ class Node:
             if any(r["reward_id"] == reward_id for r in self.ledger.rewards):
                 continue
 
-            my_ticket, my_sig_hex, seed = self._vrf_ticket()
+            my_ticket, my_sig_hex, seed = self._vrf_ticket(time_slot)
 
             self.network.broadcast({
                 "type":       "VRF_TICKET",

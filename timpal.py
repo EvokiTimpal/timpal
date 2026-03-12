@@ -132,13 +132,24 @@ class Ledger:
             return True
 
     def add_reward(self, reward_dict: dict) -> bool:
-        """Add a node reward to the ledger."""
+        """Add a node reward to the ledger.
+        If two rewards claim the same time_slot, the one with the lowest
+        VRF ticket value wins — true to the VRF design, network-wide consistent."""
         with self._lock:
             if any(r["reward_id"] == reward_dict["reward_id"] for r in self.rewards):
                 return False
             slot = reward_dict.get("time_slot")
-            if slot and any(r.get("time_slot") == slot for r in self.rewards):
-                return False
+            if slot:
+                existing = next((r for r in self.rewards if r.get("time_slot") == slot), None)
+                if existing:
+                    new_ticket = reward_dict.get("vrf_ticket", "f" * 64)
+                    old_ticket = existing.get("vrf_ticket", "f" * 64)
+                    if new_ticket < old_ticket:
+                        # New reward has lower ticket — it is the true winner, replace
+                        self.rewards = [r for r in self.rewards if r.get("time_slot") != slot]
+                        self.total_minted -= existing["amount"]
+                    else:
+                        return False
             if self.total_minted + reward_dict["amount"] > TOTAL_SUPPLY:
                 return False
             self.rewards.append(reward_dict)

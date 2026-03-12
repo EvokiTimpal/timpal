@@ -1069,6 +1069,10 @@
       <div class="explorer-stat-value" id="exp-rewards">—</div>
     </div>
     <div class="explorer-stat">
+      <div class="explorer-stat-label">Active Nodes</div>
+      <div class="explorer-stat-value green" id="exp-nodes">—</div>
+    </div>
+    <div class="explorer-stat">
       <div class="explorer-stat-label">Transactions</div>
       <div class="explorer-stat-value green" id="exp-txs">—</div>
     </div>
@@ -1084,13 +1088,23 @@
     </div>
   </div>
 
+  <div style="padding:0 40px 32px;max-width:900px;margin:0 auto;">
+    <div style="display:flex;gap:12px;align-items:center;">
+      <input id="exp-search" type="text" placeholder="Search by wallet address or transaction ID..."
+        style="flex:1;background:var(--bg2);border:1px solid var(--border);color:var(--text);padding:12px 16px;border-radius:8px;font-family:monospace;font-size:13px;outline:none;"
+        onkeydown="if(event.key==='Enter')explorerSearch()"/>
+      <button onclick="explorerSearch()" style="background:var(--accent);color:#000;border:none;padding:12px 24px;border-radius:8px;font-weight:700;cursor:pointer;font-size:13px;white-space:nowrap;">Search</button>
+      <button onclick="explorerClearSearch()" style="background:var(--bg2);color:var(--text-muted);border:1px solid var(--border);padding:12px 16px;border-radius:8px;cursor:pointer;font-size:13px;">Clear</button>
+    </div>
+  </div>
+  <div id="exp-search-result" style="display:none;padding:0 40px 32px;max-width:900px;margin:0 auto;"></div>
   <div class="explorer-tables">
     <div class="explorer-panel">
       <div class="explorer-panel-header">
         <div class="explorer-panel-title">Recent Rewards</div>
         <div class="live-badge"><div class="status-dot"></div> LIVE</div>
       </div>
-      <div id="exp-rewards-list">
+      <div id="exp-rewards-list" style="max-height:480px;overflow-y:auto;">
         <div class="explorer-empty">Connecting to network...</div>
       </div>
     </div>
@@ -1102,6 +1116,23 @@
       <div id="exp-tx-list">
         <div class="explorer-empty">No transactions yet</div>
       </div>
+    </div>
+  </div>
+
+  <div style="padding:32px 40px 60px;max-width:900px;margin:0 auto;">
+    <div class="explorer-panel">
+      <div class="explorer-panel-header"><div class="explorer-panel-title">Node Statistics</div></div>
+      <div id="exp-node-stats"><div class="explorer-empty">Loading...</div></div>
+    </div>
+  </div>
+
+  <div id="exp-modal" onclick="closeModal(event)" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:1000;align-items:center;justify-content:center;">
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:32px;max-width:620px;width:90%;max-height:90vh;overflow-y:auto;" onclick="event.stopPropagation()">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px;">
+        <div style="font-size:16px;font-weight:700;letter-spacing:0.05em;">TRANSACTION DETAIL</div>
+        <button onclick="document.getElementById('exp-modal').style.display='none'" style="background:none;border:none;color:var(--text-muted);font-size:20px;cursor:pointer;">X</button>
+      </div>
+      <div id="exp-modal-content"></div>
     </div>
   </div>
 
@@ -1162,7 +1193,7 @@ python3 timpal.py</div>
           <tr><td>peers</td><td>List online nodes currently connected to you</td></tr>
           <tr><td>send</td><td>Send TMPL interactively (select peer from list)</td></tr>
           <tr><td>history</td><td>Your last rewards and transactions</td></tr>
-          <tr><td>network</td><td>Global network statistics</td></tr>
+          <tr><td>network</td><td>Your node and network stats</td></tr>
           <tr><td>quit</td><td>Shut down your node cleanly</td></tr>
         </table>
         <p class="docs-p">You can also run commands from a second terminal without stopping your node:</p>
@@ -1291,7 +1322,7 @@ function startExplorer() {
 
 async function fetchExplorer() {
   if (!document.getElementById('page-explorer').classList.contains('active')) {
-    setTimeout(fetchExplorer, 3000);
+    setTimeout(fetchExplorer, 5000);
     return;
   }
 
@@ -1307,6 +1338,8 @@ async function fetchExplorer() {
     document.getElementById('exp-rewards').textContent = (data.total_rewards || 0).toLocaleString();
     document.getElementById('exp-minted').textContent    = minted.toLocaleString(undefined, {minimumFractionDigits: 4, maximumFractionDigits: 4}) + ' TMPL';
     document.getElementById('exp-txs').textContent       = data.total_txs || 0;
+    if(document.getElementById('exp-nodes')) document.getElementById('exp-nodes').textContent = data.active_nodes || 0;
+    renderNodeStats(data);
     document.getElementById('exp-pct').textContent       = pct + '%';
     document.getElementById('exp-bar').style.width       = pct + '%';
 
@@ -1343,8 +1376,9 @@ async function fetchExplorer() {
       '<div class="explorer-empty">Connecting to network...</div>';
   }
 
-  setTimeout(fetchExplorer, 3000);
+  setTimeout(fetchExplorer, 5000);
 }
 </script>
+<script src="/explorer.js"></script>
 </body>
 </html>

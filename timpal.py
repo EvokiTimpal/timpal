@@ -132,24 +132,13 @@ class Ledger:
             return True
 
     def add_reward(self, reward_dict: dict) -> bool:
-        """Add a node reward to the ledger.
-        If two rewards claim the same time_slot, the one with the lowest
-        VRF ticket value wins — true to the VRF design, network-wide consistent."""
+        """Add a node reward to the ledger."""
         with self._lock:
             if any(r["reward_id"] == reward_dict["reward_id"] for r in self.rewards):
                 return False
             slot = reward_dict.get("time_slot")
-            if slot:
-                existing = next((r for r in self.rewards if r.get("time_slot") == slot), None)
-                if existing:
-                    new_ticket = reward_dict.get("vrf_ticket", "f" * 64)
-                    old_ticket = existing.get("vrf_ticket", "f" * 64)
-                    if new_ticket < old_ticket:
-                        # New reward has lower ticket — it is the true winner, replace
-                        self.rewards = [r for r in self.rewards if r.get("time_slot") != slot]
-                        self.total_minted -= existing["amount"]
-                    else:
-                        return False
+            if slot and any(r.get("time_slot") == slot for r in self.rewards):
+                return False
             if self.total_minted + reward_dict["amount"] > TOTAL_SUPPLY:
                 return False
             self.rewards.append(reward_dict)
@@ -666,7 +655,16 @@ class Network:
 
             elif msg_type == "TRANSACTION":
                 tx = Transaction.from_dict(msg["transaction"])
-                self.on_transaction(tx)
+                tx_gossip_id = msg.get("transaction", {}).get("tx_id", "")
+                if tx_gossip_id and tx_gossip_id not in self.seen_ids:
+                    self.on_transaction(tx)
+                    threading.Thread(
+                        target=self.broadcast,
+                        args=(msg, None),
+                        daemon=True
+                    ).start()
+                elif not tx_gossip_id:
+                    self.on_transaction(tx)
 
             elif msg_type == "VRF_TICKET":
                 device_id  = msg.get("device_id")
@@ -675,17 +673,36 @@ class Network:
                 sig        = msg.get("sig")
                 public_key = msg.get("public_key")
                 seed       = msg.get("seed")
+                gossip_id  = f"vrf:{device_id}:{time_slot}"
                 if device_id and time_slot and ticket and sig and public_key and seed:
-                    node = self._node_ref
-                    if node and hasattr(node, "_vrf_tickets"):
-                        if Node._verify_ticket(public_key, seed, sig, ticket):
-                            with node._vrf_lock:
-                                if time_slot not in node._vrf_tickets:
-                                    node._vrf_tickets[time_slot] = {}
-                                node._vrf_tickets[time_slot][device_id] = ticket
+                    if gossip_id not in self.seen_ids:
+                        self.seen_ids.add(gossip_id)
+                        node = self._node_ref
+                        if node and hasattr(node, "_vrf_tickets"):
+                            if Node._verify_ticket(public_key, seed, sig, ticket):
+                                with node._vrf_lock:
+                                    if time_slot not in node._vrf_tickets:
+                                        node._vrf_tickets[time_slot] = {}
+                                    node._vrf_tickets[time_slot][device_id] = ticket
+                        # Gossip forward to all other peers
+                        sender_id = msg.get("device_id")
+                        threading.Thread(
+                            target=self.broadcast,
+                            args=(msg, sender_id),
+                            daemon=True
+                        ).start()
 
             elif msg_type == "REWARD":
-                self.on_reward(msg["reward"])
+                reward_gossip_id = msg.get("reward", {}).get("reward_id", "")
+                if reward_gossip_id and reward_gossip_id not in self.seen_ids:
+                    self.on_reward(msg["reward"])
+                    threading.Thread(
+                        target=self.broadcast,
+                        args=(msg, None),
+                        daemon=True
+                    ).start()
+                elif not reward_gossip_id:
+                    self.on_reward(msg["reward"])
 
             elif msg_type == "SYNC_PUSH":
                 # Peer is pushing rewards/txs we asked for
@@ -748,17 +765,20 @@ class Network:
 
     # ── Broadcast to all peers ───────────────────
 
-    def broadcast(self, message: dict):
-        """Send a message to all known online peers."""
+    def broadcast(self, message: dict, exclude_id: str = None):
+        """Send a message to all known peers (gossip protocol).
+        Uses all known peers, not just recently active ones."""
         msg_bytes = json.dumps(message).encode()
-        peers = self.get_online_peers()
-        for peer_id, peer in peers.items():
+        for peer_id, peer in list(self.peers.items()):
+            if peer_id == exclude_id:
+                continue
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(3.0)
                 sock.connect((peer["ip"], peer["port"]))
                 sock.sendall(msg_bytes)
                 sock.close()
+                self.peers[peer_id]["last_seen"] = time.time()
             except Exception:
                 continue
 

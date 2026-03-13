@@ -911,11 +911,6 @@ class Node:
             print(f"  > ", end="", flush=True)
 
     def _on_reward_received(self, reward: dict):
-        reward_id = reward.get("reward_id", "")
-        if reward_id in self.network.seen_ids:
-            return
-        self.network.seen_ids.add(reward_id)
-
         added = self.ledger.add_reward(reward)
         if not added:
             return
@@ -1006,6 +1001,8 @@ class Node:
                 continue
 
             winner_id = min(slot_tickets, key=lambda d: slot_tickets[d])
+            import sys
+            print(f"  [DEBUG] slot={time_slot} tickets={len(slot_tickets)} winner={winner_id[:8]}", file=sys.stderr, flush=True)
 
             if winner_id == self.wallet.device_id:
                 if any(r["reward_id"] == reward_id for r in self.ledger.rewards):
@@ -1020,12 +1017,10 @@ class Node:
                     "vrf_seed":   seed,
                     "nodes":      len(slot_tickets)
                 }
-                added = self.ledger.add_reward(reward)
-                if added:
-                    self.network.broadcast({"type": "REWARD", "reward": reward})
-                    balance = self.ledger.get_balance(self.wallet.device_id)
-                    if not self._sending:
-                        print(f"\n  ★ Reward won! +{REWARD_PER_ROUND} TMPL | Balance: {balance:.8f}\n  > ", end="", flush=True)
+                # Broadcast only — do NOT self-award
+                # Reward flows back via network through _on_reward_received
+                # This ensures same validation path as all other nodes
+                self.network.broadcast({"type": "REWARD", "reward": reward})
 
             with self._vrf_lock:
                 old_slots = [s for s in self._vrf_tickets if s < time_slot - 5]

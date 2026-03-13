@@ -1015,10 +1015,12 @@ class Node:
                     "vrf_seed":   seed,
                     "nodes":      len(slot_tickets)
                 }
-                # Broadcast only — do NOT self-award
-                # Reward flows back via network through _on_reward_received
-                # This ensures same validation path as all other nodes
-                self.network.broadcast({"type": "REWARD", "reward": reward})
+                added = self.ledger.add_reward(reward)
+                if added:
+                    self.network.broadcast({"type": "REWARD", "reward": reward})
+                    balance = self.ledger.get_balance(self.wallet.device_id)
+                    if not self._sending:
+                        print(f"\n  ★ Reward won! +{REWARD_PER_ROUND} TMPL | Balance: {balance:.8f}\n  > ", end="", flush=True)
 
             with self._vrf_lock:
                 old_slots = [s for s in self._vrf_tickets if s < time_slot - 5]

@@ -194,23 +194,9 @@ class Ledger:
             for reward in other_ledger.get("rewards", []):
                 rid  = reward["reward_id"]
                 slot = reward.get("time_slot")
-                if slot and slot in existing_slots:
-                    existing = existing_slots[slot]
-                    # Same reward already stored — skip
-                    if existing.get("winner_id") == reward.get("winner_id"):
-                        continue
-                    new_ticket = reward.get("vrf_ticket", "z")
-                    old_ticket = existing.get("vrf_ticket", "z")
-                    if new_ticket < old_ticket:
-                        # Incoming reward has lower ticket — it wins, replace
-                        self.rewards = [r for r in self.rewards if r.get("time_slot") != slot]
-                        self.total_minted -= existing["amount"]
-                        self.rewards.append(reward)
-                        existing_slots[slot] = reward
-                        changed = True
-                    continue
-                # No existing reward for this slot
                 if any(r["reward_id"] == rid for r in self.rewards):
+                    continue
+                if slot and slot in existing_slots:
                     continue
                 if self.total_minted + reward["amount"] <= TOTAL_SUPPLY:
                     self.rewards.append(reward)
@@ -392,9 +378,10 @@ class Network:
         time.sleep(3)
         while self._running:
             try:
-                # Don't connect to ourselves
+                # Server node skips this — it waits for clients to connect
                 if self.local_ip == BOOTSTRAP_HOST:
-                    return
+                    time.sleep(30)
+                    continue
                 # Always send HELLO to server node so it knows about us
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(5.0)
@@ -966,7 +953,8 @@ class Node:
         self._vrf_lock = threading.Lock()
 
         # Wait for network connections before joining lottery
-        time.sleep(15)
+        # Server needs longer — clients must connect first
+        time.sleep(45)
 
         while self.network._running:
             # Align to absolute slot boundary so all nodes collect tickets
@@ -985,7 +973,7 @@ class Node:
 
             my_ticket, my_sig_hex, seed = self._vrf_ticket(time_slot)
 
-            self.network.broadcast({
+            vrf_msg = {
                 "type":       "VRF_TICKET",
                 "device_id":  self.wallet.device_id,
                 "public_key": self.wallet.public_key.hex(),
@@ -993,9 +981,15 @@ class Node:
                 "seed":       seed,
                 "ticket":     my_ticket,
                 "sig":        my_sig_hex
-            })
+            }
 
-            time.sleep(REWARD_INTERVAL * 0.6)
+            # Broadcast ticket 3 times so late-waking nodes catch it
+            self.network.broadcast(vrf_msg)
+            time.sleep(1.0)
+            self.network.broadcast(vrf_msg)
+            time.sleep(1.0)
+            self.network.broadcast(vrf_msg)
+            time.sleep(REWARD_INTERVAL * 0.6 - 2.0)
 
             with self._vrf_lock:
                 slot_tickets = dict(self._vrf_tickets.get(time_slot, {}))

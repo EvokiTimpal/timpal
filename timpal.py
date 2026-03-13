@@ -942,7 +942,10 @@ class Node:
         self._vrf_lock = threading.Lock()
 
         while self.network._running:
-            time.sleep(REWARD_INTERVAL)
+            # Align to absolute slot boundary so all nodes collect tickets
+            # during the same window regardless of when they started
+            next_slot_time = (int(time.time() / REWARD_INTERVAL) + 1) * REWARD_INTERVAL
+            time.sleep(max(0.1, next_slot_time - time.time()))
 
             if self.ledger.total_minted >= TOTAL_SUPPLY:
                 continue

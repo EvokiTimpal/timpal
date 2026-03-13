@@ -941,6 +941,9 @@ class Node:
         self._vrf_tickets = {}
         self._vrf_lock = threading.Lock()
 
+        # Wait for network connections before joining lottery
+        time.sleep(15)
+
         while self.network._running:
             # Align to absolute slot boundary so all nodes collect tickets
             # during the same window regardless of when they started

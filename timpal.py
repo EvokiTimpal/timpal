@@ -194,19 +194,23 @@ class Ledger:
             for reward in other_ledger.get("rewards", []):
                 rid  = reward["reward_id"]
                 slot = reward.get("time_slot")
-                if any(r["reward_id"] == rid for r in self.rewards):
-                    continue
                 if slot and slot in existing_slots:
                     existing = existing_slots[slot]
+                    # Same reward already stored — skip
+                    if existing.get("winner_id") == reward.get("winner_id"):
+                        continue
                     new_ticket = reward.get("vrf_ticket", "z")
                     old_ticket = existing.get("vrf_ticket", "z")
                     if new_ticket < old_ticket:
-                        # Incoming reward has lower ticket — it wins
+                        # Incoming reward has lower ticket — it wins, replace
                         self.rewards = [r for r in self.rewards if r.get("time_slot") != slot]
                         self.total_minted -= existing["amount"]
                         self.rewards.append(reward)
                         existing_slots[slot] = reward
                         changed = True
+                    continue
+                # No existing reward for this slot
+                if any(r["reward_id"] == rid for r in self.rewards):
                     continue
                 if self.total_minted + reward["amount"] <= TOTAL_SUPPLY:
                     self.rewards.append(reward)

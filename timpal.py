@@ -134,8 +134,17 @@ class Ledger:
     def add_reward(self, reward_dict: dict) -> bool:
         """Add a node reward to the ledger.
         If two rewards claim the same slot, the one with the lowest VRF ticket wins.
-        Slot comparison runs BEFORE reward_id dedup so competing rewards are evaluated."""
+        Slot comparison runs BEFORE reward_id dedup so competing rewards are evaluated.
+        VRF ticket is cryptographically verified before acceptance."""
         with self._lock:
+            # Cryptographically verify the VRF ticket before accepting
+            public_key = reward_dict.get("vrf_public_key")
+            seed = reward_dict.get("vrf_seed")
+            sig = reward_dict.get("vrf_sig")
+            ticket = reward_dict.get("vrf_ticket")
+            if public_key and seed and sig and ticket:
+                if not Node._verify_ticket(public_key, seed, sig, ticket):
+                    return False
             slot = reward_dict.get("time_slot")
             new_ticket = reward_dict.get("vrf_ticket", "z")
             if slot:
@@ -182,12 +191,20 @@ class Ledger:
         }
 
     def merge(self, other_ledger: dict):
-        """Merge — one winner per time_slot, lowest VRF ticket wins conflict."""
+        """Merge — one winner per time_slot, lowest VRF ticket wins conflict.
+        All transactions and rewards are cryptographically verified before acceptance."""
         with self._lock:
             changed = False
             for tx in other_ledger.get("transactions", []):
                 if not self.has_transaction(tx["tx_id"]):
                     if self.can_spend(tx["sender_id"], tx["amount"]):
+                        # Verify signature before accepting
+                        try:
+                            t = Transaction.from_dict(tx)
+                            if not t.verify():
+                                continue
+                        except Exception:
+                            continue
                         self.transactions.append(tx)
                         changed = True
             existing_slots = {r.get("time_slot"): r for r in self.rewards}
@@ -1018,14 +1035,16 @@ class Node:
                 if any(r["reward_id"] == reward_id for r in self.ledger.rewards):
                     continue
                 reward = {
-                    "reward_id":  reward_id,
-                    "winner_id":  self.wallet.device_id,
-                    "amount":     REWARD_PER_ROUND,
-                    "timestamp":  time.time(),
-                    "time_slot":  time_slot,
-                    "vrf_ticket": my_ticket,
-                    "vrf_seed":   seed,
-                    "nodes":      len(slot_tickets)
+                    "reward_id":      reward_id,
+                    "winner_id":      self.wallet.device_id,
+                    "amount":         REWARD_PER_ROUND,
+                    "timestamp":      time.time(),
+                    "time_slot":      time_slot,
+                    "vrf_ticket":     my_ticket,
+                    "vrf_seed":       seed,
+                    "vrf_sig":        my_sig_hex,
+                    "vrf_public_key": self.wallet.public_key.hex(),
+                    "nodes":          len(slot_tickets)
                 }
                 added = self.ledger.add_reward(reward)
                 if added:

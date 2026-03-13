@@ -1001,8 +1001,6 @@ class Node:
                 continue
 
             winner_id = min(slot_tickets, key=lambda d: slot_tickets[d])
-            import sys
-            print(f"  [DEBUG] slot={time_slot} tickets={len(slot_tickets)} winner={winner_id[:8]}", file=sys.stderr, flush=True)
 
             if winner_id == self.wallet.device_id:
                 if any(r["reward_id"] == reward_id for r in self.ledger.rewards):

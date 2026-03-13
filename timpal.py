@@ -134,23 +134,28 @@ class Ledger:
     def add_reward(self, reward_dict: dict) -> bool:
         """Add a node reward to the ledger.
         If two rewards claim the same slot, the one with the lowest VRF ticket wins.
-        This ensures all nodes converge on the same winner regardless of message order."""
+        Slot comparison runs BEFORE reward_id dedup so competing rewards are evaluated."""
         with self._lock:
-            if any(r["reward_id"] == reward_dict["reward_id"] for r in self.rewards):
-                return False
             slot = reward_dict.get("time_slot")
+            new_ticket = reward_dict.get("vrf_ticket", "z")
             if slot:
                 existing = next((r for r in self.rewards if r.get("time_slot") == slot), None)
                 if existing:
-                    new_ticket = reward_dict.get("vrf_ticket", "z")
+                    # Exact same reward already stored
+                    if existing.get("reward_id") == reward_dict["reward_id"] and existing.get("winner_id") == reward_dict.get("winner_id"):
+                        return False
                     old_ticket = existing.get("vrf_ticket", "z")
                     if new_ticket < old_ticket:
-                        # New reward has lower ticket — it wins, replace existing
+                        # Incoming reward has lower ticket — it wins, replace
                         self.rewards = [r for r in self.rewards if r.get("time_slot") != slot]
                         self.total_minted -= existing["amount"]
                     else:
                         # Existing reward has lower or equal ticket — keep it
                         return False
+            else:
+                # No slot info — fall back to reward_id dedup
+                if any(r["reward_id"] == reward_dict["reward_id"] for r in self.rewards):
+                    return False
             if self.total_minted + reward_dict["amount"] > TOTAL_SUPPLY:
                 return False
             self.rewards.append(reward_dict)

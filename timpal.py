@@ -416,7 +416,7 @@ class Network:
                             threading.Thread(target=self._sync_ledger, daemon=True).start()
             except Exception:
                 pass
-            time.sleep(30)
+            time.sleep(5 if not self.peers else 30)
 
     def _bootstrap_connect(self):
         """Connect to bootstrap server and get initial peer list."""

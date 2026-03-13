@@ -1334,11 +1334,15 @@ async function fetchExplorer() {
     const minted = data.total_minted || 0;
     const pct = (minted / TOTAL * 100).toFixed(6);
 
-    document.getElementById('exp-remaining').textContent = (data.remaining || 0).toLocaleString(undefined, {maximumFractionDigits: 0}) + ' TMPL';
-    document.getElementById('exp-rewards').textContent = (data.total_rewards || 0).toLocaleString();
-    document.getElementById('exp-minted').textContent    = minted.toLocaleString(undefined, {minimumFractionDigits: 4, maximumFractionDigits: 4}) + ' TMPL';
-    document.getElementById('exp-txs').textContent       = data.total_txs || 0;
-    if(document.getElementById('exp-nodes')) document.getElementById('exp-nodes').textContent = data.active_nodes || 0;
+    function setIfChanged(id, val) {
+      const el = document.getElementById(id);
+      if (el && val && val !== '0' && val !== '0 TMPL' && val !== '0.0000 TMPL') el.textContent = val;
+    }
+    setIfChanged('exp-remaining', (data.remaining || 0).toLocaleString(undefined, {maximumFractionDigits: 0}) + ' TMPL');
+    setIfChanged('exp-rewards', (data.total_rewards || 0).toLocaleString());
+    setIfChanged('exp-minted', minted.toLocaleString(undefined, {minimumFractionDigits: 4, maximumFractionDigits: 4}) + ' TMPL');
+    setIfChanged('exp-txs', String(data.total_txs || 0));
+    setIfChanged('exp-nodes', String(data.active_nodes || 0));
     renderNodeStats(data);
     document.getElementById('exp-pct').textContent       = pct + '%';
     document.getElementById('exp-bar').style.width       = pct + '%';
@@ -1346,34 +1350,37 @@ async function fetchExplorer() {
     // Render rewards
     const rList = document.getElementById('exp-rewards-list');
     if (data.recent_rewards && data.recent_rewards.length > 0) {
-      rList.innerHTML = data.recent_rewards.map(r =>
-        `<div class="explorer-row">
-          <span class="row-id">${r.id}</span>
-          <span class="row-amount reward">+${Number(r.amount).toFixed(8)} TMPL</span>
-          <span class="row-time">${r.time}</span>
-        </div>`
-      ).join('');
-    } else {
-      rList.innerHTML = '<div class="explorer-empty">No rewards yet</div>';
+      const rewardKey = data.recent_rewards.map(r => r.id + r.time).join('');
+      if (rewardKey !== rList.dataset.key) {
+        rList.dataset.key = rewardKey;
+        rList.innerHTML = data.recent_rewards.map(r =>
+          `<div class="explorer-row">
+            <span class="row-id">${r.id}</span>
+            <span class="row-amount reward">+${Number(r.amount).toFixed(8)} TMPL</span>
+            <span class="row-time">${r.time}</span>
+          </div>`
+        ).join('');
+      }
     }
 
     // Render transactions
     const tList = document.getElementById('exp-tx-list');
     if (data.recent_txs && data.recent_txs.length > 0) {
-      tList.innerHTML = data.recent_txs.map(t =>
-        `<div class="explorer-row">
-          <span class="row-id">${t.id}</span>
-          <span class="row-amount tx">${Number(t.amount).toFixed(8)} TMPL</span>
-          <span class="row-time">${t.time}</span>
-        </div>`
-      ).join('');
-    } else {
-      tList.innerHTML = '<div class="explorer-empty">No transactions yet</div>';
+      const txKey = data.recent_txs.map(t => t.id + t.time).join('');
+      if (txKey !== tList.dataset.key) {
+        tList.dataset.key = txKey;
+        tList.innerHTML = data.recent_txs.map(t =>
+          `<div class="explorer-row">
+            <span class="row-id">${t.id}</span>
+            <span class="row-amount tx">${Number(t.amount).toFixed(8)} TMPL</span>
+            <span class="row-time">${t.time}</span>
+          </div>`
+        ).join('');
+      }
     }
 
   } catch (e) {
-    document.getElementById('exp-rewards-list').innerHTML =
-      '<div class="explorer-empty">Connecting to network...</div>';
+    // Do nothing on error — keep showing last known data
   }
 
   setTimeout(fetchExplorer, 5000);

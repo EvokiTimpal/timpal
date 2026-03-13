@@ -182,7 +182,7 @@ class Ledger:
         }
 
     def merge(self, other_ledger: dict):
-        """Merge — one winner per time_slot, earliest timestamp wins conflict."""
+        """Merge — one winner per time_slot, lowest VRF ticket wins conflict."""
         with self._lock:
             changed = False
             for tx in other_ledger.get("transactions", []):
@@ -194,10 +194,17 @@ class Ledger:
             for reward in other_ledger.get("rewards", []):
                 rid  = reward["reward_id"]
                 slot = reward.get("time_slot")
-                if any(r["reward_id"] == rid for r in self.rewards):
+                if any(r["reward_id"] == rid and r.get("winner_id") == reward.get("winner_id") for r in self.rewards):
                     continue
                 if slot and slot in existing_slots:
-                    continue
+                    existing   = existing_slots[slot]
+                    old_ticket = existing.get("vrf_ticket", "z")
+                    new_ticket = reward.get("vrf_ticket", "z")
+                    if new_ticket < old_ticket:
+                        self.rewards = [r for r in self.rewards if r.get("time_slot") != slot]
+                        del existing_slots[slot]
+                    else:
+                        continue
                 if self.total_minted + reward["amount"] <= TOTAL_SUPPLY:
                     self.rewards.append(reward)
                     if slot:
@@ -983,13 +990,8 @@ class Node:
                 "sig":        my_sig_hex
             }
 
-            # Broadcast ticket 3 times so late-waking nodes catch it
             self.network.broadcast(vrf_msg)
-            time.sleep(1.0)
-            self.network.broadcast(vrf_msg)
-            time.sleep(1.0)
-            self.network.broadcast(vrf_msg)
-            time.sleep(REWARD_INTERVAL * 0.6 - 2.0)
+            time.sleep(REWARD_INTERVAL * 0.6)
 
             with self._vrf_lock:
                 slot_tickets = dict(self._vrf_tickets.get(time_slot, {}))

@@ -132,13 +132,25 @@ class Ledger:
             return True
 
     def add_reward(self, reward_dict: dict) -> bool:
-        """Add a node reward to the ledger."""
+        """Add a node reward to the ledger.
+        If two rewards claim the same slot, the one with the lowest VRF ticket wins.
+        This ensures all nodes converge on the same winner regardless of message order."""
         with self._lock:
             if any(r["reward_id"] == reward_dict["reward_id"] for r in self.rewards):
                 return False
             slot = reward_dict.get("time_slot")
-            if slot and any(r.get("time_slot") == slot for r in self.rewards):
-                return False
+            if slot:
+                existing = next((r for r in self.rewards if r.get("time_slot") == slot), None)
+                if existing:
+                    new_ticket = reward_dict.get("vrf_ticket", "z")
+                    old_ticket = existing.get("vrf_ticket", "z")
+                    if new_ticket < old_ticket:
+                        # New reward has lower ticket — it wins, replace existing
+                        self.rewards = [r for r in self.rewards if r.get("time_slot") != slot]
+                        self.total_minted -= existing["amount"]
+                    else:
+                        # Existing reward has lower or equal ticket — keep it
+                        return False
             if self.total_minted + reward_dict["amount"] > TOTAL_SUPPLY:
                 return False
             self.rewards.append(reward_dict)
@@ -181,8 +193,12 @@ class Ledger:
                     continue
                 if slot and slot in existing_slots:
                     existing = existing_slots[slot]
-                    if reward.get("timestamp", 0) < existing.get("timestamp", 0):
+                    new_ticket = reward.get("vrf_ticket", "z")
+                    old_ticket = existing.get("vrf_ticket", "z")
+                    if new_ticket < old_ticket:
+                        # Incoming reward has lower ticket — it wins
                         self.rewards = [r for r in self.rewards if r.get("time_slot") != slot]
+                        self.total_minted -= existing["amount"]
                         self.rewards.append(reward)
                         existing_slots[slot] = reward
                         changed = True

@@ -78,7 +78,11 @@ An OS-level file lock prevents more than one node running per device. Any second
 
 ### 3.6 Ledger Conflict Resolution
 
-Each five-second time slot has exactly one winner. If two nodes claim the same slot, the reward with the earlier timestamp is canonical. Total minted supply is recalculated from scratch after every merge.
+Each five-second time slot has exactly one winner. If two nodes claim the same slot, the reward with the lowest VRF ticket is canonical — the same rule used during the live lottery. Total minted supply is recalculated from scratch after every merge.
+
+### 3.7 Transaction Rate Limiting
+
+Each device is limited to 60 transactions per minute. This prevents spam and flood attacks while comfortably supporting all legitimate use cases. Since one node per device is enforced at the OS level, this limit applies equally to every participant on the network.
 
 ---
 

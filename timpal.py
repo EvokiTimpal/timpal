@@ -383,8 +383,40 @@ class Network:
         except Exception:
             return "127.0.0.1"
 
+    def _save_peers(self):
+        try:
+            import os, json
+            peers_file = os.path.join(os.path.expanduser("~"), ".timpal_peers.json")
+            saveable = {
+                pid: {"ip": p["ip"], "port": p["port"]}
+                for pid, p in self.peers.items()
+                if pid != self.wallet.device_id
+            }
+            with open(peers_file, "w") as f:
+                json.dump(saveable, f)
+        except Exception:
+            pass
+
+    def _load_peers(self):
+        try:
+            import os, json
+            peers_file = os.path.join(os.path.expanduser("~"), ".timpal_peers.json")
+            if os.path.exists(peers_file):
+                with open(peers_file, "r") as f:
+                    saved = json.load(f)
+                for pid, p in saved.items():
+                    if pid != self.wallet.device_id:
+                        self.peers[pid] = {
+                            "ip":        p["ip"],
+                            "port":      p["port"],
+                            "last_seen": __import__("time").time() - 25
+                        }
+        except Exception:
+            pass
+
     def start(self):
         self._running = True
+        self._load_peers()
         threading.Thread(target=self._listen_tcp,        daemon=True).start()
         threading.Thread(target=self._listen_discovery,  daemon=True).start()
         threading.Thread(target=self._broadcast_loop,    daemon=True).start()
@@ -428,8 +460,17 @@ class Network:
                             "port":      BOOTSTRAP_NODE_PORT,
                             "last_seen": time.time()
                         }
+                        for peer in data.get("peers", []):
+                            pid = peer.get("device_id")
+                            if pid and pid != self.wallet.device_id and pid not in self.peers:
+                                self.peers[pid] = {
+                                    "ip":        peer["ip"],
+                                    "port":      peer["port"],
+                                    "last_seen": time.time()
+                                }
+                        self._save_peers()
                         if not already:
-                            print(f"\n  [+] Connected to server node\n  > ", end="", flush=True)
+                            print(f"\n  [+] Connected — {len(self.peers)} peers known\n  > ", end="", flush=True)
                             threading.Thread(target=self._sync_ledger, daemon=True).start()
             except Exception:
                 pass
@@ -468,10 +509,10 @@ class Network:
                             }
                             new_peers += 1
                     if new_peers > 0:
+                        self._save_peers()
                         print(f"\n  [+] Bootstrap: found {new_peers} peers worldwide")
                         print(f"  Network size: {data.get('network_size', 0)} nodes")
                         print(f"  > ", end="", flush=True)
-                        # Sync ledger with a peer
                         threading.Thread(target=self._sync_ledger, daemon=True).start()
 
             except Exception:
@@ -682,9 +723,16 @@ class Network:
                         "port":      msg.get("port", 7779),
                         "last_seen": time.time()
                     }
+                    # Share our full peer list so they can connect to everyone we know
+                    peer_list = [
+                        {"device_id": pid, "ip": p["ip"], "port": p["port"]}
+                        for pid, p in self.peers.items()
+                        if pid != peer_id
+                    ]
                     response = json.dumps({
                         "type":      "HELLO_ACK",
-                        "device_id": self.wallet.device_id
+                        "device_id": self.wallet.device_id,
+                        "peers":     peer_list
                     }).encode()
                     conn.sendall(response)
                     threading.Thread(target=self._sync_ledger, daemon=True).start()

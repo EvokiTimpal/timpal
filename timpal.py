@@ -709,9 +709,13 @@ class Network:
                         ).start()
 
             elif msg_type == "REWARD":
-                reward_gossip_id = msg.get("reward", {}).get("reward_id", "")
+                reward = msg.get("reward", {})
+                # Include winner_id in gossip_id so competing rewards for same
+                # slot are not deduplicated — lowest ticket must reach all nodes
+                reward_gossip_id = reward.get("reward_id", "") + ":" + reward.get("winner_id", "")
                 if reward_gossip_id and reward_gossip_id not in self.seen_ids:
-                    self.on_reward(msg["reward"])
+                    self.seen_ids.add(reward_gossip_id)
+                    self.on_reward(reward)
                     threading.Thread(
                         target=self.broadcast,
                         args=(msg, None),

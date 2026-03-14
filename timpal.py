@@ -1080,7 +1080,7 @@ class Node:
 
             self.network.broadcast(vrf_msg)
             self.network._relay_to_bootstrap(vrf_msg)
-            time.sleep(REWARD_INTERVAL * 0.6)
+            time.sleep(REWARD_INTERVAL * 0.8)
 
             with self._vrf_lock:
                 slot_tickets = dict(self._vrf_tickets.get(time_slot, {}))

@@ -533,7 +533,7 @@ class Network:
             time.sleep(120)
 
     def _push_to_explorer(self):
-        """Push ledger updates to the explorer API every 30 seconds."""
+        """Push ledger updates to the explorer API every 5 seconds."""
         time.sleep(60)
         while self._running:
             try:
@@ -554,7 +554,7 @@ class Network:
                 urllib.request.urlopen(req, timeout=5)
             except Exception:
                 pass
-            time.sleep(30)
+            time.sleep(5)
 
     def _sync_ledger(self):
         """Delta sync — only request what we are missing from a peer.

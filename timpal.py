@@ -52,13 +52,16 @@ TOTAL_SUPPLY       = 250_000_000.0   # 250 million TMPL total
 REWARD_PER_ROUND   = 1.0575          # TMPL per 5-second round
 REWARD_INTERVAL    = 5.0             # Seconds between reward rounds (increased from 3s for fair ticket collection)
 TX_FEE             = 0.0             # Free for first 37.5 years
-TX_FEE_ERA2        = 0.0005          # Fee after all coins distributed
+TX_FEE_ERA2        = 0.0005          # Fee after all coins distributed — split among active nodes
 
 def get_current_fee(total_minted: float) -> float:
-    """Era 1 (0-250M minted): Free. Era 2 (250M minted): 0.0005 TMPL to broadcaster."""
+    """Era 1 (0-250M minted): Free. Era 2 (250M+ minted): 0.0005 TMPL per tx."""
     if total_minted >= TOTAL_SUPPLY:
         return TX_FEE_ERA2
     return TX_FEE
+
+def is_era2(total_minted: float) -> bool:
+    return total_minted >= TOTAL_SUPPLY
 
 
 def find_free_port(start=7779):
@@ -106,13 +109,15 @@ class Ledger:
             }, f, indent=2)
 
     def get_balance(self, device_id: str) -> float:
-        """Calculate balance from complete ledger history."""
+        """Calculate balance from complete ledger history.
+        In Era 2, sender pays amount + fee. Fee rewards credited separately."""
         balance = 0.0
         for tx in self.transactions:
             if tx["recipient_id"] == device_id:
                 balance += tx["amount"]
             if tx["sender_id"] == device_id:
                 balance -= tx["amount"]
+                balance -= tx.get("fee", 0.0)   # Era 2: deduct fee from sender
         for reward in self.rewards:
             if reward["winner_id"] == device_id:
                 balance += reward["amount"]
@@ -125,13 +130,37 @@ class Ledger:
         return self.get_balance(device_id) >= amount
 
     def add_transaction(self, tx_dict: dict) -> bool:
-        """Add a verified transaction to the ledger."""
+        """Add a verified transaction to the ledger.
+        In Era 2, sender must have enough balance for amount + fee."""
         with self._lock:
             if self.has_transaction(tx_dict["tx_id"]):
                 return False
-            if not self.can_spend(tx_dict["sender_id"], tx_dict["amount"]):
+            fee   = tx_dict.get("fee", 0.0)
+            total = tx_dict["amount"] + fee
+            if not self.can_spend(tx_dict["sender_id"], total):
                 return False
             self.transactions.append(tx_dict)
+            self.save()
+            return True
+
+    def add_fee_reward(self, slot: int, node_id: str, amount: float) -> bool:
+        """Add an Era 2 fee reward to a node for participating in a slot.
+        Fee rewards are split equally among all nodes active in the slot."""
+        with self._lock:
+            reward_id = f"fee:{slot}:{node_id}"
+            if any(r.get("reward_id") == reward_id for r in self.rewards):
+                return False
+            if amount <= 0:
+                return False
+            entry = {
+                "reward_id":  reward_id,
+                "winner_id":  node_id,
+                "amount":     round(amount, 8),
+                "timestamp":  time.time(),
+                "time_slot":  slot,
+                "type":       "fee_reward"
+            }
+            self.rewards.append(entry)
             self.save()
             return True
 
@@ -303,17 +332,19 @@ class Wallet:
 
 class Transaction:
     def __init__(self, sender_id, recipient_id, sender_pubkey,
-                 amount, timestamp=None, tx_id=None):
+                 amount, timestamp=None, tx_id=None, fee=0.0, slot=None):
         self.tx_id         = tx_id or str(uuid.uuid4())
         self.sender_id     = sender_id
         self.recipient_id  = recipient_id
         self.sender_pubkey = sender_pubkey
         self.amount        = amount
+        self.fee           = fee    # 0.0 in Era 1, 0.0005 in Era 2
+        self.slot          = slot   # Time slot when tx was created
         self.timestamp     = timestamp or time.time()
         self.signature     = None
 
     def _payload(self) -> bytes:
-        return f"{self.tx_id}:{self.sender_id}:{self.recipient_id}:{self.amount:.8f}:{self.timestamp:.4f}".encode()
+        return f"{self.tx_id}:{self.sender_id}:{self.recipient_id}:{self.amount:.8f}:{self.fee:.8f}:{self.timestamp:.4f}".encode()
 
     def sign(self, wallet: Wallet):
         self.signature = wallet.sign(self._payload())
@@ -330,6 +361,8 @@ class Transaction:
             "recipient_id":  self.recipient_id,
             "sender_pubkey": self.sender_pubkey,
             "amount":        self.amount,
+            "fee":           self.fee,
+            "slot":          self.slot,
             "timestamp":     self.timestamp,
             "signature":     self.signature
         }
@@ -341,6 +374,8 @@ class Transaction:
             recipient_id  = d["recipient_id"],
             sender_pubkey = d["sender_pubkey"],
             amount        = d["amount"],
+            fee           = d.get("fee", 0.0),
+            slot          = d.get("slot"),
             timestamp     = d["timestamp"],
             tx_id         = d["tx_id"]
         )
@@ -765,6 +800,18 @@ class Network:
                 elif not tx_gossip_id:
                     self.on_transaction(tx)
 
+            elif msg_type == "FEE_REWARDS":
+                # Era 2: peer is gossiping fee reward distributions for a slot
+                if is_era2(self.ledger.total_minted):
+                    time_slot   = msg.get("time_slot")
+                    fee_rewards = msg.get("fee_rewards", [])
+                    for fr in fee_rewards:
+                        self.ledger.add_fee_reward(
+                            time_slot,
+                            fr["winner_id"],
+                            fr["amount"]
+                        )
+
             elif msg_type in ("VRF_COMMIT", "VRF_REVEAL", "VRF_TICKET"):
                 pass   # Lottery handled via bootstrap registry — not peer gossip
 
@@ -1094,15 +1141,61 @@ class Node:
             "public_key": w["public_key"]
         }
 
-    def _claim_reward(self, winner, time_slot):
-        """Verify winner cryptographically, add to ledger, gossip to peers."""
+    def _distribute_fees(self, time_slot: int, active_nodes: list):
+        """Era 2 only: split all transaction fees for this slot equally
+        among all nodes that submitted a VRF commit (were provably active).
+        Called after slot winner is determined, only when Era 2 is active."""
+        if not is_era2(self.ledger.total_minted):
+            return
+        if not active_nodes:
+            return
+        # Sum all fees from transactions in this slot
+        slot_fees = sum(
+            tx.get("fee", 0.0)
+            for tx in self.ledger.transactions
+            if tx.get("slot") == time_slot and tx.get("fee", 0.0) > 0
+        )
+        if slot_fees <= 0:
+            return
+        per_node = round(slot_fees / len(active_nodes), 8)
+        if per_node <= 0:
+            return
+        fee_rewards = []
+        for node_id in active_nodes:
+            added = self.ledger.add_fee_reward(time_slot, node_id, per_node)
+            if added:
+                fee_rewards.append({
+                    "reward_id": f"fee:{time_slot}:{node_id}",
+                    "winner_id": node_id,
+                    "amount":    per_node,
+                    "timestamp": time.time(),
+                    "time_slot": time_slot,
+                    "type":      "fee_reward"
+                })
+        # Gossip fee rewards to peers
+        if fee_rewards:
+            self.network.broadcast({
+                "type":        "FEE_REWARDS",
+                "time_slot":   time_slot,
+                "fee_rewards": fee_rewards
+            })
+            if self.wallet.device_id in active_nodes:
+                print(f"\n  [Era 2] Fee share: +{per_node:.8f} TMPL "
+                      f"({len(active_nodes)} nodes shared {slot_fees:.8f} TMPL)\n  > ",
+                      end="", flush=True)
+
+    def _claim_reward(self, winner, time_slot, active_nodes=None):
+        """Verify winner cryptographically, add to ledger, gossip to peers.
+        In Era 2, also distribute transaction fees among active nodes."""
         if not Node._verify_ticket(
             winner["public_key"], winner["seed"],
             winner["sig"], winner["ticket"]
         ):
             return
         with self.ledger._lock:
-            if any(r.get("time_slot") == time_slot for r in self.ledger.rewards):
+            if any(r.get("time_slot") == time_slot
+                   and r.get("type") != "fee_reward"
+                   for r in self.ledger.rewards):
                 return
         reward_id = f"reward:{time_slot}"
         reward = {
@@ -1115,7 +1208,8 @@ class Node:
             "vrf_seed":       winner["seed"],
             "vrf_sig":        winner["sig"],
             "vrf_public_key": winner["public_key"],
-            "nodes":          1
+            "nodes":          len(active_nodes) if active_nodes else 1,
+            "type":           "block_reward"
         }
         added = self.ledger.add_reward(reward)
         if not added:
@@ -1135,6 +1229,9 @@ class Node:
         else:
             short = winner["winner_id"][:20]
             print(f"\n  [slot {time_slot}] Winner: {short}... +{REWARD_PER_ROUND} TMPL\n  > ", end="", flush=True)
+        # Era 2: distribute fees among active nodes
+        if active_nodes:
+            self._distribute_fees(time_slot, active_nodes)
 
     def _cleanup_slot(self, time_slot):
         """Remove lottery data older than 10 slots."""
@@ -1277,9 +1374,12 @@ class Node:
                 self._cleanup_slot(time_slot)
                 continue
 
+            # Build active node list from commits (for Era 2 fee distribution)
+            active_nodes = list(self._commits.get(time_slot, {}).keys())
+
             winner = self._pick_winner(time_slot, all_reveals)
             if winner:
-                self._claim_reward(winner, time_slot)
+                self._claim_reward(winner, time_slot, active_nodes)
 
             self._cleanup_slot(time_slot)
 
@@ -1299,11 +1399,28 @@ class Node:
             print(f"\n  Peer is not online.")
             return False
 
+        # Era 2: include fee if all coins distributed
+        fee        = get_current_fee(self.ledger.total_minted)
+        total_cost = amount + fee
+        current_slot = int(time.time() / REWARD_INTERVAL)
+
+        if fee > 0:
+            print(f"\n  Era 2 fee: {fee:.8f} TMPL (split among active nodes this slot)")
+
+        my_balance = self.ledger.get_balance(self.wallet.device_id)
+        if total_cost > my_balance:
+            print(f"\n  Insufficient balance.")
+            print(f"  Your balance : {my_balance:.8f} TMPL")
+            print(f"  Amount + fee : {total_cost:.8f} TMPL")
+            return False
+
         tx = Transaction(
             sender_id     = self.wallet.device_id,
             recipient_id  = peer_id,
             sender_pubkey = self.wallet.get_public_key_hex(),
-            amount        = amount
+            amount        = amount,
+            fee           = fee,
+            slot          = current_slot
         )
         tx.sign(self.wallet)
 
@@ -1321,6 +1438,8 @@ class Node:
 
         new_balance = self.ledger.get_balance(self.wallet.device_id)
         print(f"\n  ✓ Sent {amount:.8f} TMPL")
+        if fee > 0:
+            print(f"  Fee paid     : {fee:.8f} TMPL")
         print(f"  New balance: {new_balance:.8f} TMPL")
         return True
 

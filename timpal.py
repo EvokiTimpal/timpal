@@ -532,6 +532,30 @@ class Network:
                 pass
             time.sleep(120)
 
+    def _push_to_explorer(self):
+        """Push ledger updates to the explorer API every 30 seconds."""
+        time.sleep(60)
+        while self._running:
+            try:
+                import urllib.request
+                rewards = self.ledger.rewards[-500:]
+                txs     = self.ledger.transactions[-100:]
+                payload = json.dumps({
+                    "type":         "LEDGER_PUSH",
+                    "rewards":      rewards,
+                    "transactions": txs
+                }).encode()
+                req = urllib.request.Request(
+                    "https://timpal.org/api",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST"
+                )
+                urllib.request.urlopen(req, timeout=5)
+            except Exception:
+                pass
+            time.sleep(30)
+
     def _sync_ledger(self):
         """Delta sync — only request what we are missing from a peer.
         Sends our known slot numbers and tx IDs.
@@ -1239,6 +1263,7 @@ class Node:
         threading.Thread(target=self._reward_lottery, daemon=True).start()
         threading.Thread(target=self._control_server, daemon=True).start()
         threading.Thread(target=self._periodic_ledger_sync, daemon=True).start()
+        threading.Thread(target=self.network._push_to_explorer, daemon=True).start()
         self._cli()
 
     def _cli(self):

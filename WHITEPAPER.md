@@ -99,7 +99,7 @@ Each device is limited to 60 transactions per minute. This prevents spam and flo
 
 - No new TMPL can ever be created — supply is fixed at 250,000,000
 - Every transaction carries a fee of 0.0005 TMPL
-- The fee goes to the node that first broadcast the transaction
+- The fee for each 5-second slot is collected and split equally among all nodes that submitted a VRF commit for that slot — nodes that were provably active and participating in the network at that moment. At high transaction volume, routing all fees to a single winner would create a centralizing force — one lucky node capturing disproportionate value every slot. Splitting among all active participants keeps the reward structure flat and fair regardless of network size. This mechanism uses the existing commit registry infrastructure with zero additional overhead.
 - The protocol is self-sustaining forever with no inflation
 
 ---
@@ -115,7 +115,7 @@ Each device is limited to 60 transactions per minute. This prevents spam and flo
 | Distribution Period | 37.5 years |
 | Transaction Fee (Era 1) | Free |
 | Transaction Fee (Era 2) | 0.0005 TMPL |
-| Fee Recipient | Node that broadcast the transaction |
+| Fee Recipient | All nodes that submitted a VRF commit for the slot (split equally) |
 | Pre-mine | None |
 | Insider Allocation | None |
 
@@ -146,6 +146,16 @@ Every reward includes a cryptographic ticket derived from the winner's private k
 ### 6.5 Bootstrap Server
 
 Single point of failure for new node discovery only — not for network operation. Existing nodes continue peer-to-peer if bootstrap goes offline. Community-operated bootstrap servers are welcome.
+
+---
+
+### 6.6 Era 2 Fee Distribution
+
+In Era 2, fee distribution is designed to resist centralization. Routing all transaction fees to the slot winner would mean one node captures all fee income every 5 seconds — a structural advantage for well-connected or high-uptime nodes that compounds over time.
+
+Instead, fees collected in each slot are split equally among all nodes that submitted a VRF commit for that slot. A VRF commit is cryptographic proof that a node was online and participating — it cannot be faked or submitted retroactively. The commit registry already exists for the lottery and requires no additional infrastructure.
+
+The result: fee income scales with uptime, not luck. Any node running continuously earns a consistent share of network fees proportional to its participation, with no single node able to dominate.
 
 ---
 

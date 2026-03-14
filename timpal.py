@@ -1039,12 +1039,10 @@ class Node:
             sock.close()
             data = json.loads(resp.decode())
             status = data.get("status")
-            print(f"  [debug] Ticket submit slot {time_slot} -> status={status}")
             if status == "late":
                 print(f"  [lottery] Ticket for slot {time_slot} arrived late")
             return status == "accepted"
         except Exception as e:
-            print(f"  [debug] Ticket submit FAILED slot {time_slot}: {e}")
             return False
 
     def _get_winner_from_bootstrap(self, time_slot, retries=5):
@@ -1074,8 +1072,7 @@ class Node:
                 elif status == "pending":
                     time.sleep(0.5)
                     continue
-            except Exception as e:
-                print(f"  [debug] GET_WINNER error: {e}")
+            except Exception:
                 time.sleep(0.5)
         return None
 
@@ -1102,7 +1099,6 @@ class Node:
             "nodes":          1
         }
         added = self.ledger.add_reward(reward)
-        print(f"  [debug] add_reward result: {added}")
         if not added:
             return
         gossip_id = reward_id + ":" + winner["winner_id"]
@@ -1152,10 +1148,7 @@ class Node:
 
             winner = self._get_winner_from_bootstrap(time_slot)
             if winner:
-                print(f"  [debug] Winner received: {winner.get('winner_id','?')[:20]}... ticket={winner.get('ticket','?')[:12]}...")
                 self._process_winner(winner, time_slot)
-            else:
-                print(f"  [debug] No winner returned from bootstrap for slot {time_slot}")
 
     def send(self, peer_id: str, amount: float) -> bool:
         if amount <= 0:

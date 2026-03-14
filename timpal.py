@@ -1019,50 +1019,131 @@ class Node:
         except Exception:
             return False
 
+    def _submit_ticket_to_bootstrap(self, time_slot, ticket, sig_hex, seed):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(3.0)
+            sock.connect((BOOTSTRAP_HOST, BOOTSTRAP_PORT))
+            sock.sendall(json.dumps({
+                "type":       "VRF_TICKET",
+                "device_id":  self.wallet.device_id,
+                "slot":       time_slot,
+                "ticket":     ticket,
+                "sig":        sig_hex,
+                "seed":       seed,
+                "public_key": self.wallet.public_key.hex(),
+                "port":       self.network.port
+            }).encode())
+            sock.shutdown(socket.SHUT_WR)
+            resp = sock.recv(4096)
+            sock.close()
+            data = json.loads(resp.decode())
+            status = data.get("status")
+            if status == "late":
+                print(f"  [lottery] Ticket for slot {time_slot} arrived late")
+            return status == "accepted"
+        except Exception:
+            return False
+
+    def _get_winner_from_bootstrap(self, time_slot, retries=5):
+        for attempt in range(retries):
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(5.0)
+                sock.connect((BOOTSTRAP_HOST, BOOTSTRAP_PORT))
+                sock.sendall(json.dumps({
+                    "type": "GET_WINNER",
+                    "slot": time_slot
+                }).encode())
+                sock.shutdown(socket.SHUT_WR)
+                resp = sock.recv(4096)
+                sock.close()
+                data = json.loads(resp.decode())
+                status = data.get("status")
+                if status == "winner":
+                    return data
+                elif status == "no_tickets":
+                    return None
+                elif status == "pending":
+                    time.sleep(0.5)
+                    continue
+            except Exception:
+                time.sleep(0.5)
+        return None
+
+    def _process_winner(self, winner, time_slot):
+        if not Node._verify_ticket(
+            winner["public_key"], winner["seed"], winner["sig"], winner["ticket"]
+        ):
+            print(f"  [!] Winner verification FAILED for slot {time_slot} — ignoring")
+            return
+        with self.ledger._lock:
+            if any(r.get("time_slot") == time_slot for r in self.ledger.rewards):
+                return
+        reward_id = f"reward:{time_slot}"
+        reward = {
+            "reward_id":      reward_id,
+            "winner_id":      winner["winner_id"],
+            "amount":         REWARD_PER_ROUND,
+            "timestamp":      time.time(),
+            "time_slot":      time_slot,
+            "vrf_ticket":     winner["ticket"],
+            "vrf_seed":       winner["seed"],
+            "vrf_sig":        winner["sig"],
+            "vrf_public_key": winner["public_key"],
+            "nodes":          1
+        }
+        added = self.ledger.add_reward(reward)
+        if not added:
+            return
+        gossip_id = reward_id + ":" + winner["winner_id"]
+        self.network.seen_ids.add(gossip_id)
+        self.network.broadcast({"type": "REWARD", "reward": reward})
+        if winner["winner_id"] == self.wallet.device_id:
+            balance = self.ledger.get_balance(self.wallet.device_id)
+            print(f"\n  ╔══════════════════════════════════╗")
+            print(f"  ║       REWARD WON! ★              ║")
+            print(f"  ╠══════════════════════════════════╣")
+            print(f"  ║  Amount  : {REWARD_PER_ROUND:.8f} TMPL")
+            print(f"  ║  Balance : {balance:.8f} TMPL")
+            print(f"  ╚══════════════════════════════════╝")
+            print(f"  > ", end="", flush=True)
+        else:
+            short = winner["winner_id"][:20]
+            print(f"\n  [slot {time_slot}] Winner: {short}... +{REWARD_PER_ROUND} TMPL\n  > ", end="", flush=True)
+
     def _reward_lottery(self):
-        """Pure independent VRF lottery.
-        Each node computes its own ticket and broadcasts its reward.
-        Merge logic ensures only the lowest ticket winner survives.
-        No ticket exchange. Works behind NAT/CGNAT.
-        Scales to any number of nodes with zero coordination overhead."""
-
-        # Wait for network connections before joining lottery
+        """Bootstrap-coordinated VRF lottery — zero phantom rewards.
+        All communication is outbound to bootstrap. CGNAT-safe."""
         time.sleep(45)
-
         while self.network._running:
-            # Align to absolute slot boundary
-            next_slot_time = (int(time.time() / REWARD_INTERVAL) + 1) * REWARD_INTERVAL
-            time.sleep(max(0.1, next_slot_time - time.time()))
+            now            = time.time()
+            next_slot_time = (int(now / REWARD_INTERVAL) + 1) * REWARD_INTERVAL
+            time.sleep(max(0.05, next_slot_time - time.time()))
 
             if self.ledger.total_minted >= TOTAL_SUPPLY:
                 continue
 
-            time_slot = int(time.time() / REWARD_INTERVAL)
-            reward_id = f"reward:{time_slot}"
+            time_slot  = int(time.time() / REWARD_INTERVAL)
+            slot_start = time_slot * REWARD_INTERVAL
 
-            if any(r["reward_id"] == reward_id for r in self.ledger.rewards):
+            if any(r.get("time_slot") == time_slot for r in self.ledger.rewards):
                 continue
 
-            my_ticket, my_sig_hex, seed = self._vrf_ticket(time_slot)
+            ticket, sig_hex, seed = self._vrf_ticket(time_slot)
+            self._submit_ticket_to_bootstrap(time_slot, ticket, sig_hex, seed)
 
-            reward = {
-                "reward_id":      reward_id,
-                "winner_id":      self.wallet.device_id,
-                "amount":         REWARD_PER_ROUND,
-                "timestamp":      time.time(),
-                "time_slot":      time_slot,
-                "vrf_ticket":     my_ticket,
-                "vrf_seed":       seed,
-                "vrf_sig":        my_sig_hex,
-                "vrf_public_key": self.wallet.public_key.hex(),
-                "nodes":          1
-            }
-            added = self.ledger.add_reward(reward)
-            if added:
-                self.network.broadcast({"type": "REWARD", "reward": reward})
-                balance = self.ledger.get_balance(self.wallet.device_id)
-                if not self._sending:
-                    print(f"\n  ★ Reward won! +{REWARD_PER_ROUND} TMPL | Balance: {balance:.8f}\n  > ", end="", flush=True)
+            wait_until = slot_start + 4.5
+            remaining  = wait_until - time.time()
+            if remaining > 0:
+                time.sleep(remaining)
+
+            if any(r.get("time_slot") == time_slot for r in self.ledger.rewards):
+                continue
+
+            winner = self._get_winner_from_bootstrap(time_slot)
+            if winner:
+                self._process_winner(winner, time_slot)
 
     def send(self, peer_id: str, amount: float) -> bool:
         if amount <= 0:

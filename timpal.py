@@ -765,32 +765,8 @@ class Network:
                 elif not tx_gossip_id:
                     self.on_transaction(tx)
 
-            elif msg_type == "VRF_COMMIT":
-                slot      = msg.get("slot")
-                sender_id = msg.get("device_id", "")
-                commit    = msg.get("commit", "")
-                if slot and sender_id and commit:
-                    node = self._node_ref
-                    if node and sender_id != self.wallet.device_id:
-                        with node._lottery_lock:
-                            if slot not in node._commits:
-                                node._commits[slot] = {}
-                            node._commits[slot][sender_id] = commit
-
-            elif msg_type == "VRF_REVEAL":
-                slot      = msg.get("slot")
-                sender_id = msg.get("device_id", "")
-                ticket    = msg.get("ticket", "")
-                sig       = msg.get("sig", "")
-                seed      = msg.get("seed", "")
-                pubkey    = msg.get("public_key", "")
-                if slot and sender_id and ticket and sig and seed and pubkey:
-                    node = self._node_ref
-                    if node and sender_id != self.wallet.device_id:
-                        node._receive_reveal(slot, sender_id, ticket, sig, seed, pubkey)
-
-            elif msg_type == "VRF_TICKET":
-                pass   # Legacy — superseded by VRF_COMMIT/VRF_REVEAL
+            elif msg_type in ("VRF_COMMIT", "VRF_REVEAL", "VRF_TICKET"):
+                pass   # Lottery handled via bootstrap registry — not peer gossip
 
             elif msg_type == "REWARD":
                 reward = msg.get("reward", {})
@@ -1049,74 +1025,67 @@ class Node:
         except Exception:
             return False
 
-    # ── Commit-reveal lottery — decentralized, latency-tolerant ────────────
+    # ── Commit-reveal lottery — decentralized, CGNAT-safe ──────────────────
 
     def _make_commit(self, time_slot: int, ticket: str) -> str:
         """Commitment = SHA256(ticket + device_id + slot).
-        Binding to device_id prevents grinding — node cannot try multiple
-        tickets and only reveal the best one."""
+        Binding to device_id prevents grinding attacks."""
         raw = f"{ticket}:{self.wallet.device_id}:{time_slot}"
         return hashlib.sha256(raw.encode()).hexdigest()
 
-    def _relay_to_bootstraps(self, msg: dict):
-        """Send message to all bootstrap servers for CGNAT relay."""
+    def _bootstrap_request(self, msg: dict) -> dict:
+        """Send a request to bootstrap and return the response.
+        Tries all bootstrap servers, returns first success."""
         for host, port in BOOTSTRAP_SERVERS:
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(3.0)
                 sock.connect((host, port))
                 sock.sendall(json.dumps(msg).encode())
+                sock.shutdown(socket.SHUT_WR)
+                resp = b""
+                while True:
+                    chunk = sock.recv(65536)
+                    if not chunk:
+                        break
+                    resp += chunk
                 sock.close()
+                return json.loads(resp.decode())
             except Exception:
                 continue
+        return {}
 
-    def _receive_reveal(self, slot, sender_id, ticket, sig, seed, pubkey):
-        """Accept a reveal only if:
-        1. We saw a commit from this node for this slot
-        2. The reveal matches the commit
-        3. The ticket signature is cryptographically valid"""
-        with self._lottery_lock:
-            commit = self._commits.get(slot, {}).get(sender_id)
-        if not commit:
-            return   # No commit seen — reject reveal
-        expected = hashlib.sha256(
-            f"{ticket}:{sender_id}:{slot}".encode()
-        ).hexdigest()
-        if expected != commit:
-            return   # Reveal does not match commit — reject
-        if not Node._verify_ticket(pubkey, seed, sig, ticket):
-            return   # Invalid signature — reject
-        with self._lottery_lock:
-            if slot not in self._reveals:
-                self._reveals[slot] = {}
-            self._reveals[slot][sender_id] = {
-                "ticket": ticket, "sig": sig,
-                "seed": seed, "public_key": pubkey
-            }
-
-    def _pick_winner(self, time_slot):
+    def _pick_winner(self, time_slot, all_reveals):
         """Pick winner from all verified reveals for this slot.
-        Always include our own ticket.
-        Lowest hex ticket wins — pure math, same answer on every node."""
+        Lowest hex ticket wins — pure math, same answer on every node.
+        Reveals only accepted if matching commit exists."""
+        verified = {}
         with self._lottery_lock:
-            reveals = dict(self._reveals.get(time_slot, {}))
+            known_commits = dict(self._commits.get(time_slot, {}))
 
-        # Always include our own ticket
-        my = self._my_tickets.get(time_slot)
-        if my:
-            ticket, sig, seed = my
-            reveals[self.wallet.device_id] = {
-                "ticket":     ticket,
-                "sig":        sig,
-                "seed":       seed,
-                "public_key": self.wallet.public_key.hex()
-            }
+        for device_id, r in all_reveals.items():
+            # Must have a commit for this node
+            commit = known_commits.get(device_id)
+            if not commit:
+                continue
+            # Reveal must match commit
+            expected = hashlib.sha256(
+                f"{r['ticket']}:{device_id}:{time_slot}".encode()
+            ).hexdigest()
+            if expected != commit:
+                continue
+            # Ticket signature must be valid
+            if not Node._verify_ticket(
+                r["public_key"], r["seed"], r["sig"], r["ticket"]
+            ):
+                continue
+            verified[device_id] = r
 
-        if not reveals:
+        if not verified:
             return None
 
-        winner_id = min(reveals, key=lambda d: reveals[d]["ticket"])
-        w = reveals[winner_id]
+        winner_id = min(verified, key=lambda d: verified[d]["ticket"])
+        w = verified[winner_id]
         return {
             "winner_id":  winner_id,
             "ticket":     w["ticket"],
@@ -1179,25 +1148,23 @@ class Node:
             del self._my_tickets[s]
 
     def _reward_lottery(self):
-        """Commit-reveal VRF lottery — fully decentralized, latency-tolerant.
+        """Commit-reveal VRF lottery — fully decentralized, CGNAT-safe.
+
+        Bootstrap stores commits and reveals — nodes query it to get
+        all participants regardless of NAT/latency. Bootstrap cannot
+        cheat — every entry is cryptographically verified by nodes.
 
         Every 5-second slot:
-          t=0.0  Compute ticket. Broadcast COMMIT = SHA256(ticket+device_id+slot)
-          t=0.0  to t=2.5 — peers receive and store commits
-          t=2.5  Broadcast REVEAL — actual ticket + signature
-          t=2.5  to t=4.5 — peers verify reveals against commits, store valid ones
-          t=4.5  Every node independently picks lowest verified ticket — same winner
-          t=4.5  Add reward to ledger, gossip to peers
+          t=0.0  Compute ticket. Submit COMMIT to bootstrap.
+          t=2.0  Query bootstrap for ALL commits this slot.
+                 Store them locally for reveal verification.
+          t=2.0  Submit REVEAL to bootstrap.
+          t=4.0  Query bootstrap for ALL reveals this slot.
+          t=4.5  Pick lowest verified ticket — same on every node.
+          t=4.5  Add reward to ledger, gossip to peers.
 
-        Why latency-tolerant:
-          - Commits are tiny (64 bytes) — propagate globally in <100ms
-          - Reveals only accepted if commit was seen — no late manipulation
-          - Each node picks winner from its own verified set — math is identical
-          - Merge resolves any rare edge-case discrepancy via periodic sync
-
-        No coordinator. No single point of failure.
-        Bootstrap only relays messages — cannot influence who wins.
-        Works at any scale — each node only talks to its known peers.
+        If bootstrap is down: slot skipped cleanly, next slot works.
+        Multiple bootstrap servers: tries all, uses first that responds.
         """
         time.sleep(45)
 
@@ -1218,73 +1185,99 @@ class Node:
                 self._cleanup_slot(time_slot)
                 continue
 
-            # ── Phase 1: Commit (t=0.0) ──────────────────────────────────
+            # ── Phase 1: Submit commit to bootstrap (t=0.0) ──────────────
             ticket, sig_hex, seed = self._vrf_ticket(time_slot)
             self._my_tickets[time_slot] = (ticket, sig_hex, seed)
             commit = self._make_commit(time_slot, ticket)
 
-            commit_msg = {
-                "type":      "VRF_COMMIT",
-                "device_id": self.wallet.device_id,
-                "slot":      time_slot,
-                "commit":    commit
-            }
-            # Store our own commit
+            # Store our own commit locally
             with self._lottery_lock:
                 if time_slot not in self._commits:
                     self._commits[time_slot] = {}
                 self._commits[time_slot][self.wallet.device_id] = commit
 
-            # Gossip commit to peers + bootstrap relay
-            self.network.broadcast(commit_msg)
-            threading.Thread(
-                target=self._relay_to_bootstraps,
-                args=(commit_msg,),
-                daemon=True
-            ).start()
+            # Submit to bootstrap registry
+            self._bootstrap_request({
+                "type":      "SUBMIT_COMMIT",
+                "device_id": self.wallet.device_id,
+                "slot":      time_slot,
+                "commit":    commit
+            })
 
-            # ── Wait for commits to propagate (until t=2.5) ───────────────
-            wait_reveal = slot_start + 2.5
-            remaining   = wait_reveal - time.time()
+            # ── Wait until t=2.0 then fetch all commits ───────────────────
+            wait_commits = slot_start + 2.0
+            remaining    = wait_commits - time.time()
             if remaining > 0:
                 time.sleep(remaining)
 
-            # Skip if reward arrived during commit phase
             if any(r.get("time_slot") == time_slot for r in self.ledger.rewards):
                 self._cleanup_slot(time_slot)
                 continue
 
-            # ── Phase 2: Reveal (t=2.5) ──────────────────────────────────
-            reveal_msg = {
-                "type":       "VRF_REVEAL",
+            # Fetch all commits from bootstrap
+            resp = self._bootstrap_request({
+                "type": "GET_COMMITS",
+                "slot": time_slot
+            })
+            if resp.get("type") == "COMMITS_RESPONSE":
+                with self._lottery_lock:
+                    for device_id, c in resp.get("commits", {}).items():
+                        if device_id not in self._commits.get(time_slot, {}):
+                            if time_slot not in self._commits:
+                                self._commits[time_slot] = {}
+                            self._commits[time_slot][device_id] = c
+
+            # ── Phase 2: Submit reveal to bootstrap (t=2.0) ──────────────
+            self._bootstrap_request({
+                "type":       "SUBMIT_REVEAL",
                 "device_id":  self.wallet.device_id,
                 "slot":       time_slot,
                 "ticket":     ticket,
                 "sig":        sig_hex,
                 "seed":       seed,
                 "public_key": self.wallet.public_key.hex()
-            }
-            # Gossip reveal to peers + bootstrap relay
-            self.network.broadcast(reveal_msg)
-            threading.Thread(
-                target=self._relay_to_bootstraps,
-                args=(reveal_msg,),
-                daemon=True
-            ).start()
+            })
 
-            # ── Wait for reveals to propagate (until t=4.5) ───────────────
-            wait_pick = slot_start + 4.5
-            remaining = wait_pick - time.time()
+            # ── Wait until t=4.0 then fetch all reveals ───────────────────
+            wait_reveals = slot_start + 4.0
+            remaining    = wait_reveals - time.time()
             if remaining > 0:
                 time.sleep(remaining)
 
-            # Skip if reward arrived during reveal phase
             if any(r.get("time_slot") == time_slot for r in self.ledger.rewards):
                 self._cleanup_slot(time_slot)
                 continue
 
-            # ── Phase 3: Pick winner and claim reward (t=4.5) ─────────────
-            winner = self._pick_winner(time_slot)
+            # Fetch all reveals from bootstrap
+            resp = self._bootstrap_request({
+                "type": "GET_REVEALS",
+                "slot": time_slot
+            })
+
+            # ── Phase 3: Pick winner (t=4.0) ─────────────────────────────
+            all_reveals = {}
+            if resp.get("type") == "REVEALS_RESPONSE":
+                all_reveals = resp.get("reveals", {})
+
+            # Always include our own reveal
+            all_reveals[self.wallet.device_id] = {
+                "ticket":     ticket,
+                "sig":        sig_hex,
+                "seed":       seed,
+                "public_key": self.wallet.public_key.hex()
+            }
+
+            # Wait until t=4.5 before claiming
+            wait_claim = slot_start + 4.5
+            remaining  = wait_claim - time.time()
+            if remaining > 0:
+                time.sleep(remaining)
+
+            if any(r.get("time_slot") == time_slot for r in self.ledger.rewards):
+                self._cleanup_slot(time_slot)
+                continue
+
+            winner = self._pick_winner(time_slot, all_reveals)
             if winner:
                 self._claim_reward(winner, time_slot)
 

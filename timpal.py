@@ -1217,8 +1217,8 @@ class Node:
             try:
                 import urllib.request, ssl
                 with self.ledger._lock:
-                    rewards = list(self.ledger.rewards[-500:])
-                    txs     = list(self.ledger.transactions[-100:])
+                    rewards = list(self.ledger.rewards[-50:])
+                    txs     = list(self.ledger.transactions[-20:])
                 payload = json.dumps({
                     "type":         "LEDGER_PUSH",
                     "rewards":      rewards,

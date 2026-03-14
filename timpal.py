@@ -1039,10 +1039,12 @@ class Node:
             sock.close()
             data = json.loads(resp.decode())
             status = data.get("status")
+            print(f"  [debug] Ticket submit slot {time_slot} -> status={status}")
             if status == "late":
                 print(f"  [lottery] Ticket for slot {time_slot} arrived late")
             return status == "accepted"
-        except Exception:
+        except Exception as e:
+            print(f"  [debug] Ticket submit FAILED slot {time_slot}: {e}")
             return False
 
     def _get_winner_from_bootstrap(self, time_slot, retries=5):

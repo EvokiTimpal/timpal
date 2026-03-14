@@ -1058,7 +1058,12 @@ class Node:
                     "slot": time_slot
                 }).encode())
                 sock.shutdown(socket.SHUT_WR)
-                resp = sock.recv(4096)
+                resp = b""
+                while True:
+                    chunk = sock.recv(65536)
+                    if not chunk:
+                        break
+                    resp += chunk
                 sock.close()
                 data = json.loads(resp.decode())
                 status = data.get("status")
@@ -1069,7 +1074,8 @@ class Node:
                 elif status == "pending":
                     time.sleep(0.5)
                     continue
-            except Exception:
+            except Exception as e:
+                print(f"  [debug] GET_WINNER error: {e}")
                 time.sleep(0.5)
         return None
 

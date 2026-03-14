@@ -1094,6 +1094,7 @@ class Node:
             "nodes":          1
         }
         added = self.ledger.add_reward(reward)
+        print(f"  [debug] add_reward result: {added}")
         if not added:
             return
         gossip_id = reward_id + ":" + winner["winner_id"]
@@ -1143,7 +1144,10 @@ class Node:
 
             winner = self._get_winner_from_bootstrap(time_slot)
             if winner:
+                print(f"  [debug] Winner received: {winner.get('winner_id','?')[:20]}... ticket={winner.get('ticket','?')[:12]}...")
                 self._process_winner(winner, time_slot)
+            else:
+                print(f"  [debug] No winner returned from bootstrap for slot {time_slot}")
 
     def send(self, peer_id: str, amount: float) -> bool:
         if amount <= 0:

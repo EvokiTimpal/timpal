@@ -383,6 +383,17 @@ class Network:
         except Exception:
             return "127.0.0.1"
 
+    def _relay_to_bootstrap(self, msg: dict):
+        """Send a message to the bootstrap server for relay to CGNAT peers."""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(2.0)
+            sock.connect((BOOTSTRAP_HOST, BOOTSTRAP_PORT))
+            sock.sendall(json.dumps(msg).encode())
+            sock.close()
+        except Exception:
+            pass
+
     def _save_peers(self):
         try:
             import os, json
@@ -1068,11 +1079,17 @@ class Node:
             }
 
             self.network.broadcast(vrf_msg)
+            self.network._relay_to_bootstrap(vrf_msg)
             time.sleep(REWARD_INTERVAL * 0.6)
 
             with self._vrf_lock:
                 slot_tickets = dict(self._vrf_tickets.get(time_slot, {}))
             slot_tickets[self.wallet.device_id] = my_ticket
+
+            # Only count tickets from currently online peers
+            online_peers = set(self.network.get_online_peers().keys())
+            online_peers.add(self.wallet.device_id)
+            slot_tickets = {d: t for d, t in slot_tickets.items() if d in online_peers}
 
             if not slot_tickets:
                 continue

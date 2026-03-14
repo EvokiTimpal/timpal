@@ -4,7 +4,8 @@ TIMPAL Bootstrap Server
 -----------------------
 This is the door to the Timpal network.
 It does NOT store value. It does NOT control anything.
-It simply introduces new nodes to existing nodes.
+It introduces new nodes to existing nodes AND relays VRF tickets
+so nodes behind CGNAT can participate in the lottery fairly.
 
 Run this on your Hetzner server:
     python3 bootstrap.py
@@ -14,7 +15,6 @@ import socket
 import threading
 import json
 import time
-import hashlib
 
 PORT    = 7777
 VERSION = "1.0"
@@ -36,6 +36,21 @@ def clean_old_peers():
         if before != after:
             print(f"  Cleaned {before - after} stale peers. Active: {after}")
 
+def relay_to_all(msg: dict, exclude_id: str = None):
+    """Relay a message to all known peers except the sender."""
+    msg_bytes = json.dumps(msg).encode()
+    with lock:
+        peer_list = [(pid, p["ip"], p["port"]) for pid, p in peers.items() if pid != exclude_id]
+    for pid, ip, port in peer_list:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(2.0)
+            s.connect((ip, port))
+            s.sendall(msg_bytes)
+            s.close()
+        except Exception:
+            continue
+
 def handle_client(conn, addr):
     try:
         data = b""
@@ -51,7 +66,6 @@ def handle_client(conn, addr):
         msg_type = msg.get("type")
 
         if msg_type == "HELLO":
-            # New node announcing itself
             device_id = msg.get("device_id", "")
             port      = msg.get("port", PORT)
             ip        = addr[0]
@@ -63,7 +77,6 @@ def handle_client(conn, addr):
                     "port":      port,
                     "last_seen": time.time()
                 }
-                # Send back list of all OTHER known peers
                 peer_list = [
                     {"device_id": pid, "ip": p["ip"], "port": p["port"]}
                     for pid, p in peers.items()
@@ -71,8 +84,8 @@ def handle_client(conn, addr):
                 ]
 
             response = json.dumps({
-                "type":       "PEERS",
-                "peers":      peer_list,
+                "type":         "PEERS",
+                "peers":        peer_list,
                 "network_size": len(peers)
             }).encode()
             conn.sendall(response)
@@ -80,8 +93,18 @@ def handle_client(conn, addr):
             if is_new:
                 print(f"  [+] New node: {device_id[:20]}... from {ip}:{port} | Total: {len(peers)}")
 
+        elif msg_type == "VRF_TICKET":
+            device_id = msg.get("device_id", "")
+            with lock:
+                if device_id in peers:
+                    peers[device_id]["last_seen"] = time.time()
+            threading.Thread(
+                target=relay_to_all,
+                args=(msg, device_id),
+                daemon=True
+            ).start()
+
         elif msg_type == "PING":
-            # Node checking if bootstrap is alive
             device_id = msg.get("device_id", "")
             with lock:
                 if device_id in peers:
@@ -89,7 +112,6 @@ def handle_client(conn, addr):
             conn.sendall(json.dumps({"type": "PONG", "network_size": len(peers)}).encode())
 
         elif msg_type == "GET_PEERS":
-            # Node asking for fresh peer list
             with lock:
                 peer_list = [
                     {"device_id": pid, "ip": p["ip"], "port": p["port"]}
@@ -97,19 +119,18 @@ def handle_client(conn, addr):
                 ]
             conn.sendall(json.dumps({"type": "PEERS", "peers": peer_list}).encode())
 
-    except Exception as e:
+    except Exception:
         pass
     finally:
         conn.close()
 
 def main():
     print("═" * 50)
-    print("  TIMPAL Bootstrap Server v1.0")
+    print("  TIMPAL Bootstrap Server v1.1")
     print("  Plan B for Humanity")
     print("═" * 50)
     print(f"  Listening on port {PORT}")
-    print(f"  This server is the door to the Timpal network.")
-    print(f"  It stores no value and controls nothing.")
+    print(f"  VRF ticket relay enabled for CGNAT nodes")
     print("═" * 50 + "\n")
 
     threading.Thread(target=clean_old_peers, daemon=True).start()
@@ -132,7 +153,7 @@ def main():
         except KeyboardInterrupt:
             print("\n  Bootstrap server shutting down.")
             break
-        except Exception as e:
+        except Exception:
             continue
 
 if __name__ == "__main__":

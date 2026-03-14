@@ -1215,7 +1215,7 @@ class Node:
         time.sleep(60)
         while self.network._running:
             try:
-                import urllib.request
+                import urllib.request, ssl
                 rewards = self.ledger.rewards[-500:]
                 txs     = self.ledger.transactions[-100:]
                 payload = json.dumps({
@@ -1229,7 +1229,10 @@ class Node:
                     headers={"Content-Type": "application/json"},
                     method="POST"
                 )
-                urllib.request.urlopen(req, timeout=5)
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                urllib.request.urlopen(req, timeout=5, context=ctx)
             except Exception:
                 pass
             time.sleep(5)

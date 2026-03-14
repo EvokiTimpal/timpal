@@ -1216,8 +1216,9 @@ class Node:
         while self.network._running:
             try:
                 import urllib.request, ssl
-                rewards = self.ledger.rewards[-500:]
-                txs     = self.ledger.transactions[-100:]
+                with self.ledger._lock:
+                    rewards = list(self.ledger.rewards[-500:])
+                    txs     = list(self.ledger.transactions[-100:])
                 payload = json.dumps({
                     "type":         "LEDGER_PUSH",
                     "rewards":      rewards,
@@ -1233,8 +1234,8 @@ class Node:
                 ctx.check_hostname = False
                 ctx.verify_mode = ssl.CERT_NONE
                 urllib.request.urlopen(req, timeout=5, context=ctx)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"  [push error] {e}")
             time.sleep(5)
 
     def _periodic_ledger_sync(self):

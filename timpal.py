@@ -1705,15 +1705,6 @@ class Node:
                 pass
             time.sleep(30)
 
-    def _periodic_ledger_sync(self):
-        """Re-sync ledger every 5 minutes to catch up on missed history."""
-        time.sleep(60)
-        while self.network._running:
-            peers = self.network.get_online_peers()
-            if peers:
-                self.network._sync_ledger()
-            time.sleep(300)
-
     def start(self):
         print("\n" + "═" * 52)
         print("  TIMPAL v2.0 — Plan B for Humanity")
@@ -1733,7 +1724,6 @@ class Node:
 
         threading.Thread(target=self._reward_lottery, daemon=True).start()
         threading.Thread(target=self._control_server, daemon=True).start()
-        threading.Thread(target=self._periodic_ledger_sync, daemon=True).start()
         threading.Thread(target=self._push_to_explorer, daemon=True).start()
         threading.Thread(target=self._checkpoint_loop, daemon=True).start()
         self._cli()

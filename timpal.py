@@ -53,6 +53,8 @@ REWARD_PER_ROUND   = 1.0575          # TMPL per 5-second round
 REWARD_INTERVAL    = 5.0             # Seconds between reward rounds (increased from 3s for fair ticket collection)
 TX_FEE             = 0.0             # Free for first 37.5 years
 TX_FEE_ERA2        = 0.0005          # Fee after all coins distributed — split among active nodes
+CHECKPOINT_INTERVAL = 241_920        # Slots between checkpoints (2 weeks)
+CHECKPOINT_BUFFER   = 120            # Slots to wait before pruning (10 minutes)
 
 def get_current_fee(total_minted: float) -> float:
     """Era 1 (0-250M minted): Free. Era 2 (250M+ minted): 0.0005 TMPL per tx."""
@@ -85,7 +87,8 @@ class Ledger:
         self.transactions  = []   # All transactions ever
         self.rewards       = []   # All node rewards ever
         self.total_minted  = 0.0
-        self._lock         = threading.Lock()
+        self.checkpoints   = []   # Checkpoint snapshots
+        self._lock         = threading.RLock()
         self._load()
 
     def _load(self):
@@ -96,6 +99,7 @@ class Ledger:
                 self.transactions = data.get("transactions", [])
                 self.rewards      = data.get("rewards", [])
                 self.total_minted = data.get("total_minted", 0.0)
+                self.checkpoints  = data.get("checkpoints", [])
             except Exception:
                 pass
 
@@ -105,13 +109,16 @@ class Ledger:
                 "version":      VERSION,
                 "transactions": self.transactions,
                 "rewards":      self.rewards,
-                "total_minted": self.total_minted
+                "total_minted": self.total_minted,
+                "checkpoints":  self.checkpoints
             }, f, indent=2)
 
     def get_balance(self, device_id: str) -> float:
-        """Calculate balance from complete ledger history.
+        """Calculate balance from checkpoint snapshot + post-checkpoint history.
         In Era 2, sender pays amount + fee. Fee rewards credited separately."""
         balance = 0.0
+        if self.checkpoints:
+            balance = self.checkpoints[-1]["balances"].get(device_id, 0.0)
         for tx in self.transactions:
             if tx["recipient_id"] == device_id:
                 balance += tx["amount"]
@@ -124,6 +131,9 @@ class Ledger:
         return round(balance, 8)
 
     def has_transaction(self, tx_id: str) -> bool:
+        if self.checkpoints:
+            if tx_id in self.checkpoints[-1].get("spent_tx_ids", []):
+                return True
         return any(tx["tx_id"] == tx_id for tx in self.transactions)
 
     def can_spend(self, device_id: str, amount: float) -> bool:
@@ -264,6 +274,101 @@ class Ledger:
                 self.recalculate_totals()
                 self.save()
             return changed
+
+
+    @staticmethod
+    def _compute_hash(entries: list) -> str:
+        """SHA256 hash of a list of entries — cryptographic proof of pruned data."""
+        serialized = json.dumps(entries, sort_keys=True, separators=(',', ':')).encode()
+        return hashlib.sha256(serialized).hexdigest()
+
+    def create_checkpoint(self, checkpoint_slot: int) -> bool:
+        """Create a checkpoint at checkpoint_slot.
+        Calculates balances for all addresses, hashes pruned data,
+        prunes old rewards and transactions, saves checkpoint to ledger.
+        Runs in background thread — never blocks lottery or transactions."""
+        prune_before = checkpoint_slot - CHECKPOINT_BUFFER
+        with self._lock:
+            if any(c["slot"] == checkpoint_slot for c in self.checkpoints):
+                return False
+            # Separate data to prune vs keep
+            rewards_to_prune = [r for r in self.rewards
+                               if r.get("time_slot", prune_before) < prune_before]
+            rewards_to_keep  = [r for r in self.rewards
+                               if r.get("time_slot", prune_before) >= prune_before]
+            txs_to_prune = [t for t in self.transactions
+                           if (t.get("slot") or 0) < prune_before]
+            txs_to_keep  = [t for t in self.transactions
+                           if (t.get("slot") or 0) >= prune_before]
+            # Calculate balances from previous checkpoint + pruned data
+            prev_balances = {}
+            if self.checkpoints:
+                prev_balances = dict(self.checkpoints[-1]["balances"])
+            addresses = set(prev_balances.keys())
+            for r in rewards_to_prune:
+                addresses.add(r["winner_id"])
+            for t in txs_to_prune:
+                addresses.add(t["sender_id"])
+                addresses.add(t["recipient_id"])
+            balances = {}
+            for addr in addresses:
+                bal = prev_balances.get(addr, 0.0)
+                for t in txs_to_prune:
+                    if t["recipient_id"] == addr:
+                        bal += t["amount"]
+                    if t["sender_id"] == addr:
+                        bal -= t["amount"]
+                        bal -= t.get("fee", 0.0)
+                for r in rewards_to_prune:
+                    if r["winner_id"] == addr:
+                        bal += r["amount"]
+                balances[addr] = round(bal, 8)
+            # Replay prevention — store pruned tx IDs
+            prev_spent   = list(self.checkpoints[-1].get("spent_tx_ids", [])) if self.checkpoints else []
+            new_spent    = [t["tx_id"] for t in txs_to_prune]
+            spent_tx_ids = list(set(prev_spent + new_spent))
+            # Cryptographic proof of pruned data
+            rewards_hash = Ledger._compute_hash(
+                sorted(rewards_to_prune, key=lambda r: r.get("time_slot", 0))
+            )
+            txs_hash = Ledger._compute_hash(
+                sorted(txs_to_prune, key=lambda t: t.get("timestamp", 0))
+            )
+            checkpoint = {
+                "slot":         checkpoint_slot,
+                "prune_before": prune_before,
+                "balances":     balances,
+                "total_minted": self.total_minted,
+                "rewards_hash": rewards_hash,
+                "txs_hash":     txs_hash,
+                "spent_tx_ids": spent_tx_ids,
+                "timestamp":    time.time()
+            }
+            self.rewards      = rewards_to_keep
+            self.transactions = txs_to_keep
+            self.checkpoints.append(checkpoint)
+            self.save()
+            return True
+
+    def apply_checkpoint(self, checkpoint: dict) -> bool:
+        """Apply a checkpoint received from a peer.
+        Only accepted if newer than our latest checkpoint.
+        Prunes local data to match checkpoint."""
+        with self._lock:
+            if self.checkpoints:
+                if checkpoint.get("slot", 0) <= self.checkpoints[-1]["slot"]:
+                    return False
+            if checkpoint.get("total_minted", 0) > TOTAL_SUPPLY:
+                return False
+            prune_before = checkpoint.get("prune_before", 0)
+            self.rewards      = [r for r in self.rewards
+                                if r.get("time_slot", prune_before) >= prune_before]
+            self.transactions = [t for t in self.transactions
+                                if (t.get("slot") or 0) >= prune_before]
+            self.checkpoints.append(checkpoint)
+            self.total_minted = checkpoint["total_minted"]
+            self.save()
+            return True
 
 
 # ─────────────────────────────────────────────
@@ -603,9 +708,10 @@ class Network:
                 sock.settimeout(30.0)
                 sock.connect((peer["ip"], peer["port"]))
                 request = json.dumps({
-                    "type":         "SYNC_REQUEST",
-                    "known_slots":  known_slots,
-                    "known_tx_ids": known_tx_ids
+                    "type":            "SYNC_REQUEST",
+                    "known_slots":     known_slots,
+                    "known_tx_ids":    known_tx_ids,
+                    "checkpoint_slot": self.ledger.checkpoints[-1]["slot"] if self.ledger.checkpoints else 0
                 }).encode()
                 sock.sendall(request)
                 sock.shutdown(socket.SHUT_WR)
@@ -840,6 +946,16 @@ class Network:
                 if delta["rewards"] or delta["transactions"]:
                     self.ledger.merge(delta)
 
+            elif msg_type == "CHECKPOINT":
+                checkpoint = msg.get("checkpoint", {})
+                if checkpoint:
+                    gossip_id = f"checkpoint:{checkpoint.get('slot', '')}"
+                    if gossip_id not in self.seen_ids:
+                        self.seen_ids.add(gossip_id)
+                        applied = self.ledger.apply_checkpoint(checkpoint)
+                        if applied:
+                            self.broadcast({"type": "CHECKPOINT", "checkpoint": checkpoint})
+
             elif msg_type == "GET_LEDGER":
                 # Legacy full sync — still supported for compatibility
                 response = json.dumps({
@@ -852,8 +968,10 @@ class Network:
                 # Delta sync — bidirectional
                 # 1. Send peer what they are missing
                 # 2. Tell peer what WE are missing so they can push it to us
-                their_slots   = set(msg.get("known_slots", []))
-                their_tx_ids  = set(msg.get("known_tx_ids", []))
+                # 3. Send our checkpoint if peer is behind
+                their_slots           = set(msg.get("known_slots", []))
+                their_tx_ids          = set(msg.get("known_tx_ids", []))
+                their_checkpoint_slot = msg.get("checkpoint_slot", 0)
 
                 with self.ledger._lock:
                     our_slots = set(r.get("time_slot") for r in self.ledger.rewards if r.get("time_slot"))
@@ -873,13 +991,21 @@ class Network:
                     we_need_slots  = list(their_slots - our_slots)
                     we_need_tx_ids = list(their_tx_ids - our_tx_ids)
 
+                    # Send checkpoint if peer is behind
+                    our_checkpoint = None
+                    if self.ledger.checkpoints:
+                        latest = self.ledger.checkpoints[-1]
+                        if latest["slot"] > their_checkpoint_slot:
+                            our_checkpoint = latest
+
                 response = json.dumps({
-                    "type":        "SYNC_RESPONSE",
-                    "rewards":     missing_rewards,
-                    "txs":         missing_txs,
-                    "total":       len(self.ledger.rewards),
-                    "we_need_slots":  we_need_slots,
-                    "we_need_tx_ids": we_need_tx_ids
+                    "type":             "SYNC_RESPONSE",
+                    "rewards":          missing_rewards,
+                    "txs":              missing_txs,
+                    "total":            len(self.ledger.rewards),
+                    "we_need_slots":    we_need_slots,
+                    "we_need_tx_ids":   we_need_tx_ids,
+                    "checkpoint":       our_checkpoint
                 }).encode()
                 conn.sendall(response)
 
@@ -1534,6 +1660,43 @@ class Node:
                 print(f"  [push error] {e}")
             time.sleep(5)
 
+    def _checkpoint_loop(self):
+        """Background thread — checks every 30 seconds if a checkpoint is due.
+        Fires at CHECKPOINT_INTERVAL slots, waits CHECKPOINT_BUFFER slots before pruning.
+        Fully automatic, no human intervention, runs forever."""
+        while self.network._running:
+            try:
+                current_slot = int(time.time() / REWARD_INTERVAL)
+                # Determine next checkpoint slot
+                if self.ledger.checkpoints:
+                    last_slot        = self.ledger.checkpoints[-1]["slot"]
+                    next_checkpoint  = last_slot + CHECKPOINT_INTERVAL
+                else:
+                    boundary        = (current_slot // CHECKPOINT_INTERVAL) * CHECKPOINT_INTERVAL
+                    next_checkpoint = boundary if boundary > 0 else CHECKPOINT_INTERVAL
+                # Fire only after buffer window has passed
+                if current_slot >= next_checkpoint + CHECKPOINT_BUFFER:
+                    created = self.ledger.create_checkpoint(next_checkpoint)
+                    if created:
+                        print(f"
+  ╔══════════════════════════════════╗")
+                        print(f"  ║       CHECKPOINT CREATED         ║")
+                        print(f"  ╠══════════════════════════════════╣")
+                        print(f"  ║  Slot     : {next_checkpoint}")
+                        print(f"  ║  Balances : saved")
+                        print(f"  ║  Old data : pruned")
+                        print(f"  ╚══════════════════════════════════╝")
+                        print(f"  > ", end="", flush=True)
+                        # Gossip checkpoint to all peers
+                        if self.ledger.checkpoints:
+                            latest        = self.ledger.checkpoints[-1]
+                            gossip_id     = f"checkpoint:{latest['slot']}"
+                            self.network.seen_ids.add(gossip_id)
+                            self.network.broadcast({"type": "CHECKPOINT", "checkpoint": latest})
+            except Exception:
+                pass
+            time.sleep(30)
+
     def _periodic_ledger_sync(self):
         """Re-sync ledger every 5 minutes to catch up on missed history."""
         time.sleep(60)
@@ -1564,6 +1727,7 @@ class Node:
         threading.Thread(target=self._control_server, daemon=True).start()
         threading.Thread(target=self._periodic_ledger_sync, daemon=True).start()
         threading.Thread(target=self._push_to_explorer, daemon=True).start()
+        threading.Thread(target=self._checkpoint_loop, daemon=True).start()
         self._cli()
 
     def _cli(self):

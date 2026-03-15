@@ -37,10 +37,10 @@ except ImportError:
 VERSION            = "2.0"
 MIN_VERSION        = "2.0"   # Minimum version allowed to connect
 BOOTSTRAP_SERVERS   = [
-    ("5.78.187.91", 7777),   # Timpal foundation — always running
+    ("bootstrap.timpal.org", 7777),   # Timpal foundation — always running
     # Community bootstrap servers can be added here
 ]
-BOOTSTRAP_HOST      = "5.78.187.91"   # Primary (used for peer registration)
+BOOTSTRAP_HOST      = "bootstrap.timpal.org"   # Primary (used for peer registration)
 BOOTSTRAP_PORT      = 7777
 BROADCAST_PORT     = 7778
 DISCOVERY_INTERVAL = 5

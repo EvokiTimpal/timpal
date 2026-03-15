@@ -885,11 +885,20 @@ class Network:
         sock.bind(("", self.port))
         sock.listen(50)
         sock.settimeout(1.0)
+        _conn_sem = threading.Semaphore(50)
+        def _handle_with_sem(conn, addr):
+            try:
+                self._handle_incoming(conn, addr)
+            finally:
+                _conn_sem.release()
         while self._running:
             try:
                 conn, addr = sock.accept()
+                if not _conn_sem.acquire(blocking=False):
+                    conn.close()
+                    continue
                 threading.Thread(
-                    target=self._handle_incoming,
+                    target=_handle_with_sem,
                     args=(conn, addr),
                     daemon=True
                 ).start()

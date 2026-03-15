@@ -35,6 +35,7 @@ except ImportError:
 # PROTOCOL CONSTANTS — NEVER CHANGE
 # ─────────────────────────────────────────────
 VERSION            = "2.0"
+MIN_VERSION        = "2.0"   # Minimum version allowed to connect
 BOOTSTRAP_SERVERS   = [
     ("5.78.187.91", 7777),   # Timpal foundation — always running
     # Community bootstrap servers can be added here
@@ -600,7 +601,8 @@ class Network:
                 sock.sendall(json.dumps({
                     "type":      "HELLO",
                     "device_id": self.wallet.device_id,
-                    "port":      self.port
+                    "port":      self.port,
+                    "version":   VERSION
                 }).encode())
                 sock.shutdown(socket.SHUT_WR)
                 resp = sock.recv(4096)
@@ -645,13 +647,18 @@ class Network:
                 msg = json.dumps({
                     "type":      "HELLO",
                     "device_id": self.wallet.device_id,
-                    "port":      self.port
+                    "port":      self.port,
+                    "version":   VERSION
                 }).encode()
                 sock.sendall(msg)
                 response = sock.recv(65536)
                 sock.close()
 
                 data = json.loads(response.decode())
+                if data.get("type") == "VERSION_REJECTED":
+                    print(f"\n  [!] {data.get('reason', 'Version rejected by bootstrap')}")
+                    print(f"  > ", end="", flush=True)
+                    return
                 if data.get("type") == "PEERS":
                     new_peers = 0
                     for peer in data.get("peers", []):
@@ -724,6 +731,8 @@ class Network:
                 sock.close()
                 msg = json.loads(data.decode())
                 if msg.get("type") == "SYNC_RESPONSE":
+                    if msg.get("checkpoint"):
+                        self.ledger.apply_checkpoint(msg["checkpoint"])
                     delta = {
                         "rewards":      msg.get("rewards", []),
                         "transactions": msg.get("txs", [])
@@ -795,7 +804,8 @@ class Network:
                 "type":      "HELLO",
                 "device_id": self.wallet.device_id,
                 "ip":        self.local_ip,
-                "port":      self.port
+                "port":      self.port,
+                "version":   VERSION
             }).encode()
             try:
                 sock.sendto(msg, ("<broadcast>", BROADCAST_PORT))
@@ -872,7 +882,20 @@ class Network:
 
             if msg_type == "HELLO":
                 # Peer introducing itself directly
-                peer_id = msg.get("device_id")
+                peer_id      = msg.get("device_id")
+                peer_version = msg.get("version", "0.0")
+                # Version enforcement — reject incompatible nodes
+                def _ver(v):
+                    try:
+                        return tuple(int(x) for x in str(v).split("."))
+                    except Exception:
+                        return (0, 0)
+                if _ver(peer_version) < _ver(MIN_VERSION):
+                    conn.sendall(json.dumps({
+                        "type":    "VERSION_REJECTED",
+                        "reason":  f"Your version ({peer_version}) is below minimum ({MIN_VERSION}). Update from: https://github.com/EvokiTimpal/timpal"
+                    }).encode())
+                    return
                 if peer_id and peer_id != self.wallet.device_id:
                     self.peers[peer_id] = {
                         "ip":        addr[0],

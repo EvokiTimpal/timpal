@@ -63,9 +63,23 @@ def handle_client(conn, addr):
 
         # ── Peer registration ────────────────────────────────────────────
         if msg_type == "HELLO":
-            device_id = msg.get("device_id", "")
-            port      = msg.get("port", PORT)
-            ip        = addr[0]
+            device_id   = msg.get("device_id", "")
+            port        = msg.get("port", PORT)
+            ip          = addr[0]
+            node_version = msg.get("version", "0.0")
+            MIN_VERSION = "2.0"
+            def _ver(v):
+                try:
+                    return tuple(int(x) for x in str(v).split("."))
+                except Exception:
+                    return (0, 0)
+            if _ver(node_version) < _ver(MIN_VERSION):
+                conn.sendall(json.dumps({
+                    "type":   "VERSION_REJECTED",
+                    "reason": f"Your version ({node_version}) is below minimum ({MIN_VERSION}). Update from: https://github.com/EvokiTimpal/timpal"
+                }).encode())
+                print(f"  [!] Rejected old node v{node_version}: {device_id[:20]}... from {ip}")
+                return
             with peers_lock:
                 is_new = device_id not in peers
                 peers[device_id] = {"ip": ip, "port": port, "last_seen": time.time()}
@@ -80,7 +94,7 @@ def handle_client(conn, addr):
                 "network_size": len(peers)
             }).encode())
             if is_new:
-                print(f"  [+] New node: {device_id[:20]}... from {ip}:{port} | Total: {len(peers)}")
+                print(f"  [+] New node v{node_version}: {device_id[:20]}... from {ip}:{port} | Total: {len(peers)}")
 
         # ── Commit submission ─────────────────────────────────────────────
         elif msg_type == "SUBMIT_COMMIT":

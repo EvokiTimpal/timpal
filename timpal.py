@@ -1155,7 +1155,7 @@ class Node:
         # Broadcast to rest of network
         self.network.broadcast({"type": "REWARD", "reward": reward})
 
-        # Show notification if we won
+        # Show notification if we won, otherwise show who did
         if reward.get("winner_id") == self.wallet.device_id:
             balance = self.ledger.get_balance(self.wallet.device_id)
             print(f"\n")
@@ -1167,6 +1167,10 @@ class Node:
             print(f"  ║  Balance : {balance:.8f} TMPL")
             print(f"  ╚══════════════════════════════════╝")
             print(f"  > ", end="", flush=True)
+        else:
+            short = reward.get("winner_id", "")[:20]
+            slot  = reward.get("time_slot", "?")
+            print(f"\n  [slot {slot}] Winner: {short}... +{reward['amount']} TMPL\n  > ", end="", flush=True)
 
     def _vrf_ticket(self, time_slot: int) -> tuple:
         """VRF ticket using time_slot as shared seed.

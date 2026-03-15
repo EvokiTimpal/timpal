@@ -31,6 +31,9 @@ commits    = {}   # slot -> {device_id: commit_hash}
 reveals    = {}   # slot -> {device_id: {ticket,sig,seed,public_key}}
 peers_lock   = threading.Lock()
 lottery_lock = threading.Lock()
+rate_lock    = threading.Lock()
+ip_rate      = {}   # ip -> {slot -> count} — rate limiting per IP per slot
+RATE_LIMIT   = 3    # Max commit or reveal submissions per IP per slot
 
 
 def clean_old_data():
@@ -52,6 +55,14 @@ def clean_old_data():
                 old = [s for s in list(d) if s < current_slot - 20]
                 for s in old:
                     del d[s]
+        # Clean old rate limit data
+        with rate_lock:
+            for ip_key in list(ip_rate.keys()):
+                old_slots = [s for s in list(ip_rate[ip_key].keys()) if s < current_slot - 20]
+                for s in old_slots:
+                    del ip_rate[ip_key][s]
+                if not ip_rate[ip_key]:
+                    del ip_rate[ip_key]
 
 
 def handle_client(conn, addr):
@@ -106,6 +117,14 @@ def handle_client(conn, addr):
             if not all([device_id, slot is not None, commit]):
                 conn.sendall(json.dumps({"type": "ERROR", "msg": "missing fields"}).encode())
                 return
+            # Rate limit — max RATE_LIMIT commits per IP per slot
+            with rate_lock:
+                ip_rate.setdefault(ip, {})
+                ip_rate[ip].setdefault(slot, 0)
+                if ip_rate[ip][slot] >= RATE_LIMIT:
+                    conn.sendall(json.dumps({"type": "ERROR", "msg": "rate limit exceeded"}).encode())
+                    return
+                ip_rate[ip][slot] += 1
             with peers_lock:
                 if device_id in peers:
                     peers[device_id]["last_seen"] = time.time()
@@ -128,6 +147,14 @@ def handle_client(conn, addr):
             if not all([device_id, slot is not None, ticket, sig, seed, public_key]):
                 conn.sendall(json.dumps({"type": "ERROR", "msg": "missing fields"}).encode())
                 return
+            # Rate limit — max RATE_LIMIT reveals per IP per slot
+            with rate_lock:
+                ip_rate.setdefault(ip, {})
+                ip_rate[ip].setdefault(slot, 0)
+                if ip_rate[ip][slot] >= RATE_LIMIT:
+                    conn.sendall(json.dumps({"type": "ERROR", "msg": "rate limit exceeded"}).encode())
+                    return
+                ip_rate[ip][slot] += 1
             with peers_lock:
                 if device_id in peers:
                     peers[device_id]["last_seen"] = time.time()

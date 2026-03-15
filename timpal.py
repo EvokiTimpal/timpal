@@ -743,6 +743,8 @@ class Network:
                     if not chunk:
                         break
                     data += chunk
+                    if len(data) > 10_000_000:
+                        break
                 sock.close()
                 msg = json.loads(data.decode())
                 if msg.get("type") == "SYNC_RESPONSE":

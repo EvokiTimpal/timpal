@@ -2,6 +2,8 @@
 Nodes push updates to this API — no NAT issues, fully decentralized data."""
 
 import json, os, time, threading, urllib.parse
+
+PUSH_SECRET = "b7e2f4a1c9d3e8f2a5b1c4d7e0f3a6b9c2d5e8f1a4b7c0d3e6f9a2b5c8d1e4f7"
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 _ledger      = {"rewards": [], "transactions": []}
@@ -128,6 +130,10 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             body   = self.rfile.read(length)
             data   = json.loads(body.decode())
+
+            if data.get("push_secret") != PUSH_SECRET:
+                self.wfile.write(json.dumps({"error": "unauthorized"}).encode())
+                return
 
             if data.get("type") == "LEDGER_PUSH":
                 rewards = data.get("rewards", [])

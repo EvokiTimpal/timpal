@@ -33,6 +33,11 @@ peers_lock   = threading.Lock()
 lottery_lock = threading.Lock()
 rate_lock    = threading.Lock()
 ip_rate      = {}   # ip -> {slot -> count} — rate limiting per IP per slot
+bootstrap_servers      = {}   # "host:port" -> {host, port, last_seen}
+bootstrap_servers_lock = threading.Lock()
+bs_ip_rate             = {}   # ip -> last_register_times list — rate limiting per IP
+BS_RATE_LIMIT          = 5    # Max REGISTER_BOOTSTRAP per IP per hour
+BS_MAX_SERVERS         = 100  # Max bootstrap servers stored
 RATE_LIMIT   = 3    # Max commit or reveal submissions per IP per slot
 
 
@@ -63,6 +68,20 @@ def clean_old_data():
                     del ip_rate[ip_key][s]
                 if not ip_rate[ip_key]:
                     del ip_rate[ip_key]
+        # Clean stale bootstrap servers — prune if not seen for 24 hours
+        bs_cutoff = now - 86400
+        with bootstrap_servers_lock:
+            stale_bs = [k for k, v in bootstrap_servers.items() if v["last_seen"] < bs_cutoff]
+            for k in stale_bs:
+                del bootstrap_servers[k]
+            if stale_bs:
+                print(f"  Cleaned {len(stale_bs)} stale bootstrap servers. Active: {len(bootstrap_servers)}")
+        # Clean stale bs_ip_rate entries
+        with bootstrap_servers_lock:
+            for ip_key in list(bs_ip_rate.keys()):
+                bs_ip_rate[ip_key] = [t for t in bs_ip_rate[ip_key] if now - t < 3600]
+                if not bs_ip_rate[ip_key]:
+                    del bs_ip_rate[ip_key]
 
 
 def handle_client(conn, addr):
@@ -95,6 +114,9 @@ def handle_client(conn, addr):
                 return
             with peers_lock:
                 is_new = device_id not in peers
+                if is_new and len(peers) >= 10000:
+                    oldest = min(peers, key=lambda k: peers[k]["last_seen"])
+                    del peers[oldest]
                 peers[device_id] = {"ip": ip, "port": port, "last_seen": time.time()}
                 peer_list = [
                     {"device_id": pid, "ip": p["ip"], "port": p["port"]}
@@ -116,6 +138,16 @@ def handle_client(conn, addr):
             commit    = msg.get("commit", "")
             if not all([device_id, slot is not None, commit]):
                 conn.sendall(json.dumps({"type": "ERROR", "msg": "missing fields"}).encode())
+                return
+            # Validate formats — device_id and commit must be 64-char hex, slot a positive integer
+            if not isinstance(slot, int) or slot < 0:
+                conn.sendall(json.dumps({"type": "ERROR", "msg": "invalid slot"}).encode())
+                return
+            if len(device_id) != 64 or not all(c in "0123456789abcdef" for c in device_id.lower()):
+                conn.sendall(json.dumps({"type": "ERROR", "msg": "invalid device_id"}).encode())
+                return
+            if len(commit) != 64 or not all(c in "0123456789abcdef" for c in commit.lower()):
+                conn.sendall(json.dumps({"type": "ERROR", "msg": "invalid commit"}).encode())
                 return
             # Rate limit — max RATE_LIMIT commits per IP per slot
             with rate_lock:
@@ -146,6 +178,25 @@ def handle_client(conn, addr):
             public_key = msg.get("public_key", "")
             if not all([device_id, slot is not None, ticket, sig, seed, public_key]):
                 conn.sendall(json.dumps({"type": "ERROR", "msg": "missing fields"}).encode())
+                return
+            # Validate formats
+            if not isinstance(slot, int) or slot < 0:
+                conn.sendall(json.dumps({"type": "ERROR", "msg": "invalid slot"}).encode())
+                return
+            if len(device_id) != 64 or not all(c in "0123456789abcdef" for c in device_id.lower()):
+                conn.sendall(json.dumps({"type": "ERROR", "msg": "invalid device_id"}).encode())
+                return
+            if len(ticket) != 64 or not all(c in "0123456789abcdef" for c in ticket.lower()):
+                conn.sendall(json.dumps({"type": "ERROR", "msg": "invalid ticket"}).encode())
+                return
+            if not isinstance(seed, str) or len(seed) > 64:
+                conn.sendall(json.dumps({"type": "ERROR", "msg": "invalid seed"}).encode())
+                return
+            if len(public_key) > 8192:
+                conn.sendall(json.dumps({"type": "ERROR", "msg": "invalid public_key"}).encode())
+                return
+            if len(sig) > 8192:
+                conn.sendall(json.dumps({"type": "ERROR", "msg": "invalid sig"}).encode())
                 return
             # Rate limit — max RATE_LIMIT reveals per IP per slot
             with rate_lock:
@@ -220,10 +271,114 @@ def handle_client(conn, addr):
                 ]
             conn.sendall(json.dumps({"type": "PEERS", "peers": peer_list}).encode())
 
+        # ── Bootstrap server registration ─────────────────────────────────
+        elif msg_type == "REGISTER_BOOTSTRAP":
+            bs_host = msg.get("host", "").strip()
+            bs_port = msg.get("port", 0)
+            # Validate input
+            if not bs_host or not isinstance(bs_port, int) or not (1024 <= bs_port <= 65535):
+                conn.sendall(json.dumps({"type": "ERROR", "msg": "invalid host or port"}).encode())
+                return
+            if len(bs_host) > 253:
+                conn.sendall(json.dumps({"type": "ERROR", "msg": "invalid host"}).encode())
+                return
+            # Rate limit — max BS_RATE_LIMIT registrations per IP per hour
+            now = time.time()
+            with bootstrap_servers_lock:
+                bs_ip_rate.setdefault(ip, [])
+                bs_ip_rate[ip] = [t for t in bs_ip_rate[ip] if now - t < 3600]
+                if len(bs_ip_rate[ip]) >= BS_RATE_LIMIT:
+                    conn.sendall(json.dumps({"type": "ERROR", "msg": "rate limit exceeded"}).encode())
+                    return
+                bs_ip_rate[ip].append(now)
+            # Verify server is actually reachable before storing
+            key = f"{bs_host}:{bs_port}"
+            try:
+                probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                probe.settimeout(3.0)
+                probe.connect((bs_host, bs_port))
+                probe.close()
+            except Exception:
+                conn.sendall(json.dumps({"type": "ERROR", "msg": "server not reachable"}).encode())
+                return
+            # Store — cap at BS_MAX_SERVERS, evict oldest if full
+            with bootstrap_servers_lock:
+                if key not in bootstrap_servers:
+                    if len(bootstrap_servers) >= BS_MAX_SERVERS:
+                        oldest = min(bootstrap_servers, key=lambda k: bootstrap_servers[k]["last_seen"])
+                        del bootstrap_servers[oldest]
+                    bootstrap_servers[key] = {"host": bs_host, "port": bs_port, "last_seen": now}
+                    print(f"  [+] Bootstrap server registered: {key} | Total: {len(bootstrap_servers)}")
+                else:
+                    bootstrap_servers[key]["last_seen"] = now
+            conn.sendall(json.dumps({"type": "REGISTER_ACK", "key": key}).encode())
+            # Gossip to other known bootstrap servers in background
+            def _gossip_new_bs(h, p):
+                with bootstrap_servers_lock:
+                    targets = [(v["host"], v["port"]) for k, v in bootstrap_servers.items() if k != f"{h}:{p}"]
+                for t_host, t_port in targets:
+                    try:
+                        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        s.settimeout(3.0)
+                        s.connect((t_host, t_port))
+                        s.sendall(json.dumps({"type": "REGISTER_BOOTSTRAP", "host": h, "port": p}).encode())
+                        s.close()
+                    except Exception:
+                        continue
+            threading.Thread(target=_gossip_new_bs, args=(bs_host, bs_port), daemon=True).start()
+
+        # ── Bootstrap server list query ───────────────────────────────────
+        elif msg_type == "GET_BOOTSTRAP_SERVERS":
+            with bootstrap_servers_lock:
+                bs_list = [
+                    {"host": v["host"], "port": v["port"]}
+                    for v in bootstrap_servers.values()
+                ]
+            conn.sendall(json.dumps({
+                "type":    "BOOTSTRAP_SERVERS_RESPONSE",
+                "servers": bs_list
+            }).encode())
+
     except Exception:
         pass
     finally:
         conn.close()
+
+
+def _gossip_bootstrap_servers():
+    """Every 5 minutes, sync bootstrap server list with all known bootstrap servers.
+    Sends our full list to every peer bootstrap server so all stay in sync."""
+    time.sleep(30)
+    while True:
+        time.sleep(300)
+        with bootstrap_servers_lock:
+            targets = list(bootstrap_servers.values())
+        for target in targets:
+            try:
+                # Send our full list to this bootstrap server
+                with bootstrap_servers_lock:
+                    our_list = list(bootstrap_servers.values())
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(5.0)
+                sock.connect((target["host"], target["port"]))
+                for entry in our_list:
+                    if entry["host"] == target["host"] and entry["port"] == target["port"]:
+                        continue
+                    try:
+                        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        s.settimeout(3.0)
+                        s.connect((target["host"], target["port"]))
+                        s.sendall(json.dumps({
+                            "type": "REGISTER_BOOTSTRAP",
+                            "host": entry["host"],
+                            "port": entry["port"]
+                        }).encode())
+                        s.close()
+                    except Exception:
+                        continue
+                sock.close()
+            except Exception:
+                continue
 
 
 def main():
@@ -237,6 +392,7 @@ def main():
     print("=" * 50 + "\n")
 
     threading.Thread(target=clean_old_data, daemon=True).start()
+    threading.Thread(target=_gossip_bootstrap_servers, daemon=True).start()
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -244,11 +400,21 @@ def main():
     server.listen(100)
     print(f"  Ready. Waiting for nodes...\n")
 
+    _conn_sem = threading.Semaphore(50)
+    def _handle_with_sem(conn, addr):
+        try:
+            handle_client(conn, addr)
+        finally:
+            _conn_sem.release()
+
     while True:
         try:
             conn, addr = server.accept()
+            if not _conn_sem.acquire(blocking=False):
+                conn.close()
+                continue
             threading.Thread(
-                target=handle_client,
+                target=_handle_with_sem,
                 args=(conn, addr),
                 daemon=True
             ).start()

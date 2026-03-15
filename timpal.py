@@ -667,6 +667,48 @@ class Network:
                 pass
             time.sleep(120)
 
+    def _confirm_checkpoint_with_peers(self, checkpoint, exclude_ip=None):
+        """Ask other peers if they have the same checkpoint.
+        Returns True if at least 1 peer (besides the sender) confirms.
+        Used when our ledger is empty and we cannot verify hashes locally."""
+        peers = self.get_online_peers()
+        for peer_id, peer in list(peers.items()):
+            if peer["ip"] == exclude_ip:
+                continue
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(10.0)
+                sock.connect((peer["ip"], peer["port"]))
+                request = json.dumps({
+                    "type":            "SYNC_REQUEST",
+                    "known_slots":     [],
+                    "known_tx_ids":    [],
+                    "checkpoint_slot": 0
+                }).encode()
+                sock.sendall(request)
+                sock.shutdown(socket.SHUT_WR)
+                data = b""
+                while True:
+                    chunk = sock.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                    if len(data) > 1_000_000:
+                        break
+                sock.close()
+                msg = json.loads(data.decode())
+                if msg.get("type") == "SYNC_RESPONSE":
+                    peer_cp = msg.get("checkpoint")
+                    if (peer_cp and
+                        peer_cp.get("slot")         == checkpoint.get("slot") and
+                        peer_cp.get("rewards_hash") == checkpoint.get("rewards_hash") and
+                        peer_cp.get("txs_hash")     == checkpoint.get("txs_hash") and
+                        peer_cp.get("total_minted") == checkpoint.get("total_minted")):
+                        return True
+            except Exception:
+                continue
+        return False
+
     def _sync_ledger(self):
         """Delta sync — only request what we are missing from a peer.
         Sends our known slot numbers and tx IDs.
@@ -705,7 +747,19 @@ class Network:
                 msg = json.loads(data.decode())
                 if msg.get("type") == "SYNC_RESPONSE":
                     if msg.get("checkpoint"):
-                        self.ledger.apply_checkpoint(msg["checkpoint"])
+                        cp           = msg["checkpoint"]
+                        prune_before = cp.get("prune_before", 0)
+                        with self.ledger._lock:
+                            can_verify = bool(
+                                [r for r in self.ledger.rewards
+                                 if r.get("time_slot", prune_before) < prune_before] or
+                                [t for t in self.ledger.transactions
+                                 if (t.get("slot") or 0) < prune_before]
+                            )
+                        if can_verify:
+                            self.ledger.apply_checkpoint(cp)
+                        elif self._confirm_checkpoint_with_peers(cp, exclude_ip=peer["ip"]):
+                            self.ledger.apply_checkpoint(cp)
                     delta = {
                         "rewards":      msg.get("rewards", []),
                         "transactions": msg.get("txs", [])
@@ -946,7 +1000,20 @@ class Network:
                     gossip_id = f"checkpoint:{checkpoint.get('slot', '')}"
                     if gossip_id not in self.seen_ids:
                         self.seen_ids.add(gossip_id)
-                        applied = self.ledger.apply_checkpoint(checkpoint)
+                        prune_before = checkpoint.get("prune_before", 0)
+                        with self.ledger._lock:
+                            can_verify = bool(
+                                [r for r in self.ledger.rewards
+                                 if r.get("time_slot", prune_before) < prune_before] or
+                                [t for t in self.ledger.transactions
+                                 if (t.get("slot") or 0) < prune_before]
+                            )
+                        if can_verify:
+                            applied = self.ledger.apply_checkpoint(checkpoint)
+                        elif self._confirm_checkpoint_with_peers(checkpoint, exclude_ip=addr[0]):
+                            applied = self.ledger.apply_checkpoint(checkpoint)
+                        else:
+                            applied = False
                         if applied:
                             self.broadcast({"type": "CHECKPOINT", "checkpoint": checkpoint})
 

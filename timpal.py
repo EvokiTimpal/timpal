@@ -42,6 +42,7 @@ BOOTSTRAP_SERVERS   = [
 ]
 BOOTSTRAP_HOST      = "bootstrap.timpal.org"   # Primary (used for peer registration)
 BOOTSTRAP_PORT      = 7777
+BOOTSTRAP_LIST_URL  = "https://raw.githubusercontent.com/EvokiTimpal/timpal/main/bootstrap_servers.txt"
 BROADCAST_PORT     = 7778
 DISCOVERY_INTERVAL = 5
 WALLET_FILE        = __import__("os").path.join(__import__("os").path.expanduser("~"), ".timpal_wallet.json")

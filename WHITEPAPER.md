@@ -51,7 +51,7 @@ No configuration. No account creation. No KYC.
 
 TIMPAL uses a distributed append-only ledger rather than a blockchain. Every node holds a complete copy. There are no blocks, no mining, and no proof-of-work. Transactions confirm immediately.
 
-Double-spend prevention is enforced by checking the sender's balance against the complete ledger history before accepting any transaction. The first transaction seen by the network wins.
+Double-spend prevention is enforced by checking the sender's balance before accepting any transaction. The first transaction seen by the network wins. Every two weeks, the network automatically creates a checkpoint — a cryptographically verified snapshot of all balances — and prunes the raw history before it. Nodes only need to store data since the last checkpoint, keeping the ledger lightweight forever.
 
 ### 3.2 Quantum-Resistant Cryptography
 
@@ -68,7 +68,7 @@ Once connected, nodes communicate directly peer-to-peer. The bootstrap server is
 
 Every 5 seconds, one node wins 1.0575 TMPL. The winner is selected using a Verifiable Random Function (VRF):
 
-Each node signs the current time slot with its private key. The ticket is the hash of that signature — unpredictable without the private key. The node with the lowest ticket wins.
+Each node signs the current time slot with its private key. The ticket is the hash of that signature — unpredictable without the private key. The node with the lowest ticket wins. To prevent cheating, the lottery uses a commit-reveal scheme: at the start of each slot every node submits a cryptographic commitment to the bootstrap registry. Two seconds later, all nodes reveal their actual tickets. A node cannot change its ticket after committing, and cannot selectively reveal only if it wins — the commitment binds it. Every node independently verifies all reveals and picks the same winner using identical math. The bootstrap registry stores commits and reveals but cannot influence the outcome — all verification happens on the nodes.
 
 Because the ticket is derived from each node's unique private key signature, it is different every round — no node has a permanent advantage over any other. The design scales to millions of nodes with zero coordination overhead. As the number of nodes grows, reward distribution converges to statistically equal.
 
@@ -78,11 +78,33 @@ An OS-level file lock prevents more than one node running per device. Any second
 
 ### 3.6 Ledger Conflict Resolution
 
-Each five-second time slot has exactly one winner. If two nodes claim the same slot, the reward with the lowest VRF ticket is canonical — the same rule used during the live lottery. Total minted supply is recalculated from scratch after every merge.
+Each five-second time slot has exactly one winner. If two nodes claim the same slot — due to network latency or a temporary split — the reward with the lowest VRF ticket is canonical. This is the same rule used during the live lottery, so the conflict resolution is always consistent. After a checkpoint is applied, balances are calculated from the checkpoint snapshot forward rather than from the beginning of history.
 
 ### 3.7 Transaction Rate Limiting
 
 Each device is limited to 60 transactions per minute. This prevents spam and flood attacks while comfortably supporting all legitimate use cases. Since one node per device is enforced at the OS level, this limit applies equally to every participant on the network.
+
+### 3.8 Ledger Checkpoint System
+
+Without checkpointing, the ledger would grow to approximately 118GB over 37.5 years, making it impractical for nodes in regions with limited storage or bandwidth.
+
+Every 241,920 slots (two weeks), every node independently creates a checkpoint. The checkpoint records the balance of every address at that moment, the total supply minted, and SHA256 cryptographic hashes of all pruned rewards and transactions. These hashes are permanent proof that the pruned data was valid — anyone with the original data can verify the checkpoint is honest.
+
+A 120-slot buffer (10 minutes) is applied before pruning, giving late-arriving data time to propagate across the network before being permanently removed. All rewards and transactions older than the buffer are pruned after the checkpoint is written.
+
+Checkpoints are gossiped to peers automatically. A new node joining the network receives the latest checkpoint first, then only the data since that checkpoint — never the full history. The checkpoint system runs in a background thread and never interferes with the lottery or transactions.
+
+The process is fully automatic and requires no human intervention. It runs identically on every node forever.
+
+### 3.9 Protocol Version Enforcement
+
+As TIMPAL evolves, updates may change protocol rules. Nodes running outdated versions could cause conflicts if they remain on the network after a rule-changing update.
+
+Every node declares its version when connecting to any peer or bootstrap server. If the declared version is below the network minimum, the connection is rejected immediately with a clear message directing the operator to update from GitHub.
+
+This follows the same model as Bitcoin: no central authority forces updates. Developers publish fixes openly. Node operators update voluntarily. Updated nodes automatically reject outdated ones. The network migrates to the new version through social consensus with no coordination required.
+
+The minimum version is a constant defined in both timpal.py and bootstrap.py. When a rule-changing update is published, the minimum version is bumped. Nodes that do not update are naturally excluded from the network.
 
 ---
 

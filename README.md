@@ -63,6 +63,7 @@ Your node starts, creates a quantum-resistant wallet, connects to the worldwide 
 | Distribution period | 37.5 years |
 | Transaction fee | Free (first 37.5 years) |
 | Transaction fee (after 37.5 years) | 0.0005 TMPL |
+| Fee recipient | All nodes that submitted a VRF commit for the slot (split equally) |
 | Pre-mine | None |
 | Insider allocation | None |
 

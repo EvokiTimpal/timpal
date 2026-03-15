@@ -1354,7 +1354,8 @@ class Node:
             self._distribute_fees(time_slot, active_nodes)
 
     def _cleanup_slot(self, time_slot):
-        """Remove lottery data older than 10 slots."""
+        """Remove lottery data older than 10 slots.
+        Also prune old reward gossip IDs from seen_ids to prevent unbounded growth."""
         with self._lottery_lock:
             for d in (self._commits, self._reveals):
                 old = [s for s in d if s < time_slot - 10]
@@ -1363,6 +1364,22 @@ class Node:
         old = [s for s in self._my_tickets if s < time_slot - 10]
         for s in old:
             del self._my_tickets[s]
+        # Prune old reward gossip IDs — format is "reward:{slot}:{winner_id}"
+        # and checkpoint IDs — format is "checkpoint:{slot}"
+        cutoff = time_slot - 100
+        stale = [
+            sid for sid in self.network.seen_ids
+            if (sid.startswith("reward:") or sid.startswith("checkpoint:"))
+            and int(sid.split(":")[1]) < cutoff
+        ]
+        for sid in stale:
+            self.network.seen_ids.discard(sid)
+        # Cap transaction IDs — keep most recent 10000 only
+        tx_ids = [sid for sid in self.network.seen_ids
+                  if not sid.startswith("reward:") and not sid.startswith("checkpoint:")]
+        if len(tx_ids) > 10000:
+            for sid in tx_ids[:-10000]:
+                self.network.seen_ids.discard(sid)
 
     def _reward_lottery(self):
         """Commit-reveal VRF lottery — fully decentralized, CGNAT-safe.

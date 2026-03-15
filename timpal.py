@@ -369,6 +369,7 @@ class Ledger:
     def apply_checkpoint(self, checkpoint: dict) -> bool:
         """Apply a checkpoint received from a peer.
         Only accepted if newer than our latest checkpoint.
+        Verifies rewards_hash and txs_hash against local data before accepting.
         Prunes local data to match checkpoint."""
         with self._lock:
             if self.checkpoints:
@@ -377,6 +378,25 @@ class Ledger:
             if checkpoint.get("total_minted", 0) > TOTAL_SUPPLY:
                 return False
             prune_before = checkpoint.get("prune_before", 0)
+            # Verify checkpoint hashes against our local data.
+            # If they don't match, the checkpoint is fake — reject it.
+            rewards_to_verify = [r for r in self.rewards
+                                 if r.get("time_slot", prune_before) < prune_before]
+            if rewards_to_verify:
+                computed = Ledger._compute_hash(
+                    sorted(rewards_to_verify, key=lambda r: r.get("time_slot", 0))
+                )
+                if computed != checkpoint.get("rewards_hash", ""):
+                    return False
+            txs_to_verify = [t for t in self.transactions
+                             if (t.get("slot") or 0) < prune_before]
+            if txs_to_verify:
+                computed = Ledger._compute_hash(
+                    sorted(txs_to_verify, key=lambda t: t.get("timestamp", 0))
+                )
+                if computed != checkpoint.get("txs_hash", ""):
+                    return False
+            # Hashes verified (or no local data to check against)
             self.rewards      = [r for r in self.rewards
                                 if r.get("time_slot", prune_before) >= prune_before]
             self.transactions = [t for t in self.transactions

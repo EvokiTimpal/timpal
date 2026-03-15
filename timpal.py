@@ -1664,10 +1664,7 @@ class Node:
                     headers={"Content-Type": "application/json"},
                     method="POST"
                 )
-                ctx = ssl.create_default_context()
-                ctx.check_hostname = False
-                ctx.verify_mode = ssl.CERT_NONE
-                urllib.request.urlopen(req, timeout=5, context=ctx)
+                urllib.request.urlopen(req, timeout=5)
             except Exception as e:
                 print(f"  [push error] {e}")
             time.sleep(5)

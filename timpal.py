@@ -1681,6 +1681,15 @@ class Node:
     def _control_server(self):
         """Local control socket — lets CLI commands talk to the running node."""
         import socket as _socket
+        # Generate a random token and write to file — only owner can read it
+        token = os.urandom(32).hex()
+        token_file = os.path.join(os.path.expanduser("~"), ".timpal_control.token")
+        try:
+            with open(token_file, "w") as f:
+                f.write(token)
+            os.chmod(token_file, 0o600)
+        except Exception:
+            pass
         srv = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
         srv.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
         try:
@@ -1702,6 +1711,10 @@ class Node:
                         break
                 try:
                     cmd = json.loads(data.decode().strip())
+                    if cmd.get("token") != token:
+                        conn.sendall((json.dumps({"ok": False, "error": "unauthorized"}) + "\n").encode())
+                        conn.close()
+                        continue
                     response = self._handle_control(cmd)
                 except Exception as e:
                     response = {"ok": False, "error": str(e)}
@@ -1710,7 +1723,6 @@ class Node:
             except Exception:
                 continue
         srv.close()
-
     def _handle_control(self, cmd: dict) -> dict:
         """Handle a command from the CLI control socket."""
         action = cmd.get("action")
@@ -1969,7 +1981,14 @@ if __name__ == "__main__":
             sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
             sock.settimeout(5.0)
             sock.connect(("127.0.0.1", 7780))
-            cmd = json.dumps({"action": "send", "peer_id": recipient_id, "amount": amount}) + "\n"
+            token = ""
+            try:
+                token_file = os.path.join(os.path.expanduser("~"), ".timpal_control.token")
+                with open(token_file, "r") as tf:
+                    token = tf.read().strip()
+            except Exception:
+                pass
+            cmd = json.dumps({"action": "send", "peer_id": recipient_id, "amount": amount, "token": token}) + "\n"
             sock.sendall(cmd.encode())
             resp = b""
             while True:

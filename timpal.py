@@ -1678,8 +1678,7 @@ class Node:
                 if current_slot >= next_checkpoint + CHECKPOINT_BUFFER:
                     created = self.ledger.create_checkpoint(next_checkpoint)
                     if created:
-                        print(f"
-  ╔══════════════════════════════════╗")
+                        print(f"\n  ╔══════════════════════════════════╗")
                         print(f"  ║       CHECKPOINT CREATED         ║")
                         print(f"  ╠══════════════════════════════════╣")
                         print(f"  ║  Slot     : {next_checkpoint}")

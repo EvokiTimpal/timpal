@@ -354,31 +354,23 @@ def _gossip_bootstrap_servers():
         with bootstrap_servers_lock:
             targets = list(bootstrap_servers.values())
         for target in targets:
-            try:
-                # Send our full list to this bootstrap server
-                with bootstrap_servers_lock:
-                    our_list = list(bootstrap_servers.values())
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(5.0)
-                sock.connect((target["host"], target["port"]))
-                for entry in our_list:
-                    if entry["host"] == target["host"] and entry["port"] == target["port"]:
-                        continue
-                    try:
-                        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                        s.settimeout(3.0)
-                        s.connect((target["host"], target["port"]))
-                        s.sendall(json.dumps({
-                            "type": "REGISTER_BOOTSTRAP",
-                            "host": entry["host"],
-                            "port": entry["port"]
-                        }).encode())
-                        s.close()
-                    except Exception:
-                        continue
-                sock.close()
-            except Exception:
-                continue
+            with bootstrap_servers_lock:
+                our_list = list(bootstrap_servers.values())
+            for entry in our_list:
+                if entry["host"] == target["host"] and entry["port"] == target["port"]:
+                    continue
+                try:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(3.0)
+                    s.connect((target["host"], target["port"]))
+                    s.sendall(json.dumps({
+                        "type": "REGISTER_BOOTSTRAP",
+                        "host": entry["host"],
+                        "port": entry["port"]
+                    }).encode())
+                    s.close()
+                except Exception:
+                    continue
 
 
 def main():

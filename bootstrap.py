@@ -79,12 +79,12 @@ def handle_client(conn, addr):
 
         msg      = json.loads(data.decode())
         msg_type = msg.get("type")
+        ip       = addr[0]
 
         # ── Peer registration ────────────────────────────────────────────
         if msg_type == "HELLO":
             device_id   = msg.get("device_id", "")
             port        = msg.get("port", PORT)
-            ip          = addr[0]
             node_version = msg.get("version", "0.0")
             if _ver(node_version) < _ver(MIN_VERSION):
                 conn.sendall(json.dumps({

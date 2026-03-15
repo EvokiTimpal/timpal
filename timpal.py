@@ -124,19 +124,20 @@ class Ledger:
     def get_balance(self, device_id: str) -> float:
         """Calculate balance from checkpoint snapshot + post-checkpoint history.
         In Era 2, sender pays amount + fee. Fee rewards credited separately."""
-        balance = 0.0
-        if self.checkpoints:
-            balance = self.checkpoints[-1]["balances"].get(device_id, 0.0)
-        for tx in self.transactions:
-            if tx["recipient_id"] == device_id:
-                balance += tx["amount"]
-            if tx["sender_id"] == device_id:
-                balance -= tx["amount"]
-                balance -= tx.get("fee", 0.0)   # Era 2: deduct fee from sender
-        for reward in self.rewards:
-            if reward["winner_id"] == device_id:
-                balance += reward["amount"]
-        return round(balance, 8)
+        with self._lock:
+            balance = 0.0
+            if self.checkpoints:
+                balance = self.checkpoints[-1]["balances"].get(device_id, 0.0)
+            for tx in self.transactions:
+                if tx["recipient_id"] == device_id:
+                    balance += tx["amount"]
+                if tx["sender_id"] == device_id:
+                    balance -= tx["amount"]
+                    balance -= tx.get("fee", 0.0)   # Era 2: deduct fee from sender
+            for reward in self.rewards:
+                if reward["winner_id"] == device_id:
+                    balance += reward["amount"]
+            return round(balance, 8)
 
     def has_transaction(self, tx_id: str) -> bool:
         if self.checkpoints:

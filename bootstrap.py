@@ -15,8 +15,16 @@ import threading
 import json
 import time
 
-PORT    = 7777
-VERSION = "2.1"
+PORT        = 7777
+VERSION     = "2.1"
+MIN_VERSION = "2.0"   # Minimum node version allowed to connect
+
+def _ver(v: str) -> tuple:
+    """Parse version string into comparable tuple. e.g. '2.1' -> (2, 1)"""
+    try:
+        return tuple(int(x) for x in str(v).split("."))
+    except Exception:
+        return (0, 0)
 
 peers      = {}   # device_id -> {ip, port, last_seen}
 commits    = {}   # slot -> {device_id: commit_hash}
@@ -67,12 +75,6 @@ def handle_client(conn, addr):
             port        = msg.get("port", PORT)
             ip          = addr[0]
             node_version = msg.get("version", "0.0")
-            MIN_VERSION = "2.0"
-            def _ver(v):
-                try:
-                    return tuple(int(x) for x in str(v).split("."))
-                except Exception:
-                    return (0, 0)
             if _ver(node_version) < _ver(MIN_VERSION):
                 conn.sendall(json.dumps({
                     "type":   "VERSION_REJECTED",

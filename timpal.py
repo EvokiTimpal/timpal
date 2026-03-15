@@ -42,7 +42,6 @@ BOOTSTRAP_SERVERS   = [
 ]
 BOOTSTRAP_HOST      = "5.78.187.91"   # Primary (used for peer registration)
 BOOTSTRAP_PORT      = 7777
-BOOTSTRAP_NODE_PORT = 7779            # Server node — always online
 BROADCAST_PORT     = 7778
 DISCOVERY_INTERVAL = 5
 WALLET_FILE        = __import__("os").path.join(__import__("os").path.expanduser("~"), ".timpal_wallet.json")
@@ -65,6 +64,13 @@ def get_current_fee(total_minted: float) -> float:
 
 def is_era2(total_minted: float) -> bool:
     return total_minted >= TOTAL_SUPPLY
+
+def _ver(v: str) -> tuple:
+    """Parse version string into comparable tuple. e.g. '2.1' -> (2, 1)"""
+    try:
+        return tuple(int(x) for x in str(v).split("."))
+    except Exception:
+        return (0, 0)
 
 
 def find_free_port(start=7779):
@@ -241,7 +247,8 @@ class Ledger:
             changed = False
             for tx in other_ledger.get("transactions", []):
                 if not self.has_transaction(tx["tx_id"]):
-                    if self.can_spend(tx["sender_id"], tx["amount"]):
+                    total = tx["amount"] + tx.get("fee", 0.0)
+                    if self.can_spend(tx["sender_id"], total):
                         # Verify signature before accepting
                         try:
                             t = Transaction.from_dict(tx)
@@ -255,6 +262,14 @@ class Ledger:
             for reward in other_ledger.get("rewards", []):
                 rid  = reward["reward_id"]
                 slot = reward.get("time_slot")
+                # Cryptographically verify VRF ticket before accepting via merge
+                pub  = reward.get("vrf_public_key")
+                seed = reward.get("vrf_seed")
+                sig  = reward.get("vrf_sig")
+                tick = reward.get("vrf_ticket")
+                if pub and seed and sig and tick:
+                    if not Node._verify_ticket(pub, seed, sig, tick):
+                        continue
                 if any(r["reward_id"] == rid and r.get("winner_id") == reward.get("winner_id") for r in self.rewards):
                     continue
                 if slot and slot in existing_slots:
@@ -506,7 +521,6 @@ class Network:
         self.local_ip       = self._get_local_ip()
         self.port           = find_free_port(7779)
         self._node_ref      = None
-        self._node_ref      = None
 
     def _get_local_ip(self):
         # Try to get public IP first (for server deployments)
@@ -527,17 +541,6 @@ class Network:
             return ip
         except Exception:
             return "127.0.0.1"
-
-    def _relay_to_bootstrap(self, msg: dict):
-        """Send a message to the bootstrap server for relay to CGNAT peers."""
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(2.0)
-            sock.connect((BOOTSTRAP_HOST, BOOTSTRAP_PORT))
-            sock.sendall(json.dumps(msg).encode())
-            sock.close()
-        except Exception:
-            pass
 
     def _save_peers(self):
         try:
@@ -584,61 +587,9 @@ class Network:
 
     # ── Bootstrap connection ────────────────────
 
-    def _connect_to_server_node(self):
-        """Directly connect to the always-on server node as a peer.
-        This bypasses NAT issues — clients connect TO the server, not vice versa."""
-        time.sleep(3)
-        while self._running:
-            try:
-                # Server node skips this — it waits for clients to connect
-                if self.local_ip == BOOTSTRAP_HOST:
-                    time.sleep(30)
-                    continue
-                # Always send HELLO to server node so it knows about us
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(5.0)
-                sock.connect((BOOTSTRAP_HOST, BOOTSTRAP_NODE_PORT))
-                sock.sendall(json.dumps({
-                    "type":      "HELLO",
-                    "device_id": self.wallet.device_id,
-                    "port":      self.port,
-                    "version":   VERSION
-                }).encode())
-                sock.shutdown(socket.SHUT_WR)
-                resp = sock.recv(4096)
-                sock.close()
-                data = json.loads(resp.decode())
-                if data.get("type") == "HELLO_ACK":
-                    server_id = data.get("device_id")
-                    if server_id and server_id != self.wallet.device_id:
-                        already = server_id in self.peers
-                        self.peers[server_id] = {
-                            "ip":        BOOTSTRAP_HOST,
-                            "port":      BOOTSTRAP_NODE_PORT,
-                            "last_seen": time.time()
-                        }
-                        for peer in data.get("peers", []):
-                            pid = peer.get("device_id")
-                            if pid and pid != self.wallet.device_id and pid not in self.peers:
-                                self.peers[pid] = {
-                                    "ip":        peer["ip"],
-                                    "port":      peer["port"],
-                                    "last_seen": time.time()
-                                }
-                        self._save_peers()
-                        if not already:
-                            print(f"\n  [+] Connected — {len(self.peers)} peers known\n  > ", end="", flush=True)
-                            threading.Thread(target=self._sync_ledger, daemon=True).start()
-            except Exception:
-                pass
-            time.sleep(5)
-
     def _bootstrap_connect(self):
         """Connect to bootstrap server and get initial peer list."""
         time.sleep(2)
-        # Also connect directly to the bootstrap node as a peer
-        # This ensures server and clients are always connected
-        threading.Thread(target=self._connect_to_server_node, daemon=True).start()
         while self._running:
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -827,9 +778,12 @@ class Network:
                 data, addr = sock.recvfrom(1024)
                 msg = json.loads(data.decode())
                 if msg.get("type") == "HELLO":
-                    peer_id   = msg["device_id"]
-                    peer_ip   = msg["ip"]
-                    peer_port = msg.get("port", 7779)
+                    peer_id      = msg["device_id"]
+                    peer_ip      = msg["ip"]
+                    peer_port    = msg.get("port", 7779)
+                    peer_version = msg.get("version", "0.0")
+                    if _ver(peer_version) < _ver(MIN_VERSION):
+                        continue
                     if peer_id != self.wallet.device_id:
                         is_new = peer_id not in self.peers
                         self.peers[peer_id] = {
@@ -885,11 +839,6 @@ class Network:
                 peer_id      = msg.get("device_id")
                 peer_version = msg.get("version", "0.0")
                 # Version enforcement — reject incompatible nodes
-                def _ver(v):
-                    try:
-                        return tuple(int(x) for x in str(v).split("."))
-                    except Exception:
-                        return (0, 0)
                 if _ver(peer_version) < _ver(MIN_VERSION):
                     conn.sendall(json.dumps({
                         "type":    "VERSION_REJECTED",

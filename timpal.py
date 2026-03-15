@@ -55,6 +55,7 @@ TX_FEE             = 0.0             # Free for first 37.5 years
 TX_FEE_ERA2        = 0.0005          # Fee after all coins distributed — split among active nodes
 CHECKPOINT_INTERVAL = 241_920        # Slots between checkpoints (2 weeks)
 CHECKPOINT_BUFFER   = 120            # Slots to wait before pruning (10 minutes)
+PUSH_SECRET         = "b7e2f4a1c9d3e8f2a5b1c4d7e0f3a6b9c2d5e8f1a4b7c0d3e6f9a2b5c8d1e4f7"   # Explorer push authentication
 
 def get_current_fee(total_minted: float) -> float:
     """Era 1 (0-250M minted): Free. Era 2 (250M+ minted): 0.0005 TMPL per tx."""
@@ -1635,6 +1636,7 @@ class Node:
                     txs     = list(self.ledger.transactions[-20:])
                 payload = json.dumps({
                     "type":         "LEDGER_PUSH",
+                    "push_secret":  PUSH_SECRET,
                     "rewards":      rewards,
                     "transactions": txs
                 }).encode()

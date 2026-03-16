@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>TIMPAL — Plan B for Humanity</title>
+<title>TIMPAL — Quantum-Resistant Money Without Masters</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Mono:wght@300;400;500&family=Barlow:wght@300;400;500;600&display=swap" rel="stylesheet">
 <style>
@@ -877,7 +877,7 @@
 
   <div class="hero">
     <div class="hero-eyebrow">Peer-to-peer payment protocol · Est. March 8, 2026</div>
-    <div class="hero-title">PLAN B<br><span>FOR</span><br>HUMANITY</div>
+    <div class="hero-title">MONEY<br><span>WITHOUT</span><br>MASTERS</div>
     <div class="hero-subtitle">Quantum-Resistant · Worldwide · Instant · Free</div>
     <div class="hero-desc">
       The money that works when everything else stops working.
@@ -1014,8 +1014,7 @@
         <div class="era-badge">Era 2 · Year 37.5 onwards</div>
         <div class="era-title">Sustaining</div>
         <div class="era-desc">
-          Supply fixed forever at 250 million TMPL. Every transaction carries a fee of 0.0005 TMPL 
-          paid to the node that broadcast it. The network sustains itself indefinitely.
+          Supply fixed forever at 250 million TMPL. Every transaction carries a fee of 0.0005 TMPL split equally among all nodes that submitted a VRF commit for that slot. The network sustains itself indefinitely.
         </div>
       </div>
     </div>
@@ -1041,7 +1040,7 @@
       <span class="footer-link" onclick="showPage('docs')">Docs</span>
       <a class="footer-link" href="https://github.com/EvokiTimpal/timpal" target="_blank">GitHub</a>
     </div>
-    <div class="footer-copy">Bootstrap: 5.78.187.91:7777</div>
+    <div class="footer-copy">Bootstrap: bootstrap.timpal.org:7777</div>
   </footer>
 </div>
 
@@ -1247,7 +1246,7 @@ winner = node with minimum(ticket)</div>
         <table class="docs-table">
           <tr><th>Method</th><th>How</th><th>Range</th></tr>
           <tr><td>Local</td><td>UDP broadcast on port 7778</td><td>Same WiFi network</td></tr>
-          <tr><td>Global</td><td>TCP bootstrap at 5.78.187.91:7777</td><td>Worldwide</td></tr>
+          <tr><td>Global</td><td>TCP bootstrap at bootstrap.timpal.org:7777</td><td>Worldwide</td></tr>
         </table>
         <p class="docs-p">The bootstrap server is a directory — it introduces nodes to each other. It stores no funds and controls nothing. If it goes offline, nodes already connected continue operating peer-to-peer.</p>
       </div>
@@ -1270,7 +1269,7 @@ winner = node with minimum(ticket)</div>
       <div class="docs-section" id="doc-eras">
         <div class="docs-h2">Two Eras</div>
         <p class="docs-p"><strong style="color:var(--accent)">Era 1 — Distribution (Years 0 to 37.5):</strong> All transactions are free. Nodes earn through the VRF lottery. 250 million TMPL distributed over 37.5 years. No pre-mine.</p>
-        <p class="docs-p"><strong style="color:var(--green)">Era 2 — Sustaining (Year 37.5 onwards):</strong> Supply fixed at 250 million forever. Every transaction carries a fee of 0.0005 TMPL paid to the node that first broadcast it. The network is self-sustaining indefinitely.</p>
+        <p class="docs-p"><strong style="color:var(--green)">Era 2 — Sustaining (Year 37.5 onwards):</strong> Supply fixed at 250 million forever. Every transaction carries a fee of 0.0005 TMPL split equally among all nodes that submitted a VRF commit for that slot. The network is self-sustaining indefinitely.</p>
         <p class="docs-p">The transition is automatic. No upgrade required. No vote. When the last TMPL is minted, the lottery stops and fee collection begins.</p>
       </div>
 

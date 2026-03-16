@@ -128,6 +128,9 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         try:
             length = int(self.headers.get("Content-Length", 0))
+            if length > 1_000_000:
+                self.wfile.write(json.dumps({"error": "payload too large"}).encode())
+                return
             body   = self.rfile.read(length)
             data   = json.loads(body.decode())
 

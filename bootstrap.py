@@ -32,13 +32,15 @@ reveals    = {}   # slot -> {device_id: {ticket,sig,seed,public_key}}
 peers_lock   = threading.Lock()
 lottery_lock = threading.Lock()
 rate_lock    = threading.Lock()
-ip_rate      = {}   # ip -> {slot -> count} — rate limiting per IP per slot
+commit_ip_rate = {}   # ip -> {slot -> count} — commit rate limiting per IP per slot
+reveal_ip_rate = {}   # ip -> {slot -> count} — reveal rate limiting per IP per slot
 bootstrap_servers      = {}   # "host:port" -> {host, port, last_seen}
 bootstrap_servers_lock = threading.Lock()
 bs_ip_rate             = {}   # ip -> last_register_times list — rate limiting per IP
 BS_RATE_LIMIT          = 5    # Max REGISTER_BOOTSTRAP per IP per hour
 BS_MAX_SERVERS         = 100  # Max bootstrap servers stored
-RATE_LIMIT   = 3    # Max commit or reveal submissions per IP per slot
+COMMIT_RATE_LIMIT = 3   # Max commits per IP per slot (3 nodes per household)
+REVEAL_RATE_LIMIT = 3   # Max reveals per IP per slot (3 nodes per household)
 
 
 def clean_old_data():
@@ -62,12 +64,13 @@ def clean_old_data():
                     del d[s]
         # Clean old rate limit data
         with rate_lock:
-            for ip_key in list(ip_rate.keys()):
-                old_slots = [s for s in list(ip_rate[ip_key].keys()) if s < current_slot - 20]
-                for s in old_slots:
-                    del ip_rate[ip_key][s]
-                if not ip_rate[ip_key]:
-                    del ip_rate[ip_key]
+            for rate_dict in (commit_ip_rate, reveal_ip_rate):
+                for ip_key in list(rate_dict.keys()):
+                    old_slots = [s for s in list(rate_dict[ip_key].keys()) if s < current_slot - 20]
+                    for s in old_slots:
+                        del rate_dict[ip_key][s]
+                    if not rate_dict[ip_key]:
+                        del rate_dict[ip_key]
         # Clean stale bootstrap servers — prune if not seen for 24 hours
         bs_cutoff = now - 86400
         with bootstrap_servers_lock:
@@ -149,14 +152,14 @@ def handle_client(conn, addr):
             if len(commit) != 64 or not all(c in "0123456789abcdef" for c in commit.lower()):
                 conn.sendall(json.dumps({"type": "ERROR", "msg": "invalid commit"}).encode())
                 return
-            # Rate limit — max RATE_LIMIT commits per IP per slot
+            # Rate limit — max COMMIT_RATE_LIMIT commits per IP per slot
             with rate_lock:
-                ip_rate.setdefault(ip, {})
-                ip_rate[ip].setdefault(slot, 0)
-                if ip_rate[ip][slot] >= RATE_LIMIT:
+                commit_ip_rate.setdefault(ip, {})
+                commit_ip_rate[ip].setdefault(slot, 0)
+                if commit_ip_rate[ip][slot] >= COMMIT_RATE_LIMIT:
                     conn.sendall(json.dumps({"type": "ERROR", "msg": "rate limit exceeded"}).encode())
                     return
-                ip_rate[ip][slot] += 1
+                commit_ip_rate[ip][slot] += 1
             with peers_lock:
                 if device_id in peers:
                     peers[device_id]["last_seen"] = time.time()
@@ -198,14 +201,14 @@ def handle_client(conn, addr):
             if len(sig) > 8192:
                 conn.sendall(json.dumps({"type": "ERROR", "msg": "invalid sig"}).encode())
                 return
-            # Rate limit — max RATE_LIMIT reveals per IP per slot
+            # Rate limit — max REVEAL_RATE_LIMIT reveals per IP per slot
             with rate_lock:
-                ip_rate.setdefault(ip, {})
-                ip_rate[ip].setdefault(slot, 0)
-                if ip_rate[ip][slot] >= RATE_LIMIT:
+                reveal_ip_rate.setdefault(ip, {})
+                reveal_ip_rate[ip].setdefault(slot, 0)
+                if reveal_ip_rate[ip][slot] >= REVEAL_RATE_LIMIT:
                     conn.sendall(json.dumps({"type": "ERROR", "msg": "rate limit exceeded"}).encode())
                     return
-                ip_rate[ip][slot] += 1
+                reveal_ip_rate[ip][slot] += 1
             with peers_lock:
                 if device_id in peers:
                     peers[device_id]["last_seen"] = time.time()

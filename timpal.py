@@ -1162,11 +1162,11 @@ class Network:
                     missing_rewards = [
                         r for r in self.ledger.rewards
                         if r.get("time_slot") not in their_slots
-                    ]
+                    ][:5000]
                     missing_txs = [
                         t for t in self.ledger.transactions
                         if t.get("tx_id") not in their_tx_ids
-                    ]
+                    ][:2000]
 
                     # What WE are missing (they have, we don't)
                     we_need_slots  = list(their_slots - our_slots)

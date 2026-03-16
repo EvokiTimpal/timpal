@@ -1837,6 +1837,8 @@ class Node:
                     if not chunk:
                         break
                     data += chunk
+                    if len(data) > 65536:
+                        break
                     if data.endswith(b"\n"):
                         break
                 try:

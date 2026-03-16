@@ -1604,11 +1604,12 @@ class Node:
         # and checkpoint IDs — format is "checkpoint:{slot}"
         cutoff = time_slot - 100
         with self.network._seen_lock:
-            stale = [
-                sid for sid in self.network.seen_ids
-                if (sid.startswith("reward:") or sid.startswith("checkpoint:"))
-                and int(sid.split(":")[1]) < cutoff
-            ]
+            def _is_stale(sid):
+                try:
+                    return (sid.startswith("reward:") or sid.startswith("checkpoint:")) and int(sid.split(":")[1]) < cutoff
+                except Exception:
+                    return False
+            stale = [sid for sid in self.network.seen_ids if _is_stale(sid)]
             for sid in stale:
                 self.network.seen_ids.discard(sid)
             # Cap transaction IDs — prune oldest by insertion order

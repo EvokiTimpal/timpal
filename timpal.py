@@ -1947,7 +1947,8 @@ class Node:
                         if self.ledger.checkpoints:
                             latest        = self.ledger.checkpoints[-1]
                             gossip_id     = f"checkpoint:{latest['slot']}"
-                            self.network.seen_ids.add(gossip_id)
+                            with self.network._seen_lock:
+                                self.network.seen_ids.add(gossip_id)
                             self.network.broadcast({"type": "CHECKPOINT", "checkpoint": latest})
             except Exception:
                 pass

@@ -227,7 +227,8 @@ class Ledger:
             return True
 
     def recalculate_totals(self):
-        self.total_minted = round(sum(r["amount"] for r in self.rewards if r.get("type") == "block_reward"), 8)
+        base = self.checkpoints[-1]["total_minted"] if self.checkpoints else 0.0
+        self.total_minted = round(base + sum(r["amount"] for r in self.rewards if r.get("type") == "block_reward"), 8)
 
     def get_summary(self):
         return {

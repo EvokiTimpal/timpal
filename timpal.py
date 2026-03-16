@@ -1572,7 +1572,8 @@ class Node:
         if not added:
             return
         gossip_id = reward_id + ":" + winner["winner_id"]
-        self.network.seen_ids.add(gossip_id)
+        with self.network._seen_lock:
+            self.network.seen_ids.add(gossip_id)
         self.network.broadcast({"type": "REWARD", "reward": reward})
         if winner["winner_id"] == self.wallet.device_id:
             balance = self.ledger.get_balance(self.wallet.device_id)

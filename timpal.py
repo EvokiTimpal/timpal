@@ -1393,7 +1393,7 @@ class Node:
                 sock.close()
             except Exception:
                 pass
-        for host, port in list(self._bootstrap_servers):
+        for host, port in list(self.network._bootstrap_servers):
             threading.Thread(target=_send, args=(host, port), daemon=True).start()
 
     def _bootstrap_query(self, msg_type: str, slot: int) -> dict:
@@ -1403,7 +1403,7 @@ class Node:
         results = {}
         lock = threading.Lock()
         done = threading.Event()
-        servers = list(self._bootstrap_servers)
+        servers = list(self.network._bootstrap_servers)
         remaining = [len(servers)]
 
         def _query(host, port):

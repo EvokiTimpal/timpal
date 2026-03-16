@@ -1950,7 +1950,7 @@ class Node:
 
     def start(self):
         print("\n" + "═" * 52)
-        print("  TIMPAL v2.0 — Plan B for Humanity")
+        print("  TIMPAL v2.0 — Quantum-Resistant Money Without Masters")
         print("  Quantum-Resistant | Worldwide | Instant")
         print("═" * 52)
         self.network.start()

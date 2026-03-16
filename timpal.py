@@ -47,6 +47,7 @@ BROADCAST_PORT     = 7778
 DISCOVERY_INTERVAL = 5
 WALLET_FILE        = __import__("os").path.join(__import__("os").path.expanduser("~"), ".timpal_wallet.json")
 LEDGER_FILE        = __import__("os").path.join(__import__("os").path.expanduser("~"), ".timpal_ledger.json")
+BOOTSTRAP_CACHE_FILE = __import__("os").path.join(__import__("os").path.expanduser("~"), ".timpal_bootstrap.json")
 
 # Supply constants
 TOTAL_SUPPLY       = 250_000_000.0   # 250 million TMPL total
@@ -528,6 +529,59 @@ class Transaction:
 
 
 # ─────────────────────────────────────────────
+# BOOTSTRAP HELPERS — Multi-server resilience
+# ─────────────────────────────────────────────
+
+def _load_bootstrap_servers() -> list:
+    """Load cached bootstrap servers and merge with hardcoded list.
+    Returns a deduplicated list of (host, port) tuples."""
+    servers = list(BOOTSTRAP_SERVERS)
+    try:
+        if os.path.exists(BOOTSTRAP_CACHE_FILE):
+            with open(BOOTSTRAP_CACHE_FILE, "r") as f:
+                cached = json.load(f)
+            for entry in cached:
+                pair = (entry["host"], entry["port"])
+                if pair not in servers:
+                    servers.append(pair)
+    except Exception:
+        pass
+    return servers
+
+def _fetch_bootstrap_list() -> list:
+    """Fetch bootstrap_servers.txt from GitHub and return list of (host, port) tuples.
+    Returns empty list silently if GitHub is unreachable — never blocks startup."""
+    servers = []
+    try:
+        import urllib.request
+        raw = urllib.request.urlopen(BOOTSTRAP_LIST_URL, timeout=5).read().decode("utf-8")
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split(":")
+            if len(parts) == 2:
+                host = parts[0].strip()
+                try:
+                    port = int(parts[1].strip())
+                    if host and 1024 <= port <= 65535:
+                        servers.append((host, port))
+                except ValueError:
+                    continue
+    except Exception:
+        pass
+    return servers
+
+def _save_bootstrap_servers(servers: list):
+    """Save known bootstrap servers to cache file."""
+    try:
+        data = [{"host": h, "port": p} for h, p in servers]
+        with open(BOOTSTRAP_CACHE_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
+# ─────────────────────────────────────────────
 # NETWORK — Worldwide peer discovery
 # ─────────────────────────────────────────────
 
@@ -538,24 +592,17 @@ class Network:
         self.ledger         = ledger
         self.on_transaction = on_transaction
         self.on_reward      = on_reward
-        self.peers          = {}        # device_id -> {ip, port, last_seen}
-        self.seen_ids       = set()
-        self._running       = False
-        self.local_ip       = self._get_local_ip()
-        self.port           = find_free_port(7779)
-        self._node_ref      = None
+        self.peers             = {}        # device_id -> {ip, port, last_seen}
+        self.seen_ids          = set()
+        self._running          = False
+        self._bootstrap_servers = _load_bootstrap_servers()
+        self.local_ip          = self._get_local_ip()
+        self.port              = find_free_port(7779)
+        self._node_ref         = None
 
     def _get_local_ip(self):
-        # Try to get public IP first (for server deployments)
-        try:
-            import urllib.request
-            public_ip = urllib.request.urlopen(
-                'https://api.ipify.org', timeout=3
-            ).read().decode('utf-8').strip()
-            if public_ip:
-                return public_ip
-        except Exception:
-            pass
+        # Get local IP for LAN peer discovery
+        # Public IP is handled by bootstrap — it sees our real IP on connection
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
@@ -611,50 +658,83 @@ class Network:
     # ── Bootstrap connection ────────────────────
 
     def _bootstrap_connect(self):
-        """Connect to bootstrap server and get initial peer list."""
+        """Connect to all known bootstrap servers, get peer lists and bootstrap server lists.
+        Fetches GitHub list on startup to discover community bootstrap servers.
+        Re-registers with all bootstrap servers every 2 minutes."""
         time.sleep(2)
+        # Fetch GitHub bootstrap list once on startup and merge
+        github_servers = _fetch_bootstrap_list()
+        for pair in github_servers:
+            if pair not in self._bootstrap_servers:
+                self._bootstrap_servers.append(pair)
+        if github_servers:
+            _save_bootstrap_servers(self._bootstrap_servers)
         while self._running:
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(10.0)
-                sock.connect((BOOTSTRAP_HOST, BOOTSTRAP_PORT))
-                msg = json.dumps({
-                    "type":      "HELLO",
-                    "device_id": self.wallet.device_id,
-                    "port":      self.port,
-                    "version":   VERSION
-                }).encode()
-                sock.sendall(msg)
-                response = sock.recv(65536)
-                sock.close()
-
-                data = json.loads(response.decode())
-                if data.get("type") == "VERSION_REJECTED":
-                    print(f"\n  [!] {data.get('reason', 'Version rejected by bootstrap')}")
-                    print(f"  > ", end="", flush=True)
-                    return
-                if data.get("type") == "PEERS":
-                    new_peers = 0
-                    for peer in data.get("peers", []):
-                        pid = peer["device_id"]
-                        if pid != self.wallet.device_id and pid not in self.peers:
-                            self.peers[pid] = {
-                                "ip":        peer["ip"],
-                                "port":      peer["port"],
-                                "last_seen": time.time()
-                            }
-                            new_peers += 1
-                    if new_peers > 0:
-                        self._save_peers()
-                        print(f"\n  [+] Bootstrap: found {new_peers} peers worldwide")
-                        print(f"  Network size: {data.get('network_size', 0)} nodes")
+            new_peers = 0
+            for host, port in list(self._bootstrap_servers):
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(10.0)
+                    sock.connect((host, port))
+                    sock.sendall(json.dumps({
+                        "type":      "HELLO",
+                        "device_id": self.wallet.device_id,
+                        "port":      self.port,
+                        "version":   VERSION
+                    }).encode())
+                    response = sock.recv(65536)
+                    sock.close()
+                    data = json.loads(response.decode())
+                    if data.get("type") == "VERSION_REJECTED":
+                        print(f"\n  [!] {data.get('reason', 'Version rejected by bootstrap')}")
                         print(f"  > ", end="", flush=True)
-                        threading.Thread(target=self._sync_ledger, daemon=True).start()
-
-            except Exception:
-                pass
-
-            # Re-register with bootstrap every 2 minutes
+                        return
+                    if data.get("type") == "PEERS":
+                        for peer in data.get("peers", []):
+                            pid = peer["device_id"]
+                            if pid != self.wallet.device_id and pid not in self.peers:
+                                self.peers[pid] = {
+                                    "ip":        peer["ip"],
+                                    "port":      peer["port"],
+                                    "last_seen": time.time()
+                                }
+                                new_peers += 1
+                except Exception:
+                    continue
+                # Ask each bootstrap server for its known bootstrap servers
+                try:
+                    sock2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock2.settimeout(5.0)
+                    sock2.connect((host, port))
+                    sock2.sendall(json.dumps({"type": "GET_BOOTSTRAP_SERVERS"}).encode())
+                    sock2.shutdown(socket.SHUT_WR)
+                    resp = b""
+                    while True:
+                        chunk = sock2.recv(65536)
+                        if not chunk:
+                            break
+                        resp += chunk
+                        if len(resp) > 65536:
+                            break
+                    sock2.close()
+                    bs_data = json.loads(resp.decode())
+                    if bs_data.get("type") == "BOOTSTRAP_SERVERS_RESPONSE":
+                        changed = False
+                        for entry in bs_data.get("servers", []):
+                            pair = (entry["host"], entry["port"])
+                            if pair not in self._bootstrap_servers:
+                                self._bootstrap_servers.append(pair)
+                                changed = True
+                        if changed:
+                            _save_bootstrap_servers(self._bootstrap_servers)
+                except Exception:
+                    pass
+            if new_peers > 0:
+                self._save_peers()
+                print(f"\n  [+] Bootstrap: found {new_peers} peers worldwide")
+                print(f"  > ", end="", flush=True)
+                threading.Thread(target=self._sync_ledger, daemon=True).start()
+            # Re-register with all bootstrap servers every 2 minutes
             time.sleep(120)
 
     def _periodic_sync(self):
@@ -1299,15 +1379,39 @@ class Node:
         raw = f"{ticket}:{self.wallet.device_id}:{time_slot}"
         return hashlib.sha256(raw.encode()).hexdigest()
 
-    def _bootstrap_request(self, msg: dict) -> dict:
-        """Send a request to bootstrap and return the response.
-        Tries all bootstrap servers, returns first success."""
-        for host, port in BOOTSTRAP_SERVERS:
+    def _bootstrap_submit(self, msg: dict):
+        """Submit a message to ALL known bootstrap servers simultaneously.
+        Fire and forget — used for SUBMIT_COMMIT and SUBMIT_REVEAL.
+        If some servers are down, others still receive the entry."""
+        def _send(host, port):
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(3.0)
                 sock.connect((host, port))
                 sock.sendall(json.dumps(msg).encode())
+                sock.shutdown(socket.SHUT_WR)
+                sock.close()
+            except Exception:
+                pass
+        for host, port in list(self._bootstrap_servers):
+            threading.Thread(target=_send, args=(host, port), daemon=True).start()
+
+    def _bootstrap_query(self, msg_type: str, slot: int) -> dict:
+        """Query ALL known bootstrap servers simultaneously and merge results.
+        Used for GET_COMMITS and GET_REVEALS.
+        Returns combined entries from every server that responded."""
+        results = {}
+        lock = threading.Lock()
+        done = threading.Event()
+        servers = list(self._bootstrap_servers)
+        remaining = [len(servers)]
+
+        def _query(host, port):
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(3.0)
+                sock.connect((host, port))
+                sock.sendall(json.dumps({"type": msg_type, "slot": slot}).encode())
                 sock.shutdown(socket.SHUT_WR)
                 resp = b""
                 while True:
@@ -1315,11 +1419,31 @@ class Node:
                     if not chunk:
                         break
                     resp += chunk
+                    if len(resp) > 1_000_000:
+                        break
                 sock.close()
-                return json.loads(resp.decode())
+                data = json.loads(resp.decode())
+                key = "commits" if msg_type == "GET_COMMITS" else "reveals"
+                entries = data.get(key, {})
+                with lock:
+                    for k, v in entries.items():
+                        if k not in results:
+                            results[k] = v
             except Exception:
-                continue
-        return {}
+                pass
+            finally:
+                with lock:
+                    remaining[0] -= 1
+                    if remaining[0] <= 0:
+                        done.set()
+
+        if not servers:
+            return {}
+        for host, port in servers:
+            threading.Thread(target=_query, args=(host, port), daemon=True).start()
+        done.wait(timeout=4.0)
+        return results
+
 
     def _pick_winner(self, time_slot, all_reveals):
         """Pick winner from all verified reveals for this slot.
@@ -1529,8 +1653,8 @@ class Node:
                     self._commits[time_slot] = {}
                 self._commits[time_slot][self.wallet.device_id] = commit
 
-            # Submit to bootstrap registry
-            self._bootstrap_request({
+            # Submit to all bootstrap servers
+            self._bootstrap_submit({
                 "type":      "SUBMIT_COMMIT",
                 "device_id": self.wallet.device_id,
                 "slot":      time_slot,
@@ -1547,21 +1671,17 @@ class Node:
                 self._cleanup_slot(time_slot)
                 continue
 
-            # Fetch all commits from bootstrap
-            resp = self._bootstrap_request({
-                "type": "GET_COMMITS",
-                "slot": time_slot
-            })
-            if resp.get("type") == "COMMITS_RESPONSE":
-                with self._lottery_lock:
-                    for device_id, c in resp.get("commits", {}).items():
-                        if device_id not in self._commits.get(time_slot, {}):
-                            if time_slot not in self._commits:
-                                self._commits[time_slot] = {}
-                            self._commits[time_slot][device_id] = c
+            # Fetch all commits from all bootstrap servers — merged result
+            commits_merged = self._bootstrap_query("GET_COMMITS", time_slot)
+            with self._lottery_lock:
+                for device_id, c in commits_merged.items():
+                    if device_id not in self._commits.get(time_slot, {}):
+                        if time_slot not in self._commits:
+                            self._commits[time_slot] = {}
+                        self._commits[time_slot][device_id] = c
 
-            # ── Phase 2: Submit reveal to bootstrap (t=2.0) ──────────────
-            self._bootstrap_request({
+            # ── Phase 2: Submit reveal to all bootstrap servers (t=2.0) ────
+            self._bootstrap_submit({
                 "type":       "SUBMIT_REVEAL",
                 "device_id":  self.wallet.device_id,
                 "slot":       time_slot,
@@ -1581,16 +1701,10 @@ class Node:
                 self._cleanup_slot(time_slot)
                 continue
 
-            # Fetch all reveals from bootstrap
-            resp = self._bootstrap_request({
-                "type": "GET_REVEALS",
-                "slot": time_slot
-            })
+            # Fetch all reveals from all bootstrap servers — merged result
+            all_reveals = self._bootstrap_query("GET_REVEALS", time_slot)
 
             # ── Phase 3: Pick winner (t=4.0) ─────────────────────────────
-            all_reveals = {}
-            if resp.get("type") == "REVEALS_RESPONSE":
-                all_reveals = resp.get("reveals", {})
 
             # Always include our own reveal
             all_reveals[self.wallet.device_id] = {

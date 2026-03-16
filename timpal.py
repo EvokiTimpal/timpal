@@ -1037,7 +1037,12 @@ class Network:
             elif msg_type == "TRANSACTION":
                 tx = Transaction.from_dict(msg["transaction"])
                 tx_gossip_id = msg.get("transaction", {}).get("tx_id", "")
-                if tx_gossip_id and tx_gossip_id not in self.seen_ids:
+                with self._seen_lock:
+                    if tx_gossip_id and tx_gossip_id not in self.seen_ids:
+                        self.seen_ids.add(tx_gossip_id)
+                    else:
+                        tx_gossip_id = None
+                if tx_gossip_id:
                     self.on_transaction(tx)
                     threading.Thread(
                         target=self.broadcast,

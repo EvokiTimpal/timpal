@@ -1051,8 +1051,6 @@ class Network:
                         args=(msg, None),
                         daemon=True
                     ).start()
-                elif not tx_gossip_id:
-                    self.on_transaction(tx)
 
             elif msg_type == "FEE_REWARDS":
                 # Era 2: peer is gossiping fee reward distributions for a slot

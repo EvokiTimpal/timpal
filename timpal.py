@@ -489,7 +489,7 @@ class Transaction:
         self.signature     = None
 
     def _payload(self) -> bytes:
-        return f"{self.tx_id}:{self.sender_id}:{self.recipient_id}:{self.amount:.8f}:{self.fee:.8f}:{self.timestamp:.4f}:{self.slot}".encode()
+        return f"{self.tx_id}:{self.sender_id}:{self.recipient_id}:{self.amount:.8f}:{self.fee:.8f}:{self.timestamp:.4f}:{self.slot if self.slot is not None else 0}".encode()
 
     def sign(self, wallet: Wallet):
         self.signature = wallet.sign(self._payload())

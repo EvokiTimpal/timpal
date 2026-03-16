@@ -1150,8 +1150,8 @@ class Network:
                 # 1. Send peer what they are missing
                 # 2. Tell peer what WE are missing so they can push it to us
                 # 3. Send our checkpoint if peer is behind
-                their_slots           = set(msg.get("known_slots", []))
-                their_tx_ids          = set(msg.get("known_tx_ids", []))
+                their_slots           = set(msg.get("known_slots", [])[:10000])
+                their_tx_ids          = set(msg.get("known_tx_ids", [])[:10000])
                 their_checkpoint_slot = msg.get("checkpoint_slot", 0)
 
                 with self.ledger._lock:

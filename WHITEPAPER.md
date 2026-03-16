@@ -1,6 +1,5 @@
-# TIMPAL — Plan B for Humanity
+# TIMPAL — Quantum-Resistant Money Without Masters
 
-**The money that works when everything else stops working.**  
 A Quantum-Resistant Peer-to-Peer Payment Protocol
 
 March 8, 2026
@@ -60,7 +59,7 @@ TIMPAL uses Dilithium3, selected as a post-quantum digital signature standard by
 ### 3.3 Network Topology
 
 - **Local:** UDP broadcast on port 7778 for same-network peer discovery.
-- **Global:** Bootstrap server at 5.78.187.91:7777 introduces nodes worldwide. Stores no funds. Controls nothing.
+- **Global:** Bootstrap server at bootstrap.timpal.org:7777 introduces nodes worldwide. Stores no funds. Controls nothing.
 
 Once connected, nodes communicate directly peer-to-peer. The bootstrap server is not involved in transactions or rewards.
 
@@ -201,6 +200,6 @@ The two-era model ensures the network is self-sustaining forever — first throu
 
 **GitHub:** https://github.com/EvokiTimpal/timpal
 **Website:** https://timpal.org
-**Bootstrap:** 5.78.187.91:7777
+**Bootstrap:** bootstrap.timpal.org:7777
 
 *This document is released into the public domain. No rights reserved.*

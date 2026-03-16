@@ -164,6 +164,8 @@ class Handler(BaseHTTPRequestHandler):
                         if t.get("tx_id") not in existing_txids:
                             _ledger["transactions"].append(t)
                             existing_txids.add(t.get("tx_id"))
+                    _ledger["rewards"]      = _ledger["rewards"][-10000:]
+                    _ledger["transactions"] = _ledger["transactions"][-5000:]
                 _last_update = time.time()
                 self.wfile.write(json.dumps({"ok": True}).encode())
             else:

@@ -1100,8 +1100,6 @@ class Network:
                         args=(msg, None),
                         daemon=True
                     ).start()
-                elif not reward_gossip_id:
-                    self.on_reward(msg["reward"])
 
             elif msg_type == "SYNC_PUSH":
                 # Peer is pushing rewards/txs we asked for

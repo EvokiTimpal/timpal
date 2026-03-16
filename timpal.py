@@ -1288,12 +1288,6 @@ class Node:
     _tx_rate = {}  # device_id -> [timestamps]
 
     def _on_transaction_received(self, tx: Transaction):
-        with self.network._seen_lock:
-            if tx.tx_id in self.network.seen_ids:
-                return
-            self.network.seen_ids.add(tx.tx_id)
-            self.network._seen_tx_order.append(tx.tx_id)
-
         if not tx.verify():
             return
 

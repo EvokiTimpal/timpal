@@ -1,6 +1,5 @@
-# TIMPAL — Plan B for Humanity
+# TIMPAL — Quantum-Resistant Money Without Masters
 
-The money that works when everything else stops working.  
 Quantum-resistant. Worldwide. Instant. Free.
 
 TIMPAL is a peer-to-peer payment protocol. No banks. No servers. No company. No control. Just people sending value directly to each other.
@@ -119,7 +118,7 @@ python3 timpal.py send c9da12e12fcb8782dbf7660a... 10.0
 
 ## Bootstrap node
 
-`5.78.187.91:7777` — door to the network. Stores no value. Controls nothing.
+`bootstrap.timpal.org:7777` — door to the network. Stores no value. Controls nothing.
 
 ---
 

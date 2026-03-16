@@ -594,6 +594,7 @@ class Network:
         self.on_reward      = on_reward
         self.peers             = {}        # device_id -> {ip, port, last_seen}
         self.seen_ids          = set()
+        self._seen_lock        = threading.Lock()
         self._running          = False
         self._bootstrap_servers = _load_bootstrap_servers()
         self.local_ip          = self._get_local_ip()
@@ -1082,8 +1083,12 @@ class Network:
                 # Include winner_id in gossip_id so competing rewards for same
                 # slot are not deduplicated — lowest ticket must reach all nodes
                 reward_gossip_id = reward.get("reward_id", "") + ":" + reward.get("winner_id", "")
-                if reward_gossip_id and reward_gossip_id not in self.seen_ids:
-                    self.seen_ids.add(reward_gossip_id)
+                with self._seen_lock:
+                    if reward_gossip_id and reward_gossip_id not in self.seen_ids:
+                        self.seen_ids.add(reward_gossip_id)
+                    else:
+                        reward_gossip_id = None
+                if reward_gossip_id:
                     self.on_reward(reward)
                     threading.Thread(
                         target=self.broadcast,
@@ -1278,9 +1283,10 @@ class Node:
     _tx_rate = {}  # device_id -> [timestamps]
 
     def _on_transaction_received(self, tx: Transaction):
-        if tx.tx_id in self.network.seen_ids:
-            return
-        self.network.seen_ids.add(tx.tx_id)
+        with self.network._seen_lock:
+            if tx.tx_id in self.network.seen_ids:
+                return
+            self.network.seen_ids.add(tx.tx_id)
 
         if not tx.verify():
             return
@@ -1590,19 +1596,20 @@ class Node:
         # Prune old reward gossip IDs — format is "reward:{slot}:{winner_id}"
         # and checkpoint IDs — format is "checkpoint:{slot}"
         cutoff = time_slot - 100
-        stale = [
-            sid for sid in self.network.seen_ids
-            if (sid.startswith("reward:") or sid.startswith("checkpoint:"))
-            and int(sid.split(":")[1]) < cutoff
-        ]
-        for sid in stale:
-            self.network.seen_ids.discard(sid)
-        # Cap transaction IDs — keep most recent 10000 only
-        tx_ids = [sid for sid in self.network.seen_ids
-                  if not sid.startswith("reward:") and not sid.startswith("checkpoint:")]
-        if len(tx_ids) > 10000:
-            for sid in tx_ids[:-10000]:
+        with self.network._seen_lock:
+            stale = [
+                sid for sid in self.network.seen_ids
+                if (sid.startswith("reward:") or sid.startswith("checkpoint:"))
+                and int(sid.split(":")[1]) < cutoff
+            ]
+            for sid in stale:
                 self.network.seen_ids.discard(sid)
+            # Cap transaction IDs — keep most recent 10000 only
+            tx_ids = [sid for sid in self.network.seen_ids
+                      if not sid.startswith("reward:") and not sid.startswith("checkpoint:")]
+            if len(tx_ids) > 10000:
+                for sid in tx_ids[:-10000]:
+                    self.network.seen_ids.discard(sid)
 
     def _reward_lottery(self):
         """Commit-reveal VRF lottery — fully decentralized, CGNAT-safe.

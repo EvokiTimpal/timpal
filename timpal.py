@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-TIMPAL Protocol v2.0 — Plan B for Humanity
+TIMPAL Protocol v2.0 — Quantum-Resistant Money Without Masters
 
 Quantum-resistant. Worldwide. Instant transactions.
 Distributed ledger. No banks. No servers. No control.

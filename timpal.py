@@ -594,6 +594,7 @@ class Network:
         self.on_reward      = on_reward
         self.peers             = {}        # device_id -> {ip, port, last_seen}
         self.seen_ids          = set()
+        self._seen_tx_order    = []
         self._seen_lock        = threading.Lock()
         self._running          = False
         self._bootstrap_servers = _load_bootstrap_servers()
@@ -1040,6 +1041,7 @@ class Network:
                 with self._seen_lock:
                     if tx_gossip_id and tx_gossip_id not in self.seen_ids:
                         self.seen_ids.add(tx_gossip_id)
+                        self._seen_tx_order.append(tx_gossip_id)
                     else:
                         tx_gossip_id = None
                 if tx_gossip_id:
@@ -1292,6 +1294,7 @@ class Node:
             if tx.tx_id in self.network.seen_ids:
                 return
             self.network.seen_ids.add(tx.tx_id)
+            self.network._seen_tx_order.append(tx.tx_id)
 
         if not tx.verify():
             return
@@ -1609,12 +1612,12 @@ class Node:
             ]
             for sid in stale:
                 self.network.seen_ids.discard(sid)
-            # Cap transaction IDs — keep most recent 10000 only
-            tx_ids = [sid for sid in self.network.seen_ids
-                      if not sid.startswith("reward:") and not sid.startswith("checkpoint:")]
-            if len(tx_ids) > 10000:
-                for sid in tx_ids[:-10000]:
+            # Cap transaction IDs — prune oldest by insertion order
+            if len(self.network._seen_tx_order) > 10000:
+                to_remove = self.network._seen_tx_order[:-10000]
+                for sid in to_remove:
                     self.network.seen_ids.discard(sid)
+                self.network._seen_tx_order = self.network._seen_tx_order[-10000:]
 
     def _reward_lottery(self):
         """Commit-reveal VRF lottery — fully decentralized, CGNAT-safe.

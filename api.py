@@ -145,16 +145,16 @@ class Handler(BaseHTTPRequestHandler):
                 txs     = data.get("transactions", [])
                 with _ledger_lock:
                     # Merge rewards — one per slot, lowest ticket wins
-                    existing_slots = {r.get("time_slot"): r for r in _ledger["rewards"]}
+                    existing_slots = {r.get("time_slot"): r for r in _ledger["rewards"] if r.get("type") == "block_reward"}
                     for r in rewards:
                         slot = r.get("time_slot")
-                        if slot:
+                        if slot and r.get("type") != "fee_reward":
                             existing = existing_slots.get(slot)
                             if not existing:
                                 _ledger["rewards"].append(r)
                                 existing_slots[slot] = r
                             elif r.get("vrf_ticket","z") < existing.get("vrf_ticket","z"):
-                                _ledger["rewards"] = [x for x in _ledger["rewards"] if x.get("time_slot") != slot]
+                                _ledger["rewards"] = [x for x in _ledger["rewards"] if x.get("time_slot") != slot or x.get("type") == "fee_reward"]
                                 _ledger["rewards"].append(r)
                                 existing_slots[slot] = r
                         else:

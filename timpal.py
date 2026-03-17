@@ -129,7 +129,7 @@ class Ledger:
         with self._lock:
             balance = 0.0
             if self.checkpoints:
-                balance = self.checkpoints[-1]["balances"].get(device_id, 0.0)
+                balance = self.checkpoints[-1].get("balances", {}).get(device_id, 0.0)
             for tx in self.transactions:
                 if tx["recipient_id"] == device_id:
                     balance += tx["amount"]
@@ -210,7 +210,7 @@ class Ledger:
             slot = reward_dict.get("time_slot")
             new_ticket = reward_dict.get("vrf_ticket", "z")
             if slot:
-                existing = next((r for r in self.rewards if r.get("time_slot") == slot), None)
+                existing = next((r for r in self.rewards if r.get("time_slot") == slot and r.get("type") != "fee_reward"), None)
                 if existing:
                     # Exact same reward already stored
                     if existing.get("reward_id") == reward_dict["reward_id"] and existing.get("winner_id") == reward_dict.get("winner_id"):
@@ -298,7 +298,7 @@ class Ledger:
                         del existing_slots[slot]
                     else:
                         continue
-                if self.total_minted + reward["amount"] <= TOTAL_SUPPLY:
+                if reward.get("type") == "fee_reward" or self.total_minted + reward["amount"] <= TOTAL_SUPPLY:
                     self.rewards.append(reward)
                     if slot:
                         existing_slots[slot] = reward
@@ -421,7 +421,8 @@ class Ledger:
             self.transactions = [t for t in self.transactions
                                 if (t.get("slot") or 0) >= prune_before]
             self.checkpoints.append(checkpoint)
-            self.total_minted = checkpoint["total_minted"]
+            self.total_minted = checkpoint.get("total_minted", 0.0)
+            self.recalculate_totals()
             self.save()
             return True
 
@@ -1088,11 +1089,12 @@ class Network:
                             pass
                         else:
                             # Verify against our own ledger — calculate actual fees for this slot
-                            actual_fees = sum(
-                                tx.get("fee", 0.0)
-                                for tx in self.ledger.transactions
-                                if tx.get("slot") == time_slot and tx.get("fee", 0.0) > 0
-                            )
+                            with self.ledger._lock:
+                                actual_fees = sum(
+                                    tx.get("fee", 0.0)
+                                    for tx in self.ledger.transactions
+                                    if tx.get("slot") == time_slot and tx.get("fee", 0.0) > 0
+                                )
                             claimed_total = sum(fr.get("amount", 0.0) for fr in fee_rewards)
                             # Total claimed must not exceed actual fees (with rounding tolerance)
                             if claimed_total > actual_fees + 0.000001:

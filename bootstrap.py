@@ -41,6 +41,8 @@ BS_RATE_LIMIT          = 5    # Max REGISTER_BOOTSTRAP per IP per hour
 BS_MAX_SERVERS         = 100  # Max bootstrap servers stored
 COMMIT_RATE_LIMIT = 3   # Max commits per IP per slot (3 nodes per household)
 REVEAL_RATE_LIMIT = 3   # Max reveals per IP per slot (3 nodes per household)
+hello_ip_rate  = {}   # ip -> [timestamps] — HELLO rate limiting per IP per minute
+HELLO_RATE_LIMIT = 10  # Max HELLO registrations per IP per minute
 HELLO_PEERS_SAMPLE = 50  # Max peers returned in HELLO response
 
 
@@ -80,6 +82,13 @@ def clean_old_data():
                 del bootstrap_servers[k]
             if stale_bs:
                 print(f"  Cleaned {len(stale_bs)} stale bootstrap servers. Active: {len(bootstrap_servers)}")
+        # Clean stale hello_ip_rate entries
+        now_clean = time.time()
+        with rate_lock:
+            for ip_key in list(hello_ip_rate.keys()):
+                hello_ip_rate[ip_key] = [t for t in hello_ip_rate[ip_key] if now_clean - t < 60]
+                if not hello_ip_rate[ip_key]:
+                    del hello_ip_rate[ip_key]
         # Clean stale bs_ip_rate entries
         with bootstrap_servers_lock:
             for ip_key in list(bs_ip_rate.keys()):
@@ -116,6 +125,15 @@ def handle_client(conn, addr):
                 }).encode())
                 print(f"  [!] Rejected old node v{node_version}: {device_id[:20]}... from {ip}")
                 return
+            # Rate limit — max HELLO_RATE_LIMIT registrations per IP per minute
+            now_hello = time.time()
+            with rate_lock:
+                hello_ip_rate.setdefault(ip, [])
+                hello_ip_rate[ip] = [t for t in hello_ip_rate[ip] if now_hello - t < 60]
+                if len(hello_ip_rate[ip]) >= HELLO_RATE_LIMIT:
+                    conn.sendall(json.dumps({"type": "ERROR", "msg": "rate limit exceeded"}).encode())
+                    return
+                hello_ip_rate[ip].append(now_hello)
             with peers_lock:
                 is_new = device_id not in peers
                 if is_new and len(peers) >= 10000:

@@ -1828,8 +1828,14 @@ class Node:
             print(f"  Requested    : {amount:.8f} TMPL")
             return False
 
-        if peer_id not in self.network.get_online_peers():
-            print(f"\n  Peer is not online.")
+        # Validate recipient address format
+        if not (isinstance(peer_id, str) and len(peer_id) == 64 and all(c in "0123456789abcdef" for c in peer_id.lower())):
+            print(f"\n  Invalid address. Must be a 64-character hex string.")
+            return False
+
+        # Prevent sending to yourself
+        if peer_id == self.wallet.device_id:
+            print(f"\n  Cannot send to yourself.")
             return False
 
         # Era 2: include fee if all coins distributed
@@ -1937,9 +1943,6 @@ class Node:
         elif action == "send":
             peer_id = cmd.get("peer_id")
             amount  = float(cmd.get("amount", 0))
-            peers   = self.network.get_online_peers()
-            if peer_id not in peers:
-                return {"ok": False, "error": "Peer not online"}
             ok = self.send(peer_id, amount)
             return {"ok": ok}
 
@@ -2112,20 +2115,28 @@ class Node:
                 self._sending = True
                 try:
                     peers = self.network.get_online_peers()
-                    if not peers:
-                        print("\n  No peers online yet.\n")
-                        continue
                     peer_list = list(peers.items())
-                    print(f"\n  Online peers:")
+                    if peer_list:
+                        print(f"\n  Online peers:")
                     for i, (pid, info) in enumerate(peer_list):
                         print(f"  [{i+1}] {pid[:24]}... — {info['ip']}")
+                    if peer_list:
+                        print(f"\n  Enter peer number or full address:")
+                    else:
+                        print(f"\n  No peers online. Enter recipient address:")
                     try:
-                        choice = input("\n  Select peer number: ").strip()
-                        idx = int(choice) - 1
-                        if idx < 0 or idx >= len(peer_list):
-                            print("  Invalid selection.\n")
-                            continue
-                        peer_id = peer_list[idx][0]
+                        choice = input("  > ").strip()
+                        if peer_list and choice.isdigit():
+                            idx = int(choice) - 1
+                            if idx < 0 or idx >= len(peer_list):
+                                print("  Invalid selection.\n")
+                                continue
+                            peer_id = peer_list[idx][0]
+                        else:
+                            peer_id = choice.lower()
+                            if not (len(peer_id) == 64 and all(c in "0123456789abcdef" for c in peer_id)):
+                                print("  Invalid address. Must be a 64-character hex string.\n")
+                                continue
                     except (ValueError, IndexError):
                         print("  Invalid selection.\n")
                         continue

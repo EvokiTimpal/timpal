@@ -299,7 +299,12 @@ def handle_client(conn, addr):
             # Skip rate limit for known bootstrap servers gossiping to each other
             now = time.time()
             with bootstrap_servers_lock:
-                known_bs_ips = {v["host"] for v in bootstrap_servers.values()}
+                known_bs_ips = set()
+                for v in bootstrap_servers.values():
+                    try:
+                        known_bs_ips.add(socket.gethostbyname(v["host"]))
+                    except Exception:
+                        known_bs_ips.add(v["host"])
             if ip not in known_bs_ips:
                 with bootstrap_servers_lock:
                     bs_ip_rate.setdefault(ip, [])

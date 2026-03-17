@@ -152,6 +152,11 @@ def handle_client(conn, addr):
             if len(commit) != 64 or not all(c in "0123456789abcdef" for c in commit.lower()):
                 conn.sendall(json.dumps({"type": "ERROR", "msg": "invalid commit"}).encode())
                 return
+            # Reject stale or future slots — must be within 2 slots of current
+            current_slot = int(time.time() / 5.0)
+            if abs(slot - current_slot) > 2:
+                conn.sendall(json.dumps({"type": "ERROR", "msg": "stale slot"}).encode())
+                return
             # Rate limit — max COMMIT_RATE_LIMIT commits per IP per slot
             with rate_lock:
                 commit_ip_rate.setdefault(ip, {})
@@ -200,6 +205,11 @@ def handle_client(conn, addr):
                 return
             if len(sig) > 8192:
                 conn.sendall(json.dumps({"type": "ERROR", "msg": "invalid sig"}).encode())
+                return
+            # Reject stale or future slots — must be within 2 slots of current
+            current_slot = int(time.time() / 5.0)
+            if abs(slot - current_slot) > 2:
+                conn.sendall(json.dumps({"type": "ERROR", "msg": "stale slot"}).encode())
                 return
             # Rate limit — max REVEAL_RATE_LIMIT reveals per IP per slot
             with rate_lock:

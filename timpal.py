@@ -538,11 +538,30 @@ class Transaction:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Transaction":
+        # Validate amount — must be numeric and positive
+        amount = d["amount"]
+        if not isinstance(amount, (int, float)) or isinstance(amount, bool):
+            raise ValueError(f"invalid amount: {amount!r}")
+        if amount <= 0:
+            raise ValueError(f"amount must be positive: {amount}")
+        # Validate sender_id and recipient_id — must be 64-char lowercase hex
+        for field in ("sender_id", "recipient_id"):
+            val = d.get(field, "")
+            if not isinstance(val, str) or len(val) != 64 or not all(c in "0123456789abcdef" for c in val.lower()):
+                raise ValueError(f"invalid {field}: {val!r}")
+        # Validate sender_pubkey — must be non-empty hex string
+        pubkey = d.get("sender_pubkey", "")
+        if not isinstance(pubkey, str) or not pubkey:
+            raise ValueError(f"invalid sender_pubkey")
+        try:
+            bytes.fromhex(pubkey)
+        except Exception:
+            raise ValueError(f"sender_pubkey is not valid hex")
         tx = cls(
             sender_id     = d["sender_id"],
             recipient_id  = d["recipient_id"],
             sender_pubkey = d["sender_pubkey"],
-            amount        = d["amount"],
+            amount        = amount,
             fee           = d.get("fee", 0.0),
             slot          = d.get("slot"),
             timestamp     = d["timestamp"],
@@ -804,12 +823,15 @@ class Network:
 
     def _confirm_checkpoint_with_peers(self, checkpoint, exclude_ip=None):
         """Ask other peers if they have the same checkpoint.
-        Returns True if at least 1 peer (besides the sender) confirms.
+        Returns True if min(3, len(peers)) distinct peers confirm.
         Used when our ledger is empty and we cannot verify hashes locally."""
         peers = self.get_online_peers()
-        for peer_id, peer in list(peers.items()):
-            if peer["ip"] == exclude_ip:
-                continue
+        eligible = {pid: p for pid, p in peers.items() if p["ip"] != exclude_ip}
+        required = min(3, len(eligible))
+        if required == 0:
+            return False
+        confirmations = 0
+        for peer_id, peer in list(eligible.items()):
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(10.0)
@@ -839,7 +861,9 @@ class Network:
                         peer_cp.get("rewards_hash") == checkpoint.get("rewards_hash") and
                         peer_cp.get("txs_hash")     == checkpoint.get("txs_hash") and
                         peer_cp.get("total_minted") == checkpoint.get("total_minted")):
-                        return True
+                        confirmations += 1
+                        if confirmations >= required:
+                            return True
             except Exception:
                 continue
         return False

@@ -1782,7 +1782,10 @@ class Node:
             print(f"\n  Transaction rejected by ledger.")
             return False
 
-        # Broadcast to all peers
+        # Broadcast to all peers — add to seen_ids first so our own broadcast doesn't bounce back
+        with self.network._seen_lock:
+            self.network.seen_ids.add(tx.tx_id)
+            self.network._seen_tx_order.append(tx.tx_id)
         self.network.broadcast({
             "type":        "TRANSACTION",
             "transaction": tx.to_dict()

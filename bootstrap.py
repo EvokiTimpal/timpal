@@ -296,14 +296,18 @@ def handle_client(conn, addr):
                 conn.sendall(json.dumps({"type": "ERROR", "msg": "invalid host"}).encode())
                 return
             # Rate limit — max BS_RATE_LIMIT registrations per IP per hour
+            # Skip rate limit for known bootstrap servers gossiping to each other
             now = time.time()
             with bootstrap_servers_lock:
-                bs_ip_rate.setdefault(ip, [])
-                bs_ip_rate[ip] = [t for t in bs_ip_rate[ip] if now - t < 3600]
-                if len(bs_ip_rate[ip]) >= BS_RATE_LIMIT:
-                    conn.sendall(json.dumps({"type": "ERROR", "msg": "rate limit exceeded"}).encode())
-                    return
-                bs_ip_rate[ip].append(now)
+                known_bs_ips = {v["host"] for v in bootstrap_servers.values()}
+            if ip not in known_bs_ips:
+                with bootstrap_servers_lock:
+                    bs_ip_rate.setdefault(ip, [])
+                    bs_ip_rate[ip] = [t for t in bs_ip_rate[ip] if now - t < 3600]
+                    if len(bs_ip_rate[ip]) >= BS_RATE_LIMIT:
+                        conn.sendall(json.dumps({"type": "ERROR", "msg": "rate limit exceeded"}).encode())
+                        return
+                    bs_ip_rate[ip].append(now)
             # Verify server is actually reachable before storing
             key = f"{bs_host}:{bs_port}"
             try:

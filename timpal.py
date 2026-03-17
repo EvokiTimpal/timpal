@@ -675,6 +675,19 @@ class Network:
         threading.Thread(target=self._broadcast_loop,    daemon=True).start()
         threading.Thread(target=self._bootstrap_connect, daemon=True).start()
         threading.Thread(target=self._periodic_sync, daemon=True).start()
+        threading.Thread(target=self._clean_peers,    daemon=True).start()
+
+    def _clean_peers(self):
+        """Remove peers not seen for 5 minutes. Runs every 60 seconds.
+        Matches bootstrap cleanup interval and cutoff."""
+        while self._running:
+            time.sleep(60)
+            cutoff = time.time() - 300
+            stale = [pid for pid, p in list(self.peers.items()) if p["last_seen"] < cutoff]
+            for pid in stale:
+                del self.peers[pid]
+            if stale:
+                self._save_peers()
 
     def stop(self):
         self._running = False

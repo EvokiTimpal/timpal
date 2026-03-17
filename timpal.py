@@ -1311,12 +1311,6 @@ class Node:
         if not added:
             return
 
-        # Broadcast to rest of network
-        self.network.broadcast({
-            "type":        "TRANSACTION",
-            "transaction": tx.to_dict()
-        })
-
         # Show notification if we are the recipient
         if tx.recipient_id == self.wallet.device_id:
             balance = self.ledger.get_balance(self.wallet.device_id)
@@ -1334,9 +1328,6 @@ class Node:
         added = self.ledger.add_reward(reward)
         if not added:
             return
-
-        # Broadcast to rest of network
-        self.network.broadcast({"type": "REWARD", "reward": reward})
 
         # Show notification if we won, otherwise show who did
         if reward.get("winner_id") == self.wallet.device_id:

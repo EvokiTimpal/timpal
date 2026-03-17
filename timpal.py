@@ -154,7 +154,8 @@ class Ledger:
 
     def add_transaction(self, tx_dict: dict) -> bool:
         """Add a verified transaction to the ledger.
-        In Era 2, sender must have enough balance for amount + fee."""
+        In Era 2, sender must have enough balance for amount + fee.
+        Signature verified before acquiring lock — Dilithium3 takes ~1ms."""
         if tx_dict.get("amount", 0) <= 0:
             return False
         try:
@@ -261,34 +262,40 @@ class Ledger:
 
     def merge(self, other_ledger: dict):
         """Merge — one winner per time_slot, lowest VRF ticket wins conflict.
-        All transactions and rewards are cryptographically verified before acceptance."""
+        All transactions and rewards are cryptographically verified before acceptance.
+        Crypto verification happens before acquiring lock — Dilithium3 takes ~1ms per call."""
+        # Pre-verify all transactions outside the lock
+        verified_txs = []
+        for tx in other_ledger.get("transactions", []):
+            try:
+                t = Transaction.from_dict(tx)
+                if t.verify():
+                    verified_txs.append(tx)
+            except Exception:
+                continue
+        # Pre-verify all rewards outside the lock
+        verified_rewards = []
+        for reward in other_ledger.get("rewards", []):
+            pub  = reward.get("vrf_public_key")
+            seed = reward.get("vrf_seed")
+            sig  = reward.get("vrf_sig")
+            tick = reward.get("vrf_ticket")
+            if pub and seed and sig and tick:
+                if not Node._verify_ticket(pub, seed, sig, tick):
+                    continue
+            verified_rewards.append(reward)
         with self._lock:
             changed = False
-            for tx in other_ledger.get("transactions", []):
+            for tx in verified_txs:
                 if not self.has_transaction(tx["tx_id"]):
                     total = tx["amount"] + tx.get("fee", 0.0)
                     if self.can_spend(tx["sender_id"], total):
-                        # Verify signature before accepting
-                        try:
-                            t = Transaction.from_dict(tx)
-                            if not t.verify():
-                                continue
-                        except Exception:
-                            continue
                         self.transactions.append(tx)
                         changed = True
             existing_slots = {r.get("time_slot"): r for r in self.rewards if r.get("type") == "block_reward"}
-            for reward in other_ledger.get("rewards", []):
+            for reward in verified_rewards:
                 rid  = reward["reward_id"]
                 slot = reward.get("time_slot")
-                # Cryptographically verify VRF ticket before accepting via merge
-                pub  = reward.get("vrf_public_key")
-                seed = reward.get("vrf_seed")
-                sig  = reward.get("vrf_sig")
-                tick = reward.get("vrf_ticket")
-                if pub and seed and sig and tick:
-                    if not Node._verify_ticket(pub, seed, sig, tick):
-                        continue
                 if any(r["reward_id"] == rid and r.get("winner_id") == reward.get("winner_id") for r in self.rewards):
                     continue
                 if slot and slot in existing_slots and reward.get("type") != "fee_reward":
@@ -1236,12 +1243,8 @@ class Network:
                             self.broadcast({"type": "CHECKPOINT", "checkpoint": checkpoint})
 
             elif msg_type == "GET_LEDGER":
-                # Legacy full sync — still supported for compatibility
-                response = json.dumps({
-                    "type":   "LEDGER",
-                    "ledger": self.ledger.to_dict()
-                }).encode()
-                conn.sendall(response)
+                # Legacy endpoint — removed, delta sync replaced it entirely
+                conn.sendall(json.dumps({"type": "ERROR", "msg": "GET_LEDGER removed, use SYNC_REQUEST"}).encode())
 
             elif msg_type == "SYNC_REQUEST":
                 # Delta sync — bidirectional
@@ -1412,7 +1415,10 @@ class Node:
             if len(times) >= 60:
                 return
             times.append(now)
-            Node._tx_rate[sender] = times
+            if times:
+                Node._tx_rate[sender] = times
+            else:
+                Node._tx_rate.pop(sender, None)
 
         # Add to ledger — ledger checks balance automatically
         added = self.ledger.add_transaction(tx.to_dict())

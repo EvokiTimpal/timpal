@@ -282,7 +282,7 @@ def handle_client(conn, addr):
         elif msg_type == "GET_PEERS":
             with peers_lock:
                 peer_list = [
-                    {"device_id": pid, "ip": p["ip"], "port": p["port"]}
+                    {"device_id": pid}
                     for pid, p in peers.items()
                 ]
             conn.sendall(json.dumps({"type": "PEERS", "peers": peer_list}).encode())

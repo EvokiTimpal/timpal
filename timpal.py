@@ -218,7 +218,7 @@ class Ledger:
                     old_ticket = existing.get("vrf_ticket", "z")
                     if new_ticket < old_ticket:
                         # Incoming reward has lower ticket — it wins, replace
-                        self.rewards = [r for r in self.rewards if r.get("time_slot") != slot]
+                        self.rewards = [r for r in self.rewards if r.get("time_slot") != slot or r.get("type") == "fee_reward"]
                         self.total_minted -= existing["amount"]
                     else:
                         # Existing reward has lower or equal ticket — keep it
@@ -1077,27 +1077,37 @@ class Network:
                     time_slot   = msg.get("time_slot")
                     fee_rewards = msg.get("fee_rewards", [])
                     if fee_rewards and time_slot is not None:
-                        # Verify against our own ledger — calculate actual fees for this slot
-                        actual_fees = sum(
-                            tx.get("fee", 0.0)
-                            for tx in self.ledger.transactions
-                            if tx.get("slot") == time_slot and tx.get("fee", 0.0) > 0
-                        )
-                        claimed_total = sum(fr.get("amount", 0.0) for fr in fee_rewards)
-                        # Total claimed must not exceed actual fees (with rounding tolerance)
-                        if claimed_total > actual_fees + 0.000001:
-                            pass  # Reject — claimed more than exists
+                        # Cap list size — prevent memory abuse
+                        fee_rewards = fee_rewards[:1000]
+                        # Validate winner_id format — must be 64-char hex
+                        fee_rewards = [fr for fr in fee_rewards
+                            if isinstance(fr.get("winner_id"), str)
+                            and len(fr["winner_id"]) == 64
+                            and all(c in "0123456789abcdef" for c in fr["winner_id"].lower())]
+                        if not fee_rewards:
+                            pass
                         else:
-                            # All recipients must have equal amounts
-                            amounts = [fr.get("amount", 0.0) for fr in fee_rewards]
-                            expected = round(actual_fees / len(fee_rewards), 8)
-                            if all(abs(a - expected) < 0.000001 for a in amounts):
-                                for fr in fee_rewards:
-                                    self.ledger.add_fee_reward(
-                                        time_slot,
-                                        fr["winner_id"],
-                                        fr["amount"]
-                                    )
+                            # Verify against our own ledger — calculate actual fees for this slot
+                            actual_fees = sum(
+                                tx.get("fee", 0.0)
+                                for tx in self.ledger.transactions
+                                if tx.get("slot") == time_slot and tx.get("fee", 0.0) > 0
+                            )
+                            claimed_total = sum(fr.get("amount", 0.0) for fr in fee_rewards)
+                            # Total claimed must not exceed actual fees (with rounding tolerance)
+                            if claimed_total > actual_fees + 0.000001:
+                                pass  # Reject — claimed more than exists
+                            else:
+                                # All recipients must have equal amounts
+                                amounts = [fr.get("amount", 0.0) for fr in fee_rewards]
+                                expected = round(actual_fees / len(fee_rewards), 8)
+                                if all(abs(a - expected) < 0.000001 for a in amounts):
+                                    for fr in fee_rewards:
+                                        self.ledger.add_fee_reward(
+                                            time_slot,
+                                            fr["winner_id"],
+                                            fr["amount"]
+                                        )
 
             elif msg_type in ("VRF_COMMIT", "VRF_REVEAL", "VRF_TICKET"):
                 pass   # Lottery handled via bootstrap registry — not peer gossip

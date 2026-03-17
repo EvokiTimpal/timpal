@@ -267,7 +267,7 @@ class Ledger:
                             continue
                         self.transactions.append(tx)
                         changed = True
-            existing_slots = {r.get("time_slot"): r for r in self.rewards}
+            existing_slots = {r.get("time_slot"): r for r in self.rewards if r.get("type") == "block_reward"}
             for reward in other_ledger.get("rewards", []):
                 rid  = reward["reward_id"]
                 slot = reward.get("time_slot")
@@ -281,12 +281,12 @@ class Ledger:
                         continue
                 if any(r["reward_id"] == rid and r.get("winner_id") == reward.get("winner_id") for r in self.rewards):
                     continue
-                if slot and slot in existing_slots:
+                if slot and slot in existing_slots and reward.get("type") != "fee_reward":
                     existing   = existing_slots[slot]
                     old_ticket = existing.get("vrf_ticket", "z")
                     new_ticket = reward.get("vrf_ticket", "z")
                     if new_ticket < old_ticket:
-                        self.rewards = [r for r in self.rewards if r.get("time_slot") != slot]
+                        self.rewards = [r for r in self.rewards if r.get("time_slot") != slot or r.get("type") == "fee_reward"]
                         del existing_slots[slot]
                     else:
                         continue

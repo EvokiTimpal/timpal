@@ -1094,11 +1094,9 @@ class Network:
 
             elif msg_type == "TRANSACTION":
                 tx_gossip_id = msg.get("transaction", {}).get("tx_id", "")
+                # Check seen_ids but do NOT add yet — only add after successful parse
                 with self._seen_lock:
-                    if tx_gossip_id and tx_gossip_id not in self.seen_ids:
-                        self.seen_ids.add(tx_gossip_id)
-                        self._seen_tx_order.append(tx_gossip_id)
-                    else:
+                    if not tx_gossip_id or tx_gossip_id in self.seen_ids:
                         tx_gossip_id = None
                 if tx_gossip_id:
                     try:
@@ -1106,6 +1104,10 @@ class Network:
                     except Exception:
                         tx_gossip_id = None
                 if tx_gossip_id:
+                    # Parse succeeded — now safe to mark as seen
+                    with self._seen_lock:
+                        self.seen_ids.add(tx_gossip_id)
+                        self._seen_tx_order.append(tx_gossip_id)
                     self.on_transaction(tx)
                     threading.Thread(
                         target=self.broadcast,

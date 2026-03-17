@@ -6,7 +6,7 @@ import json, os, time, threading, urllib.parse
 PUSH_SECRET = "b7e2f4a1c9d3e8f2a5b1c4d7e0f3a6b9c2d5e8f1a4b7c0d3e6f9a2b5c8d1e4f7"
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-_ledger      = {"rewards": [], "transactions": []}
+_ledger      = {"rewards": [], "transactions": [], "total_minted": 0.0}
 _ledger_lock = threading.Lock()
 _last_update = 0
 
@@ -31,7 +31,8 @@ class Handler(BaseHTTPRequestHandler):
                 txs     = list(_ledger["transactions"])
 
             if path in ("", "/", "/api", "/api/"):
-                total_minted   = round(sum(r.get("amount", 0) for r in rewards if r.get("type") == "block_reward"), 8)
+                computed       = round(sum(r.get("amount", 0) for r in rewards if r.get("type") == "block_reward"), 8)
+                total_minted   = max(computed, _ledger["total_minted"])
                 recent_rewards = sorted(rewards, key=lambda r: r.get("timestamp", 0), reverse=True)[:50]
                 recent_txs     = sorted(txs,     key=lambda t: t.get("timestamp", 0), reverse=True)[:50]
                 node_counts = {}
@@ -41,7 +42,7 @@ class Handler(BaseHTTPRequestHandler):
                     wid = r.get("winner_id", "")
                     if wid:
                         node_counts[wid] = node_counts.get(wid, 0) + 1
-                total_r    = len(rewards) or 1
+                total_r    = sum(1 for r in rewards if r.get("type") == "block_reward") or 1
                 node_stats = sorted([
                     {"id": nid, "id_short": nid[:16]+"...", "rewards": cnt,
                      "pct": round(cnt/total_r*100, 2)}
@@ -168,6 +169,8 @@ class Handler(BaseHTTPRequestHandler):
                             existing_txids.add(t.get("tx_id"))
                     _ledger["rewards"]      = _ledger["rewards"][-10000:]
                     _ledger["transactions"] = _ledger["transactions"][-5000:]
+                if data.get("total_minted", 0.0) > _ledger["total_minted"]:
+                    _ledger["total_minted"] = data["total_minted"]
                 _last_update = time.time()
                 self.wfile.write(json.dumps({"ok": True}).encode())
             else:

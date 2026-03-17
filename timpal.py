@@ -1929,7 +1929,8 @@ class Node:
                     "type":         "LEDGER_PUSH",
                     "push_secret":  PUSH_SECRET,
                     "rewards":      rewards,
-                    "transactions": txs
+                    "transactions": txs,
+                    "total_minted": self.ledger.total_minted
                 }).encode()
                 req = urllib.request.Request(
                     "https://timpal.org/api",

@@ -31,7 +31,7 @@ class Handler(BaseHTTPRequestHandler):
                 txs     = list(_ledger["transactions"])
 
             if path in ("", "/", "/api", "/api/"):
-                total_minted   = round(sum(r.get("amount", 0) for r in rewards), 8)
+                total_minted   = round(sum(r.get("amount", 0) for r in rewards if r.get("type") == "block_reward"), 8)
                 recent_rewards = sorted(rewards, key=lambda r: r.get("timestamp", 0), reverse=True)[:50]
                 recent_txs     = sorted(txs,     key=lambda t: t.get("timestamp", 0), reverse=True)[:50]
                 node_counts = {}

@@ -1818,7 +1818,8 @@ class Node:
                 continue
 
             # Build active node list from commits (for Era 2 fee distribution)
-            active_nodes = list(self._commits.get(time_slot, {}).keys())
+            with self._lottery_lock:
+                active_nodes = list(self._commits.get(time_slot, {}).keys())
 
             winner = self._pick_winner(time_slot, all_reveals)
             if winner:

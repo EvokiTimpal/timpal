@@ -1932,7 +1932,9 @@ class Node:
                         rid = r.get("reward_id", "")
                         if rid not in seen_ids:
                             seen_ids.add(rid)
-                            rewards.append(r)
+                            slim = {k: v for k, v in r.items()
+                                    if k not in ("vrf_sig", "vrf_public_key")}
+                            rewards.append(slim)
                     txs = list(self.ledger.transactions[-20:])
                 payload = json.dumps({
                     "type":         "LEDGER_PUSH",

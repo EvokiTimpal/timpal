@@ -153,6 +153,14 @@ class Ledger:
     def add_transaction(self, tx_dict: dict) -> bool:
         """Add a verified transaction to the ledger.
         In Era 2, sender must have enough balance for amount + fee."""
+        if tx_dict.get("amount", 0) <= 0:
+            return False
+        try:
+            t = Transaction.from_dict(tx_dict)
+            if not t.verify():
+                return False
+        except Exception:
+            return False
         with self._lock:
             if self.has_transaction(tx_dict["tx_id"]):
                 return False
@@ -1043,13 +1051,17 @@ class Network:
                     threading.Thread(target=self._sync_ledger, daemon=True).start()
 
             elif msg_type == "TRANSACTION":
-                tx = Transaction.from_dict(msg["transaction"])
                 tx_gossip_id = msg.get("transaction", {}).get("tx_id", "")
                 with self._seen_lock:
                     if tx_gossip_id and tx_gossip_id not in self.seen_ids:
                         self.seen_ids.add(tx_gossip_id)
                         self._seen_tx_order.append(tx_gossip_id)
                     else:
+                        tx_gossip_id = None
+                if tx_gossip_id:
+                    try:
+                        tx = Transaction.from_dict(msg["transaction"])
+                    except Exception:
                         tx_gossip_id = None
                 if tx_gossip_id:
                     self.on_transaction(tx)
@@ -1918,7 +1930,8 @@ class Node:
                 except ImportError:
                     urllib.request.urlopen(req, timeout=5)
             except Exception as e:
-                print(f"  [push error] {e}")
+                if not isinstance(e, (OSError, TimeoutError)):
+                    print(f"  [push error] {e}")
             time.sleep(5)
 
     def _checkpoint_loop(self):

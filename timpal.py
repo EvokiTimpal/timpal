@@ -1133,8 +1133,8 @@ class Network:
             elif msg_type == "SYNC_PUSH":
                 # Peer is pushing rewards/txs we asked for
                 delta = {
-                    "rewards":      msg.get("rewards", []),
-                    "transactions": msg.get("txs", [])
+                    "rewards":      msg.get("rewards", [])[:5000],
+                    "transactions": msg.get("txs", [])[:2000]
                 }
                 if delta["rewards"] or delta["transactions"]:
                     self.ledger.merge(delta)

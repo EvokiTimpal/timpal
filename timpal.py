@@ -1122,8 +1122,11 @@ class Network:
                 if checkpoint:
                     gossip_id = f"checkpoint:{checkpoint.get('slot', '')}"
                     with self._seen_lock:
-                        already_seen = gossip_id in self.seen_ids
-                    if not already_seen:
+                        if gossip_id in self.seen_ids:
+                            gossip_id = None
+                        else:
+                            self.seen_ids.add(gossip_id)
+                    if gossip_id:
                         prune_before = checkpoint.get("prune_before", 0)
                         with self.ledger._lock:
                             can_verify = bool(
@@ -1139,8 +1142,6 @@ class Network:
                         else:
                             applied = False
                         if applied:
-                            with self._seen_lock:
-                                self.seen_ids.add(gossip_id)
                             self.broadcast({"type": "CHECKPOINT", "checkpoint": checkpoint})
 
             elif msg_type == "GET_LEDGER":

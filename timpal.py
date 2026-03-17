@@ -1316,7 +1316,8 @@ class Node:
             self.wallet.create_new()
             self.wallet.save()
 
-    _tx_rate = {}  # device_id -> [timestamps]
+    _tx_rate      = {}               # device_id -> [timestamps]
+    _tx_rate_lock = threading.Lock()
 
     def _on_transaction_received(self, tx: Transaction):
         if not tx.verify():
@@ -1328,12 +1329,13 @@ class Node:
         # Rate limit — max 60 transactions per minute per device
         now = time.time()
         sender = tx.sender_id
-        times = Node._tx_rate.get(sender, [])
-        times = [t for t in times if now - t < 60]
-        if len(times) >= 60:
-            return
-        times.append(now)
-        Node._tx_rate[sender] = times
+        with Node._tx_rate_lock:
+            times = Node._tx_rate.get(sender, [])
+            times = [t for t in times if now - t < 60]
+            if len(times) >= 60:
+                return
+            times.append(now)
+            Node._tx_rate[sender] = times
 
         # Add to ledger — ledger checks balance automatically
         added = self.ledger.add_transaction(tx.to_dict())

@@ -57,6 +57,8 @@ TX_FEE             = 0.0             # Free for first 37.5 years
 TX_FEE_ERA2        = 0.0005          # Fee after all coins distributed — split among active nodes
 CHECKPOINT_INTERVAL = 241_920        # Slots between checkpoints (2 weeks)
 CHECKPOINT_BUFFER   = 120            # Slots to wait before pruning (10 minutes)
+MAX_PEERS           = 125            # Max peers stored in node peers dict
+BROADCAST_FANOUT    = 8             # Max peers to broadcast to per message
 PUSH_SECRET         = "b7e2f4a1c9d3e8f2a5b1c4d7e0f3a6b9c2d5e8f1a4b7c0d3e6f9a2b5c8d1e4f7"   # Explorer push authentication
 
 def get_current_fee(total_minted: float) -> float:
@@ -742,6 +744,9 @@ class Network:
                             pid = peer["device_id"]
                             with self._peers_lock:
                                 if pid != self.wallet.device_id and pid not in self.peers:
+                                    if len(self.peers) >= MAX_PEERS:
+                                        oldest = min(self.peers, key=lambda k: self.peers[k]["last_seen"])
+                                        del self.peers[oldest]
                                     self.peers[pid] = {
                                         "ip":        peer["ip"],
                                         "port":      peer["port"],
@@ -1065,6 +1070,9 @@ class Network:
                     return
                 if peer_id and peer_id != self.wallet.device_id:
                     with self._peers_lock:
+                        if peer_id not in self.peers and len(self.peers) >= MAX_PEERS:
+                            oldest = min(self.peers, key=lambda k: self.peers[k]["last_seen"])
+                            del self.peers[oldest]
                         self.peers[peer_id] = {
                             "ip":        addr[0],
                             "port":      msg.get("port", 7779),
@@ -1268,7 +1276,9 @@ class Network:
         Uses all known peers, not just recently active ones."""
         msg_bytes = json.dumps(message).encode()
         with self._peers_lock:
-            peers_snapshot = list(self.peers.items())
+            all_peers = list(self.peers.items())
+        random.shuffle(all_peers)
+        peers_snapshot = all_peers[:BROADCAST_FANOUT]
         for peer_id, peer in peers_snapshot:
             if peer_id == exclude_id:
                 continue

@@ -41,6 +41,7 @@ BS_RATE_LIMIT          = 5    # Max REGISTER_BOOTSTRAP per IP per hour
 BS_MAX_SERVERS         = 100  # Max bootstrap servers stored
 COMMIT_RATE_LIMIT = 3   # Max commits per IP per slot (3 nodes per household)
 REVEAL_RATE_LIMIT = 3   # Max reveals per IP per slot (3 nodes per household)
+HELLO_PEERS_SAMPLE = 50  # Max peers returned in HELLO response
 
 
 def clean_old_data():
@@ -121,11 +122,13 @@ def handle_client(conn, addr):
                     oldest = min(peers, key=lambda k: peers[k]["last_seen"])
                     del peers[oldest]
                 peers[device_id] = {"ip": ip, "port": port, "last_seen": time.time()}
-                peer_list = [
+                all_peers = [
                     {"device_id": pid, "ip": p["ip"], "port": p["port"]}
                     for pid, p in peers.items()
                     if pid != device_id
                 ]
+                import random as _random
+                peer_list = _random.sample(all_peers, min(HELLO_PEERS_SAMPLE, len(all_peers)))
             conn.sendall(json.dumps({
                 "type":         "PEERS",
                 "peers":        peer_list,

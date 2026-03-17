@@ -1923,8 +1923,17 @@ class Node:
             try:
                 import urllib.request, ssl
                 with self.ledger._lock:
-                    rewards = list(self.ledger.rewards[-50:])
-                    txs     = list(self.ledger.transactions[-20:])
+                    my_rewards     = [r for r in self.ledger.rewards
+                                      if r.get("winner_id") == self.wallet.device_id]
+                    recent_rewards = list(self.ledger.rewards[-50:])
+                    seen_ids = set()
+                    rewards  = []
+                    for r in my_rewards + recent_rewards:
+                        rid = r.get("reward_id", "")
+                        if rid not in seen_ids:
+                            seen_ids.add(rid)
+                            rewards.append(r)
+                    txs = list(self.ledger.transactions[-20:])
                 payload = json.dumps({
                     "type":         "LEDGER_PUSH",
                     "push_secret":  PUSH_SECRET,

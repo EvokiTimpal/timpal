@@ -1338,16 +1338,16 @@ class Node:
 
         # Show notification if we won, otherwise show who did
         if reward.get("winner_id") == self.wallet.device_id:
-            balance = self.ledger.get_balance(self.wallet.device_id)
-            print(f"\n")
-            print(f"  ╔══════════════════════════════════╗")
             if not self._sending:
+                balance = self.ledger.get_balance(self.wallet.device_id)
+                print(f"\n")
+                print(f"  ╔══════════════════════════════════╗")
                 print(f"  ║       REWARD WON! ★              ║")
-            print(f"  ╠══════════════════════════════════╣")
-            print(f"  ║  Amount  : {reward['amount']:.8f} TMPL")
-            print(f"  ║  Balance : {balance:.8f} TMPL")
-            print(f"  ╚══════════════════════════════════╝")
-            print(f"  > ", end="", flush=True)
+                print(f"  ╠══════════════════════════════════╣")
+                print(f"  ║  Amount  : {reward['amount']:.8f} TMPL")
+                print(f"  ║  Balance : {balance:.8f} TMPL")
+                print(f"  ╚══════════════════════════════════╝")
+                print(f"  > ", end="", flush=True)
         else:
             short = reward.get("winner_id", "")[:20]
             slot  = reward.get("time_slot", "?")
@@ -2031,33 +2031,35 @@ class Node:
 
             elif raw == "send":
                 self._sending = True
-                peers = self.network.get_online_peers()
-                if not peers:
-                    print("\n  No peers online yet.\n")
-                    continue
-                peer_list = list(peers.items())
-                print(f"\n  Online peers:")
-                for i, (pid, info) in enumerate(peer_list):
-                    print(f"  [{i+1}] {pid[:24]}... — {info['ip']}")
                 try:
-                    choice = input("\n  Select peer number: ").strip()
-                    idx = int(choice) - 1
-                    if idx < 0 or idx >= len(peer_list):
+                    peers = self.network.get_online_peers()
+                    if not peers:
+                        print("\n  No peers online yet.\n")
+                        continue
+                    peer_list = list(peers.items())
+                    print(f"\n  Online peers:")
+                    for i, (pid, info) in enumerate(peer_list):
+                        print(f"  [{i+1}] {pid[:24]}... — {info['ip']}")
+                    try:
+                        choice = input("\n  Select peer number: ").strip()
+                        idx = int(choice) - 1
+                        if idx < 0 or idx >= len(peer_list):
+                            print("  Invalid selection.\n")
+                            continue
+                        peer_id = peer_list[idx][0]
+                    except (ValueError, IndexError):
                         print("  Invalid selection.\n")
                         continue
-                    peer_id = peer_list[idx][0]
-                except (ValueError, IndexError):
-                    print("  Invalid selection.\n")
-                    continue
-                balance = self.ledger.get_balance(self.wallet.device_id)
-                try:
-                    amount_str = input(f"  Amount to send (balance: {balance:.8f}): ").strip()
-                    amount = float(amount_str)
-                except ValueError:
-                    print("  Invalid amount.\n")
-                    continue
-                self.send(peer_id, amount)
-                self._sending = False
+                    balance = self.ledger.get_balance(self.wallet.device_id)
+                    try:
+                        amount_str = input(f"  Amount to send (balance: {balance:.8f}): ").strip()
+                        amount = float(amount_str)
+                    except ValueError:
+                        print("  Invalid amount.\n")
+                        continue
+                    self.send(peer_id, amount)
+                finally:
+                    self._sending = False
 
             elif raw == "history":
                 my_id = self.wallet.device_id

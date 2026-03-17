@@ -1646,7 +1646,9 @@ class Node:
             slot_start = time_slot * REWARD_INTERVAL
 
             # Skip if reward already arrived via gossip
-            if any(r.get("time_slot") == time_slot for r in self.ledger.rewards):
+            with self.ledger._lock:
+                already_won = any(r.get("time_slot") == time_slot for r in self.ledger.rewards)
+            if already_won:
                 self._cleanup_slot(time_slot)
                 continue
 
@@ -1675,7 +1677,9 @@ class Node:
             if remaining > 0:
                 time.sleep(remaining)
 
-            if any(r.get("time_slot") == time_slot for r in self.ledger.rewards):
+            with self.ledger._lock:
+                already_won = any(r.get("time_slot") == time_slot for r in self.ledger.rewards)
+            if already_won:
                 self._cleanup_slot(time_slot)
                 continue
 
@@ -1705,7 +1709,9 @@ class Node:
             if remaining > 0:
                 time.sleep(remaining)
 
-            if any(r.get("time_slot") == time_slot for r in self.ledger.rewards):
+            with self.ledger._lock:
+                already_won = any(r.get("time_slot") == time_slot for r in self.ledger.rewards)
+            if already_won:
                 self._cleanup_slot(time_slot)
                 continue
 
@@ -1728,7 +1734,9 @@ class Node:
             if remaining > 0:
                 time.sleep(remaining)
 
-            if any(r.get("time_slot") == time_slot for r in self.ledger.rewards):
+            with self.ledger._lock:
+                already_won = any(r.get("time_slot") == time_slot for r in self.ledger.rewards)
+            if already_won:
                 self._cleanup_slot(time_slot)
                 continue
 

@@ -116,7 +116,9 @@ class Ledger:
                 pass
 
     def save(self):
-        with open(LEDGER_FILE, "w") as f:
+        # Atomic write — write to temp file then os.replace to avoid corruption on crash
+        tmp = LEDGER_FILE + ".tmp"
+        with open(tmp, "w") as f:
             json.dump({
                 "version":      VERSION,
                 "transactions": self.transactions,
@@ -124,6 +126,7 @@ class Ledger:
                 "total_minted": self.total_minted,
                 "checkpoints":  self.checkpoints
             }, f, indent=2)
+        os.replace(tmp, LEDGER_FILE)
 
     def get_balance(self, device_id: str) -> float:
         """Calculate balance from checkpoint snapshot + post-checkpoint history.
@@ -462,6 +465,7 @@ class Wallet:
         return hashlib.sha256(self.public_key).hexdigest()
 
     def save(self, path=WALLET_FILE):
+        # Atomic write — write to temp file then os.replace to avoid corruption on crash
         data = {
             "version":     VERSION,
             "device_id":   self.device_id,
@@ -469,8 +473,10 @@ class Wallet:
             "private_key": self.private_key.hex(),
             "quantum":     True
         }
-        with open(path, "w") as f:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(data, f, indent=2)
+        os.replace(tmp, path)
 
     def load(self, path=WALLET_FILE):
         with open(path, "r") as f:

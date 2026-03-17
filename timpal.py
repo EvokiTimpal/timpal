@@ -513,6 +513,12 @@ class Transaction:
     def verify(self) -> bool:
         if not self.signature:
             return False
+        try:
+            expected_id = hashlib.sha256(bytes.fromhex(self.sender_pubkey)).hexdigest()
+            if expected_id != self.sender_id:
+                return False
+        except Exception:
+            return False
         return Wallet.verify_signature(self.sender_pubkey, self._payload(), self.signature)
 
     def to_dict(self) -> dict:
@@ -1525,11 +1531,12 @@ class Node:
         if not active_nodes:
             return
         # Sum all fees from transactions in this slot
-        slot_fees = sum(
-            tx.get("fee", 0.0)
-            for tx in self.ledger.transactions
-            if tx.get("slot") == time_slot and tx.get("fee", 0.0) > 0
-        )
+        with self.ledger._lock:
+            slot_fees = sum(
+                tx.get("fee", 0.0)
+                for tx in self.ledger.transactions
+                if tx.get("slot") == time_slot and tx.get("fee", 0.0) > 0
+            )
         if slot_fees <= 0:
             return
         per_node = round(slot_fees / len(active_nodes), 8)

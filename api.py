@@ -169,8 +169,8 @@ class Handler(BaseHTTPRequestHandler):
                             existing_txids.add(t.get("tx_id"))
                     _ledger["rewards"]      = _ledger["rewards"][-10000:]
                     _ledger["transactions"] = _ledger["transactions"][-5000:]
-                if data.get("total_minted", 0.0) > _ledger["total_minted"]:
-                    _ledger["total_minted"] = data["total_minted"]
+                    if data.get("total_minted", 0.0) > _ledger["total_minted"]:
+                        _ledger["total_minted"] = data["total_minted"]
                 _last_update = time.time()
                 self.wfile.write(json.dumps({"ok": True}).encode())
             else:

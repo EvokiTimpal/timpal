@@ -706,7 +706,14 @@ class Network:
                         "port":      self.port,
                         "version":   VERSION
                     }).encode())
-                    response = sock.recv(65536)
+                    response = b""
+                    while True:
+                        chunk = sock.recv(65536)
+                        if not chunk:
+                            break
+                        response += chunk
+                        if len(response) > 1_000_000:
+                            break
                     sock.close()
                     data = json.loads(response.decode())
                     if data.get("type") == "VERSION_REJECTED":

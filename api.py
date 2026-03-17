@@ -36,6 +36,8 @@ class Handler(BaseHTTPRequestHandler):
                 recent_txs     = sorted(txs,     key=lambda t: t.get("timestamp", 0), reverse=True)[:50]
                 node_counts = {}
                 for r in rewards:
+                    if r.get("type") != "block_reward":
+                        continue
                     wid = r.get("winner_id", "")
                     if wid:
                         node_counts[wid] = node_counts.get(wid, 0) + 1

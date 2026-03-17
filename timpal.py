@@ -615,6 +615,7 @@ class Network:
         self.on_transaction = on_transaction
         self.on_reward      = on_reward
         self.peers             = {}        # device_id -> {ip, port, last_seen}
+        self._peers_lock       = threading.Lock()
         self.seen_ids          = set()
         self._seen_tx_order    = []
         self._seen_lock        = threading.Lock()
@@ -640,11 +641,12 @@ class Network:
         try:
             import os, json
             peers_file = os.path.join(os.path.expanduser("~"), ".timpal_peers.json")
-            saveable = {
-                pid: {"ip": p["ip"], "port": p["port"]}
-                for pid, p in self.peers.items()
-                if pid != self.wallet.device_id
-            }
+            with self._peers_lock:
+                saveable = {
+                    pid: {"ip": p["ip"], "port": p["port"]}
+                    for pid, p in self.peers.items()
+                    if pid != self.wallet.device_id
+                }
             with open(peers_file, "w") as f:
                 json.dump(saveable, f)
         except Exception:
@@ -657,13 +659,14 @@ class Network:
             if os.path.exists(peers_file):
                 with open(peers_file, "r") as f:
                     saved = json.load(f)
-                for pid, p in saved.items():
-                    if pid != self.wallet.device_id:
-                        self.peers[pid] = {
-                            "ip":        p["ip"],
-                            "port":      p["port"],
-                            "last_seen": __import__("time").time() - 25
-                        }
+                with self._peers_lock:
+                    for pid, p in saved.items():
+                        if pid != self.wallet.device_id:
+                            self.peers[pid] = {
+                                "ip":        p["ip"],
+                                "port":      p["port"],
+                                "last_seen": __import__("time").time() - 25
+                            }
         except Exception:
             pass
 
@@ -683,9 +686,10 @@ class Network:
         while self._running:
             time.sleep(60)
             cutoff = time.time() - 300
-            stale = [pid for pid, p in list(self.peers.items()) if p["last_seen"] < cutoff]
-            for pid in stale:
-                del self.peers[pid]
+            with self._peers_lock:
+                stale = [pid for pid, p in list(self.peers.items()) if p["last_seen"] < cutoff]
+                for pid in stale:
+                    del self.peers[pid]
             if stale:
                 self._save_peers()
 
@@ -736,13 +740,14 @@ class Network:
                     if data.get("type") == "PEERS":
                         for peer in data.get("peers", []):
                             pid = peer["device_id"]
-                            if pid != self.wallet.device_id and pid not in self.peers:
-                                self.peers[pid] = {
-                                    "ip":        peer["ip"],
-                                    "port":      peer["port"],
-                                    "last_seen": time.time()
-                                }
-                                new_peers += 1
+                            with self._peers_lock:
+                                if pid != self.wallet.device_id and pid not in self.peers:
+                                    self.peers[pid] = {
+                                        "ip":        peer["ip"],
+                                        "port":      peer["port"],
+                                        "last_seen": time.time()
+                                    }
+                                    new_peers += 1
                 except Exception:
                     continue
                 # Ask each bootstrap server for its known bootstrap servers
@@ -988,12 +993,13 @@ class Network:
                     if _ver(peer_version) < _ver(MIN_VERSION):
                         continue
                     if peer_id != self.wallet.device_id:
-                        is_new = peer_id not in self.peers
-                        self.peers[peer_id] = {
-                            "ip":        peer_ip,
-                            "port":      peer_port,
-                            "last_seen": time.time()
-                        }
+                        with self._peers_lock:
+                            is_new = peer_id not in self.peers
+                            self.peers[peer_id] = {
+                                "ip":        peer_ip,
+                                "port":      peer_port,
+                                "last_seen": time.time()
+                            }
                         if is_new:
                             print(f"\n  [+] Local peer: {peer_id[:20]}... at {peer_ip}")
                             print(f"  > ", end="", flush=True)
@@ -1058,17 +1064,18 @@ class Network:
                     }).encode())
                     return
                 if peer_id and peer_id != self.wallet.device_id:
-                    self.peers[peer_id] = {
-                        "ip":        addr[0],
-                        "port":      msg.get("port", 7779),
-                        "last_seen": time.time()
-                    }
-                    # Share our full peer list so they can connect to everyone we know
-                    peer_list = [
-                        {"device_id": pid, "ip": p["ip"], "port": p["port"]}
-                        for pid, p in self.peers.items()
-                        if pid != peer_id
-                    ]
+                    with self._peers_lock:
+                        self.peers[peer_id] = {
+                            "ip":        addr[0],
+                            "port":      msg.get("port", 7779),
+                            "last_seen": time.time()
+                        }
+                        # Share our full peer list so they can connect to everyone we know
+                        peer_list = [
+                            {"device_id": pid, "ip": p["ip"], "port": p["port"]}
+                            for pid, p in self.peers.items()
+                            if pid != peer_id
+                        ]
                     response = json.dumps({
                         "type":      "HELLO_ACK",
                         "device_id": self.wallet.device_id,
@@ -1260,7 +1267,9 @@ class Network:
         """Send a message to all known peers (gossip protocol).
         Uses all known peers, not just recently active ones."""
         msg_bytes = json.dumps(message).encode()
-        for peer_id, peer in list(self.peers.items()):
+        with self._peers_lock:
+            peers_snapshot = list(self.peers.items())
+        for peer_id, peer in peers_snapshot:
             if peer_id == exclude_id:
                 continue
             try:
@@ -1269,14 +1278,17 @@ class Network:
                 sock.connect((peer["ip"], peer["port"]))
                 sock.sendall(msg_bytes)
                 sock.close()
-                self.peers[peer_id]["last_seen"] = time.time()
+                with self._peers_lock:
+                    if peer_id in self.peers:
+                        self.peers[peer_id]["last_seen"] = time.time()
             except Exception:
                 continue
 
     def send_to_peer(self, peer_id: str, message: dict) -> bool:
-        if peer_id not in self.peers:
-            return False
-        peer = self.peers[peer_id]
+        with self._peers_lock:
+            if peer_id not in self.peers:
+                return False
+            peer = dict(self.peers[peer_id])
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(5.0)
@@ -1289,10 +1301,11 @@ class Network:
 
     def get_online_peers(self):
         cutoff = time.time() - 30
-        return {
-            pid: info for pid, info in self.peers.items()
-            if info["last_seen"] > cutoff
-        }
+        with self._peers_lock:
+            return {
+                pid: info for pid, info in self.peers.items()
+                if info["last_seen"] > cutoff
+            }
 
 
 # ─────────────────────────────────────────────

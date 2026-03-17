@@ -319,13 +319,15 @@ def handle_client(conn, addr):
             # Rate limit — max BS_RATE_LIMIT registrations per IP per hour
             # Skip rate limit for known bootstrap servers gossiping to each other
             now = time.time()
+            # Build known_bs_ips without holding the lock — DNS can block for seconds
+            known_bs_ips = set()
             with bootstrap_servers_lock:
-                known_bs_ips = set()
-                for v in bootstrap_servers.values():
-                    try:
-                        known_bs_ips.add(socket.gethostbyname(v["host"]))
-                    except Exception:
-                        known_bs_ips.add(v["host"])
+                bs_hosts = [v["host"] for v in bootstrap_servers.values()]
+            for host in bs_hosts:
+                try:
+                    known_bs_ips.add(socket.gethostbyname(host))
+                except Exception:
+                    known_bs_ips.add(host)
             if ip not in known_bs_ips:
                 with bootstrap_servers_lock:
                     bs_ip_rate.setdefault(ip, [])

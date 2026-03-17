@@ -227,8 +227,12 @@ class Ledger:
             return True
 
     def recalculate_totals(self):
-        base = self.checkpoints[-1]["total_minted"] if self.checkpoints else 0.0
-        self.total_minted = round(base + sum(r["amount"] for r in self.rewards if r.get("type") == "block_reward"), 8)
+        if self.checkpoints:
+            cp = self.checkpoints[-1]
+            pruned_base = cp["total_minted"] - cp.get("kept_minted", 0)
+            self.total_minted = round(pruned_base + sum(r["amount"] for r in self.rewards if r.get("type") == "block_reward"), 8)
+        else:
+            self.total_minted = round(sum(r["amount"] for r in self.rewards if r.get("type") == "block_reward"), 8)
 
     def get_summary(self):
         return {
@@ -355,11 +359,13 @@ class Ledger:
             txs_hash = Ledger._compute_hash(
                 sorted(txs_to_prune, key=lambda t: t.get("timestamp", 0))
             )
+            kept_minted = round(sum(r["amount"] for r in rewards_to_keep if r.get("type") == "block_reward"), 8)
             checkpoint = {
                 "slot":         checkpoint_slot,
                 "prune_before": prune_before,
                 "balances":     balances,
                 "total_minted": self.total_minted,
+                "kept_minted":  kept_minted,
                 "rewards_hash": rewards_hash,
                 "txs_hash":     txs_hash,
                 "spent_tx_ids": spent_tx_ids,

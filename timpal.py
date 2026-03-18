@@ -312,7 +312,7 @@ class Ledger:
                         continue
                 if reward.get("type") == "fee_reward" or self.total_minted + reward["amount"] <= TOTAL_SUPPLY:
                     self.rewards.append(reward)
-                    if slot:
+                    if slot and reward.get("type") != "fee_reward":
                         existing_slots[slot] = reward
                     changed = True
             if changed:

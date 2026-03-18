@@ -55,7 +55,7 @@ MIN_VERSION        = "2.1"   # Minimum version allowed to connect
 # Run this command and paste the result below:
 #     python3 -c "import time; print(int(time.time()))"
 # Set the SAME value in bootstrap.py
-GENESIS_TIME       = 0        # ← REPLACE 0 with the number from the command above
+GENESIS_TIME       = 1773860505        # ← REPLACE 0 with the number from the command above
 
 # ── ERA2_SLOT ─────────────────────────────────────────────────────────────────
 # Slot at which Era 2 begins (all 250M coins distributed).

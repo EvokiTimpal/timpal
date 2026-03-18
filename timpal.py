@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-TIMPAL Protocol v2.1 — Quantum-Resistant Money Without Masters
+TIMPAL Protocol v2.2 — Quantum-Resistant Money Without Masters
 
 Quantum-resistant. Worldwide. Instant transactions.
 Distributed ledger. No banks. No servers. No control.
@@ -45,29 +45,26 @@ except ImportError:
     exit(1)
 
 # ─────────────────────────────────────────────
-# PROTOCOL CONSTANTS — NEVER CHANGE
+# PROTOCOL CONSTANTS — NEVER CHANGE AFTER GENESIS
 # ─────────────────────────────────────────────
-VERSION            = "2.1"
-MIN_VERSION        = "2.1"   # Minimum version allowed to connect
+VERSION            = "2.2"
+MIN_VERSION        = "2.2"   # Minimum version allowed to connect
 
-# ── GENESIS_TIME ─────────────────────────────────────────────────────────────
-# Set this ONCE before the final network launch — never change it after.
-# Run this command and paste the result below:
-#     python3 -c "import time; print(int(time.time()))"
+# ── GENESIS_TIME ──────────────────────────────────────────────────────────────
+# Set ONCE before network launch — never change after.
+# Run: python3 -c "import time; print(int(time.time()))"
 # Set the SAME value in bootstrap.py
-GENESIS_TIME       = 1773860505        # ← REPLACE 0 with the number from the command above
+GENESIS_TIME       = 0        # ← REPLACE with the number from the command above
 
 # ── ERA2_SLOT ─────────────────────────────────────────────────────────────────
-# Slot at which Era 2 begins (all 250M coins distributed).
 # 250,000,000 / 1.0575 = 236,406,620 slots from genesis.
 # Every node reaches Era 2 at the EXACT same moment. No disagreement ever.
 ERA2_SLOT          = 236_406_620
 
 BOOTSTRAP_SERVERS   = [
-    ("bootstrap.timpal.org", 7777),   # Timpal foundation — always running
-    # Community bootstrap servers can be added here
+    ("bootstrap.timpal.org", 7777),
 ]
-BOOTSTRAP_HOST      = "bootstrap.timpal.org"   # Primary (used for peer registration)
+BOOTSTRAP_HOST      = "bootstrap.timpal.org"
 BOOTSTRAP_PORT      = 7777
 BOOTSTRAP_LIST_URL  = "https://raw.githubusercontent.com/EvokiTimpal/timpal/main/bootstrap_servers.txt"
 BROADCAST_PORT      = 7778
@@ -76,16 +73,15 @@ WALLET_FILE         = os.path.join(os.path.expanduser("~"), ".timpal_wallet.json
 LEDGER_FILE         = os.path.join(os.path.expanduser("~"), ".timpal_ledger.json")
 BOOTSTRAP_CACHE_FILE = os.path.join(os.path.expanduser("~"), ".timpal_bootstrap.json")
 
-# Supply constants
-TOTAL_SUPPLY        = 250_000_000.0  # 250 million TMPL total
-REWARD_PER_ROUND    = 1.0575         # TMPL per 5-second round
-REWARD_INTERVAL     = 5.0            # Seconds between reward rounds
-TX_FEE              = 0.0            # Free for first 37.5 years (Era 1)
-TX_FEE_ERA2         = 0.0005         # Fee after all coins distributed — split among active nodes
-CHECKPOINT_INTERVAL = 241_920        # Slots between checkpoints (~2 weeks)
-CHECKPOINT_BUFFER   = 120            # Slots to wait before pruning (~10 minutes)
-MAX_PEERS           = 125            # Max peers stored in node peers dict
-BROADCAST_FANOUT    = 8              # Max peers to broadcast to per message
+TOTAL_SUPPLY        = 250_000_000.0
+REWARD_PER_ROUND    = 1.0575
+REWARD_INTERVAL     = 5.0
+TX_FEE              = 0.0
+TX_FEE_ERA2         = 0.0005
+CHECKPOINT_INTERVAL = 241_920
+CHECKPOINT_BUFFER   = 120
+MAX_PEERS           = 125
+BROADCAST_FANOUT    = 8
 PUSH_SECRET         = "b7e2f4a1c9d3e8f2a5b1c4d7e0f3a6b9c2d5e8f1a4b7c0d3e6f9a2b5c8d1e4f7"
 
 
@@ -109,28 +105,41 @@ def _check_genesis_time():
 
 
 def get_current_slot() -> int:
-    """Return the current slot number relative to GENESIS_TIME.
-    Same answer on every node at the same instant — no disagreement ever."""
+    """Current slot relative to GENESIS_TIME. Same on every node at the same instant."""
     return int((time.time() - GENESIS_TIME) / REWARD_INTERVAL)
 
 
 def is_era2() -> bool:
-    """Era 2 begins at ERA2_SLOT — determined by time, not local minted amount.
-    Every node transitions at the exact same slot. No disagreement ever."""
     return get_current_slot() >= ERA2_SLOT
 
 
 def get_current_fee() -> float:
-    """Era 1 (slots 0 to ERA2_SLOT-1): free. Era 2: 0.0005 TMPL per tx."""
     return TX_FEE_ERA2 if is_era2() else TX_FEE
 
 
 def _ver(v: str) -> tuple:
-    """Parse version string into comparable tuple. e.g. '2.1' -> (2, 1)"""
     try:
         return tuple(int(x) for x in str(v).split("."))
     except Exception:
         return (0, 0)
+
+
+def _is_valid_epoch_slot(slot) -> bool:
+    """True if a block_reward slot is valid for this network epoch.
+
+    Old nodes that never updated computed slots as int(time.time()/5) —
+    values in the hundreds of millions. This network uses
+    int((time.time()-GENESIS_TIME)/5) — slots starting from 0.
+    Any block_reward more than 10 slots ahead of now is impossible.
+    Any block_reward with a slot in the hundreds of millions is from
+    a different epoch and must be rejected."""
+    if slot is None or not isinstance(slot, int):
+        return False
+    if slot < 0:
+        return False
+    if slot > get_current_slot() + 10:
+        return False
+    return True
 
 
 def find_free_port(start=7779):
@@ -146,27 +155,40 @@ def find_free_port(start=7779):
 
 
 # ─────────────────────────────────────────────
-# LEDGER — Shared truth of the network
+# LEDGER
 # ─────────────────────────────────────────────
 
 class Ledger:
     def __init__(self):
-        self.transactions  = []   # All transactions ever
-        self.rewards       = []   # All node rewards ever (block_reward + fee_reward)
+        self.transactions  = []
+        self.rewards       = []
         self.total_minted  = 0.0
-        self.checkpoints   = []   # Checkpoint snapshots
+        self.checkpoints   = []
         self._lock         = threading.RLock()
         self._load()
 
     def _load(self):
+        """Load ledger from disk. Filters epoch-invalid block_rewards on load
+        so dirty data from wrong-epoch nodes never enters memory."""
         if os.path.exists(LEDGER_FILE):
             try:
                 with open(LEDGER_FILE, "r") as f:
                     data = json.load(f)
                 self.transactions = data.get("transactions", [])
-                self.rewards      = data.get("rewards", [])
-                self.total_minted = data.get("total_minted", 0.0)
                 self.checkpoints  = data.get("checkpoints", [])
+
+                # Filter rewards — reject block_rewards from wrong epoch
+                raw_rewards = data.get("rewards", [])
+                clean = []
+                for r in raw_rewards:
+                    if r.get("type", "block_reward") == "block_reward":
+                        if not _is_valid_epoch_slot(r.get("time_slot")):
+                            continue
+                    clean.append(r)
+                self.rewards = clean
+
+                # Always recalculate total_minted from clean filtered data
+                self.recalculate_totals()
             except Exception:
                 pass
 
@@ -184,8 +206,7 @@ class Ledger:
         os.replace(tmp, LEDGER_FILE)
 
     def get_balance(self, device_id: str) -> float:
-        """Calculate balance from latest checkpoint + post-checkpoint history.
-        Includes both block_rewards and fee_rewards — both are real spendable coins."""
+        """Balance from latest checkpoint + post-checkpoint history."""
         with self._lock:
             balance = 0.0
             if self.checkpoints:
@@ -211,11 +232,9 @@ class Ledger:
         return self.get_balance(device_id) >= amount
 
     def add_transaction(self, tx_dict: dict) -> bool:
-        """Add a verified transaction to the ledger.
-        Signature verified before acquiring lock — Dilithium3 takes ~1ms."""
+        """Add a verified transaction. Signature verified outside the lock."""
         if tx_dict.get("amount", 0) <= 0:
             return False
-        # Validate and verify outside the lock
         try:
             t = Transaction.from_dict(tx_dict)
             if not t.verify():
@@ -234,8 +253,7 @@ class Ledger:
             return True
 
     def add_fee_reward(self, slot: int, node_id: str, amount: float) -> bool:
-        """Add an Era 2 fee reward. Fee rewards are split equally among
-        all nodes that submitted a VRF commit for the slot."""
+        """Add an Era 2 fee reward."""
         with self._lock:
             reward_id = f"fee:{slot}:{node_id}"
             if any(r.get("reward_id") == reward_id for r in self.rewards):
@@ -255,10 +273,14 @@ class Ledger:
             return True
 
     def add_reward(self, reward_dict: dict) -> bool:
-        """Add a node block reward. If two rewards claim the same slot,
-        lowest VRF ticket wins. Verified cryptographically before acceptance."""
+        """Add a node block reward. Lowest VRF ticket wins per slot."""
         with self._lock:
-            # Cryptographically verify the VRF ticket before accepting
+            # Validate reward_id exists
+            reward_id = reward_dict.get("reward_id", "")
+            if not reward_id:
+                return False
+
+            # Cryptographically verify VRF ticket
             public_key = reward_dict.get("vrf_public_key")
             seed       = reward_dict.get("vrf_seed")
             sig        = reward_dict.get("vrf_sig")
@@ -266,8 +288,15 @@ class Ledger:
             if public_key and seed and sig and ticket:
                 if not Node._verify_ticket(public_key, seed, sig, ticket):
                     return False
+
             slot       = reward_dict.get("time_slot")
             new_ticket = reward_dict.get("vrf_ticket", "z")
+
+            # Reject block_rewards from wrong epoch
+            if reward_dict.get("type", "block_reward") == "block_reward":
+                if not _is_valid_epoch_slot(slot):
+                    return False
+
             if slot is not None:
                 existing = next(
                     (r for r in self.rewards
@@ -275,21 +304,20 @@ class Ledger:
                     None
                 )
                 if existing:
-                    if (existing.get("reward_id") == reward_dict["reward_id"] and
+                    if (existing.get("reward_id") == reward_id and
                             existing.get("winner_id") == reward_dict.get("winner_id")):
-                        return False   # Exact same reward already stored
+                        return False
                     old_ticket = existing.get("vrf_ticket", "z")
                     if new_ticket < old_ticket:
-                        # Incoming reward wins — replace existing
                         self.rewards = [r for r in self.rewards
                                         if r.get("time_slot") != slot or r.get("type") == "fee_reward"]
                         self.total_minted -= existing["amount"]
                     else:
-                        return False   # Existing reward has lower or equal ticket — keep it
+                        return False
             else:
-                if any(r["reward_id"] == reward_dict["reward_id"] for r in self.rewards):
+                if any(r.get("reward_id") == reward_id for r in self.rewards):
                     return False
-            # Use round() to avoid IEEE 754 drift near the supply cap
+
             if round(self.total_minted + reward_dict["amount"], 8) > TOTAL_SUPPLY:
                 return False
             self.rewards.append(reward_dict)
@@ -328,10 +356,8 @@ class Ledger:
         }
 
     def merge(self, other_ledger: dict):
-        """Merge incoming ledger data — one winner per slot, lowest VRF ticket wins.
-        Crypto verification happens outside the lock. All supply checks use a
-        running counter so near-cap rewards are never incorrectly rejected."""
-        # Pre-verify all transactions outside the lock
+        """Merge incoming ledger data. Pre-verifies outside the lock."""
+        # Pre-verify transactions outside the lock
         verified_txs = []
         for tx in other_ledger.get("transactions", []):
             try:
@@ -341,9 +367,12 @@ class Ledger:
             except Exception:
                 continue
 
-        # Pre-verify all rewards outside the lock
+        # Pre-verify rewards outside the lock
         verified_rewards = []
         for reward in other_ledger.get("rewards", []):
+            # Validate reward_id exists
+            if not reward.get("reward_id", ""):
+                continue
             pub  = reward.get("vrf_public_key")
             seed = reward.get("vrf_seed")
             sig  = reward.get("vrf_sig")
@@ -366,7 +395,7 @@ class Ledger:
                         self.transactions.append(tx)
                         changed = True
 
-            # Merge rewards — track running total to keep supply cap accurate
+            # Merge rewards
             existing_slots = {
                 r.get("time_slot"): r
                 for r in self.rewards if r.get("type") == "block_reward"
@@ -374,12 +403,17 @@ class Ledger:
             running_minted = self.total_minted
 
             for reward in verified_rewards:
-                rid    = reward["reward_id"]
-                slot   = reward.get("time_slot")
-                rtype  = reward.get("type", "block_reward")
+                rid   = reward.get("reward_id", "")
+                slot  = reward.get("time_slot")
+                rtype = reward.get("type", "block_reward")
+
+                # Reject block_rewards from wrong epoch
+                if rtype == "block_reward":
+                    if not _is_valid_epoch_slot(slot):
+                        continue
 
                 # Skip exact duplicates
-                if any(r["reward_id"] == rid and r.get("winner_id") == reward.get("winner_id")
+                if any(r.get("reward_id") == rid and r.get("winner_id") == reward.get("winner_id")
                        for r in self.rewards):
                     continue
 
@@ -388,15 +422,13 @@ class Ledger:
                     old_ticket = existing.get("vrf_ticket", "z")
                     new_ticket = reward.get("vrf_ticket", "z")
                     if new_ticket < old_ticket:
-                        # Incoming reward wins — remove old, adjust running total
                         self.rewards = [r for r in self.rewards
                                         if r.get("time_slot") != slot or r.get("type") == "fee_reward"]
                         running_minted = round(running_minted - existing["amount"], 8)
                         del existing_slots[slot]
                     else:
-                        continue   # Existing wins
+                        continue
 
-                # Check supply cap using running total (fee rewards bypass the cap)
                 if rtype == "fee_reward":
                     self.rewards.append(reward)
                     changed = True
@@ -414,13 +446,10 @@ class Ledger:
 
     @staticmethod
     def _compute_hash(entries: list) -> str:
-        """SHA256 hash of a list of entries — cryptographic proof of pruned data."""
         serialized = json.dumps(entries, sort_keys=True, separators=(',', ':')).encode()
         return hashlib.sha256(serialized).hexdigest()
 
     def create_checkpoint(self, checkpoint_slot: int) -> bool:
-        """Create a checkpoint at checkpoint_slot. Calculates balances,
-        hashes pruned data, prunes old rewards and transactions."""
         prune_before = checkpoint_slot - CHECKPOINT_BUFFER
         with self._lock:
             if any(c["slot"] == checkpoint_slot for c in self.checkpoints):
@@ -434,7 +463,6 @@ class Ledger:
             txs_to_keep  = [t for t in self.transactions
                             if (t.get("slot") or 0) >= prune_before]
 
-            # Calculate balances from previous checkpoint + pruned data
             prev_balances = {}
             if self.checkpoints:
                 prev_balances = dict(self.checkpoints[-1]["balances"])
@@ -490,8 +518,7 @@ class Ledger:
             return True
 
     def apply_checkpoint(self, checkpoint: dict) -> bool:
-        """Apply a checkpoint received from a peer.
-        Only accepted if newer than our latest. Hashes verified against local data."""
+        """Apply a checkpoint received from a peer. Hashes verified before accepting."""
         with self._lock:
             if self.checkpoints:
                 if checkpoint.get("slot", 0) <= self.checkpoints[-1]["slot"]:
@@ -500,7 +527,6 @@ class Ledger:
                 return False
             prune_before = checkpoint.get("prune_before", 0)
 
-            # Verify checkpoint hashes against local data before accepting
             rewards_to_verify = [r for r in self.rewards
                                  if r.get("time_slot", prune_before) < prune_before]
             if rewards_to_verify:
@@ -518,27 +544,25 @@ class Ledger:
                 if computed != checkpoint.get("txs_hash", ""):
                     return False
 
-            # Hashes verified — prune local data and store checkpoint
             self.rewards      = [r for r in self.rewards
                                  if r.get("time_slot", prune_before) >= prune_before]
             self.transactions = [t for t in self.transactions
                                  if (t.get("slot") or 0) >= prune_before]
             self.checkpoints.append(checkpoint)
-            # Trust the checkpoint's total_minted — it is the network-agreed value
             self.total_minted = checkpoint.get("total_minted", 0.0)
             self.save()
             return True
 
 
 # ─────────────────────────────────────────────
-# WALLET — Quantum-resistant identity
+# WALLET
 # ─────────────────────────────────────────────
 
 class Wallet:
     def __init__(self):
-        self.public_key  = None   # bytes
-        self.private_key = None   # bytes
-        self.device_id   = None   # hex string derived from public key
+        self.public_key  = None
+        self.private_key = None
+        self.device_id   = None
 
     def create_new(self):
         self.public_key, self.private_key = Dilithium3.keygen()
@@ -548,9 +572,7 @@ class Wallet:
         print(f"")
         print(f"  WARNING - BACK UP YOUR WALLET FILE:")
         print(f"  {WALLET_FILE}")
-        print(f"  This file contains your private key.")
         print(f"  If you delete it your TMPL is gone forever.")
-        print(f"  Copy it somewhere safe.")
 
     def _derive_device_id(self):
         return hashlib.sha256(self.public_key).hexdigest()
@@ -561,7 +583,7 @@ class Wallet:
         return kdf.derive(password.encode())
 
     def save(self, path=WALLET_FILE, password=None):
-        """Atomic write — temp file + os.replace prevents corruption on crash."""
+        """Atomic write."""
         if password:
             salt       = os.urandom(32)
             key        = Wallet._derive_key(password, salt)
@@ -616,15 +638,12 @@ class Wallet:
         return self.public_key.hex()
 
     def sign(self, message: bytes) -> str:
-        signature = Dilithium3.sign(self.private_key, message)
-        return signature.hex()
+        return Dilithium3.sign(self.private_key, message).hex()
 
     @staticmethod
     def verify_signature(public_key_hex: str, message: bytes, signature_hex: str) -> bool:
         try:
-            pub_bytes = bytes.fromhex(public_key_hex)
-            sig_bytes = bytes.fromhex(signature_hex)
-            return Dilithium3.verify(pub_bytes, message, sig_bytes)
+            return Dilithium3.verify(bytes.fromhex(public_key_hex), message, bytes.fromhex(signature_hex))
         except Exception:
             return False
 
@@ -682,27 +701,23 @@ class Transaction:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Transaction":
-        # Validate amount — must be numeric and positive
         amount = d["amount"]
         if not isinstance(amount, (int, float)) or isinstance(amount, bool):
             raise ValueError(f"invalid amount: {amount!r}")
         if amount <= 0:
             raise ValueError(f"amount must be positive: {amount}")
 
-        # Validate fee — must be numeric and non-negative
         fee = d.get("fee", 0.0)
         if not isinstance(fee, (int, float)) or isinstance(fee, bool):
             raise ValueError(f"invalid fee: {fee!r}")
         if fee < 0:
             raise ValueError(f"fee must be non-negative: {fee}")
 
-        # Validate sender_id and recipient_id — must be 64-char lowercase hex
         for field in ("sender_id", "recipient_id"):
             val = d.get(field, "")
             if not isinstance(val, str) or len(val) != 64 or not all(c in "0123456789abcdef" for c in val):
                 raise ValueError(f"invalid {field}: {val!r}")
 
-        # Validate sender_pubkey — must be non-empty hex string
         pubkey = d.get("sender_pubkey", "")
         if not isinstance(pubkey, str) or not pubkey:
             raise ValueError("invalid sender_pubkey")
@@ -726,11 +741,10 @@ class Transaction:
 
 
 # ─────────────────────────────────────────────
-# BOOTSTRAP HELPERS — Multi-server resilience
+# BOOTSTRAP HELPERS
 # ─────────────────────────────────────────────
 
 def _load_bootstrap_servers() -> list:
-    """Load cached bootstrap servers and merge with hardcoded list."""
     servers = list(BOOTSTRAP_SERVERS)
     try:
         if os.path.exists(BOOTSTRAP_CACHE_FILE):
@@ -745,8 +759,6 @@ def _load_bootstrap_servers() -> list:
     return servers
 
 def _fetch_bootstrap_list() -> list:
-    """Fetch bootstrap_servers.txt from GitHub.
-    Returns empty list silently if GitHub is unreachable."""
     servers = []
     try:
         import urllib.request
@@ -778,7 +790,7 @@ def _save_bootstrap_servers(servers: list):
 
 
 # ─────────────────────────────────────────────
-# NETWORK — Worldwide peer discovery
+# NETWORK
 # ─────────────────────────────────────────────
 
 class Network:
@@ -788,7 +800,7 @@ class Network:
         self.ledger             = ledger
         self.on_transaction     = on_transaction
         self.on_reward          = on_reward
-        self.peers              = {}   # device_id -> {ip, port, last_seen}
+        self.peers              = {}
         self._peers_lock        = threading.Lock()
         self.seen_ids           = set()
         self._seen_tx_order     = []
@@ -798,6 +810,8 @@ class Network:
         self.local_ip           = self._get_local_ip()
         self.port               = find_free_port(7779)
         self._node_ref          = None
+        self._udp_rate          = {}   # ip -> last_seen — rate limits UDP discovery
+        self._udp_rate_lock     = threading.Lock()
 
     def _get_local_ip(self):
         try:
@@ -851,7 +865,7 @@ class Network:
         threading.Thread(target=self._clean_peers,       daemon=True).start()
 
     def _clean_peers(self):
-        """Remove peers not seen for 20 minutes. Runs every 60 seconds."""
+        """Remove peers not seen for 20 minutes."""
         while self._running:
             time.sleep(60)
             cutoff = time.time() - 1200
@@ -866,12 +880,9 @@ class Network:
     def stop(self):
         self._running = False
 
-    # ── Bootstrap connection ────────────────────
-
     def _bootstrap_connect(self):
-        """Connect to all known bootstrap servers. Re-registers every 2 minutes."""
+        """Register with all bootstrap servers. Re-registers every 2 minutes."""
         time.sleep(2)
-        # Fetch GitHub bootstrap list once on startup
         github_servers = _fetch_bootstrap_list()
         for pair in github_servers:
             if pair not in self._bootstrap_servers:
@@ -903,24 +914,26 @@ class Network:
                             break
                     sock.close()
                     data = json.loads(response.decode())
+
                     if data.get("type") == "VERSION_REJECTED":
+                        # Fatal — this node is too old to participate
                         print(f"\n  \u2554" + "\u2550" * 50 + "\u2557")
                         print(f"  \u2551  TIMPAL UPDATE REQUIRED                           \u2551")
                         print(f"  \u2560" + "\u2550" * 50 + "\u2563")
                         print(f"  \u2551  Your version is no longer supported.            \u2551")
                         print(f"  \u2551  You must update before joining the network.     \u2551")
                         print(f"  \u2560" + "\u2550" * 50 + "\u2563")
-                        print(f"  \u2551  Step 1: Install dependencies:                   \u2551")
-                        print(f"  \u2551    pip3 install dilithium-py cryptography        \u2551")
-                        print(f"  \u2551  Step 2: Delete your old ledger:                 \u2551")
+                        print(f"  \u2551  Step 1: Delete your old wallet and ledger:      \u2551")
+                        print(f"  \u2551    rm ~/.timpal_wallet.json                       \u2551")
                         print(f"  \u2551    rm ~/.timpal_ledger.json                       \u2551")
-                        print(f"  \u2551  Step 3: Download the new version:               \u2551")
+                        print(f"  \u2551  Step 2: Download the new version:               \u2551")
                         print(f"  \u2551    curl -O https://raw.githubusercontent.com/     \u2551")
                         print(f"  \u2551    EvokiTimpal/timpal/main/timpal.py              \u2551")
-                        print(f"  \u2551  Step 4: Restart:                                \u2551")
+                        print(f"  \u2551  Step 3: Restart:                                \u2551")
                         print(f"  \u2551    python3 timpal.py                             \u2551")
-                        print(f"  \u255a" + "\u2550" * 50 + "\u255d")
-                        return
+                        print(f"  \u255a" + "\u2550" * 50 + "\u255d\n")
+                        os._exit(1)
+
                     if data.get("type") == "PEERS":
                         for peer in data.get("peers", []):
                             pid = peer["device_id"]
@@ -939,7 +952,7 @@ class Network:
                 except Exception:
                     continue
 
-                # Ask each bootstrap server for its known bootstrap servers
+                # Ask for additional bootstrap servers
                 try:
                     sock2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     sock2.settimeout(5.0)
@@ -974,10 +987,9 @@ class Network:
                 print(f"  > ", end="", flush=True)
                 threading.Thread(target=self._sync_ledger, daemon=True).start()
 
-            time.sleep(120)   # Re-register every 2 minutes
+            time.sleep(120)
 
     def _periodic_sync(self):
-        """Delta sync every 2 minutes to keep ledger fully up to date."""
         time.sleep(30)
         while self._running:
             try:
@@ -988,8 +1000,6 @@ class Network:
             time.sleep(120)
 
     def _confirm_checkpoint_with_peers(self, checkpoint, exclude_ip=None):
-        """Ask other peers if they have the same checkpoint.
-        Queries peers IN PARALLEL and returns True when enough confirm."""
         peers    = self.get_online_peers()
         eligible = {pid: p for pid, p in peers.items() if p["ip"] != exclude_ip}
         required = min(3, len(eligible))
@@ -1043,8 +1053,7 @@ class Network:
         return confirmed.is_set()
 
     def _sync_ledger(self):
-        """Delta sync — only request what we are missing from a peer.
-        Never transfers full ledger — scales to millions of nodes."""
+        """Delta sync — only request what we are missing."""
         time.sleep(1)
         peers = self.get_online_peers()
         if not peers:
@@ -1127,7 +1136,6 @@ class Network:
                                         print(f"  \u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d")
                                         print(f"  > ", end="", flush=True)
 
-                    # Push back what the peer told us they need
                     we_need_slots  = set(msg.get("we_need_slots", []))
                     we_need_tx_ids = set(msg.get("we_need_tx_ids", []))
                     if we_need_slots or we_need_tx_ids:
@@ -1158,8 +1166,6 @@ class Network:
             except Exception:
                 continue
 
-    # ── Local discovery ─────────────────────────
-
     def _broadcast_loop(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -1178,6 +1184,7 @@ class Network:
             time.sleep(DISCOVERY_INTERVAL)
 
     def _listen_discovery(self):
+        """UDP local peer discovery with per-IP rate limiting (one HELLO per 5s per IP)."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
@@ -1189,6 +1196,16 @@ class Network:
         while self._running:
             try:
                 data, addr = sock.recvfrom(1024)
+                ip = addr[0]
+
+                # Rate limit: one HELLO per IP per 5 seconds
+                now = time.time()
+                with self._udp_rate_lock:
+                    last = self._udp_rate.get(ip, 0)
+                    if now - last < 5.0:
+                        continue
+                    self._udp_rate[ip] = now
+
                 msg = json.loads(data.decode())
                 if msg.get("type") == "HELLO":
                     peer_id      = msg["device_id"]
@@ -1213,15 +1230,13 @@ class Network:
             except Exception:
                 continue
 
-    # ── TCP listener ────────────────────────────
-
     def _listen_tcp(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind(("", self.port))
         sock.listen(100)
         sock.settimeout(1.0)
-        _conn_sem = threading.Semaphore(200)   # Allow 200 concurrent connections
+        _conn_sem = threading.Semaphore(200)
 
         def _handle_with_sem(conn, addr):
             try:
@@ -1280,15 +1295,10 @@ class Network:
                             "port":      msg.get("port", 7779),
                             "last_seen": time.time()
                         }
-                        peer_list = [
-                            {"device_id": pid, "ip": p["ip"], "port": p["port"]}
-                            for pid, p in self.peers.items()
-                            if pid != peer_id
-                        ]
+                    # HELLO_ACK does not expose peer IPs — that is bootstrap's job
                     conn.sendall(json.dumps({
                         "type":      "HELLO_ACK",
-                        "device_id": self.wallet.device_id,
-                        "peers":     peer_list
+                        "device_id": self.wallet.device_id
                     }).encode())
                     threading.Thread(target=self._sync_ledger, daemon=True).start()
 
@@ -1344,10 +1354,10 @@ class Network:
                                         )
 
             elif msg_type in ("VRF_COMMIT", "VRF_REVEAL", "VRF_TICKET"):
-                pass   # Lottery handled via bootstrap — not peer gossip
+                pass
 
             elif msg_type == "REWARD":
-                reward          = msg.get("reward", {})
+                reward           = msg.get("reward", {})
                 reward_gossip_id = reward.get("reward_id", "") + ":" + reward.get("winner_id", "")
                 with self._seen_lock:
                     if reward_gossip_id and reward_gossip_id not in self.seen_ids:
@@ -1363,6 +1373,12 @@ class Network:
                     ).start()
 
             elif msg_type == "SYNC_PUSH":
+                # Only accept from known peers
+                sender_ip = addr[0]
+                with self._peers_lock:
+                    known_ips = {p["ip"] for p in self.peers.values()}
+                if sender_ip not in known_ips:
+                    return
                 delta = {
                     "rewards":      msg.get("rewards", [])[:5000],
                     "transactions": msg.get("txs", [])[:2000]
@@ -1448,14 +1464,10 @@ class Network:
         finally:
             conn.close()
 
-    # ── Broadcast to peers ───────────────────────
-
     def broadcast(self, message: dict, exclude_id: str = None):
-        """Gossip a message to recently active peers only.
-        Uses get_online_peers() so stale nodes don't consume fanout slots."""
-        msg_bytes   = json.dumps(message).encode()
-        online      = self.get_online_peers()
-        all_peers   = list(online.items())
+        msg_bytes      = json.dumps(message).encode()
+        online         = self.get_online_peers()
+        all_peers      = list(online.items())
         random.shuffle(all_peers)
         peers_snapshot = all_peers[:BROADCAST_FANOUT]
         for peer_id, peer in peers_snapshot:
@@ -1489,7 +1501,6 @@ class Network:
             return False
 
     def get_online_peers(self):
-        """Return peers seen within the last 120 seconds."""
         cutoff = time.time() - 120
         with self._peers_lock:
             return {
@@ -1499,7 +1510,7 @@ class Network:
 
 
 # ─────────────────────────────────────────────
-# NODE — Complete Timpal device
+# NODE
 # ─────────────────────────────────────────────
 
 class Node:
@@ -1516,9 +1527,9 @@ class Node:
         )
         self.network._node_ref = self
         self._sending      = False
-        self._my_tickets   = {}   # slot -> (ticket, sig, seed)
-        self._commits      = {}   # slot -> {device_id: commit_hash}
-        self._reveals      = {}   # slot -> {device_id: {ticket,sig,seed,pubkey}}
+        self._my_tickets   = {}
+        self._commits      = {}
+        self._reveals      = {}
         self._lottery_lock = threading.Lock()
 
     def _acquire_lock(self):
@@ -1538,7 +1549,35 @@ class Node:
 
     def _load_or_create_wallet(self):
         import getpass
+
         if os.path.exists(WALLET_FILE):
+            # Version check — wallet must be v2.2 or newer
+            # If it's older, the user must delete both wallet and ledger
+            # This enforces a clean start for all nodes on the new network
+            try:
+                with open(WALLET_FILE, "r") as f:
+                    wallet_data = json.load(f)
+                wallet_version = wallet_data.get("version", "0.0")
+                if _ver(wallet_version) < _ver(VERSION):
+                    print("\n  " + "═" * 52)
+                    print("  TIMPAL v2.2 — ACTION REQUIRED")
+                    print("  " + "═" * 52)
+                    print(f"  Your wallet was created by an older version")
+                    print(f"  ({wallet_version}). v2.2 is a fresh network.")
+                    print(f"  Everyone starts with a new wallet and address.")
+                    print(f"")
+                    print(f"  Delete your old wallet and ledger, then restart:")
+                    print(f"")
+                    print(f"  rm ~/.timpal_wallet.json")
+                    print(f"  rm ~/.timpal_ledger.json")
+                    print(f"")
+                    print(f"  WARNING: This creates a NEW wallet.")
+                    print(f"  Your old address will not work on v2.2.")
+                    print("  " + "═" * 52 + "\n")
+                    exit(1)
+            except Exception:
+                pass
+
             with open(WALLET_FILE, "r") as f:
                 wallet_data = json.load(f)
             if wallet_data.get("encrypted"):
@@ -1555,7 +1594,6 @@ class Node:
             else:
                 self.wallet.load()
                 print("\n  \u26a0\ufe0f  Your wallet is not encrypted.")
-                print("  Anyone with access to this device can steal your TMPL.")
                 ans = input("  Encrypt your wallet now? (yes/no): ").strip().lower()
                 if ans == "yes":
                     while True:
@@ -1615,8 +1653,7 @@ class Node:
             return
         if tx.recipient_id == self.wallet.device_id:
             balance = self.ledger.get_balance(self.wallet.device_id)
-            print(f"\n")
-            print(f"  \u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557")
+            print(f"\n  \u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557")
             print(f"  \u2551       TMPL RECEIVED              \u2551")
             print(f"  \u2560\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2563")
             print(f"  \u2551  Amount  : {tx.amount:.8f} TMPL")
@@ -1632,8 +1669,7 @@ class Node:
         if reward.get("winner_id") == self.wallet.device_id:
             if not self._sending:
                 balance = self.ledger.get_balance(self.wallet.device_id)
-                print(f"\n")
-                print(f"  \u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557")
+                print(f"\n  \u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557")
                 print(f"  \u2551       REWARD WON! \u2605              \u2551")
                 print(f"  \u2560\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2563")
                 print(f"  \u2551  Amount  : {reward['amount']:.8f} TMPL")
@@ -1647,18 +1683,14 @@ class Node:
                   end="", flush=True)
 
     def _vrf_ticket(self, time_slot: int) -> tuple:
-        """VRF ticket: seed = time_slot, ticket = SHA256(sign(private_key, seed)).
-        Unique per node, unpredictable before reveal, verifiable by anyone."""
-        seed = str(time_slot)
-        msg  = seed.encode()
-        sig  = Dilithium3.sign(self.wallet.private_key, msg)
+        seed   = str(time_slot)
+        msg    = seed.encode()
+        sig    = Dilithium3.sign(self.wallet.private_key, msg)
         ticket = hashlib.sha256(sig).hexdigest()
         return ticket, sig.hex(), seed
 
     @staticmethod
     def _verify_ticket(public_key_hex: str, seed: str, sig_hex: str, ticket: str) -> bool:
-        """Verify: signature is valid for the seed under this public key,
-        and hashes to the claimed ticket value."""
         try:
             pub = bytes.fromhex(public_key_hex)
             sig = bytes.fromhex(sig_hex)
@@ -1669,16 +1701,11 @@ class Node:
         except Exception:
             return False
 
-    # ── Commit-reveal lottery ──────────────────────────────────────────────────
-
     def _make_commit(self, time_slot: int, ticket: str) -> str:
-        """Commitment = SHA256(ticket + device_id + slot). Binding to device_id
-        prevents grinding attacks."""
         raw = f"{ticket}:{self.wallet.device_id}:{time_slot}"
         return hashlib.sha256(raw.encode()).hexdigest()
 
     def _bootstrap_submit(self, msg: dict):
-        """Submit to ALL known bootstrap servers simultaneously (fire and forget)."""
         def _send(host, port):
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1693,7 +1720,6 @@ class Node:
             threading.Thread(target=_send, args=(host, port), daemon=True).start()
 
     def _bootstrap_query(self, msg_type: str, slot: int) -> dict:
-        """Query ALL known bootstrap servers simultaneously and merge results."""
         results   = {}
         lock      = threading.Lock()
         done      = threading.Event()
@@ -1738,8 +1764,6 @@ class Node:
         return results
 
     def _pick_winner(self, time_slot, all_reveals):
-        """Pick winner from all verified reveals. Lowest hex ticket wins.
-        Only accepts reveals that have a matching commit."""
         verified = {}
         with self._lottery_lock:
             known_commits = dict(self._commits.get(time_slot, {}))
@@ -1768,7 +1792,6 @@ class Node:
         }
 
     def _distribute_fees(self, time_slot: int, active_nodes: list):
-        """Era 2 only: split all tx fees for this slot equally among active nodes."""
         if not is_era2():
             return
         if not active_nodes:
@@ -1808,7 +1831,6 @@ class Node:
                       end="", flush=True)
 
     def _claim_reward(self, winner, time_slot, active_nodes=None):
-        """Verify winner cryptographically, add to ledger, gossip to peers."""
         if not Node._verify_ticket(
             winner["public_key"], winner["seed"],
             winner["sig"], winner["ticket"]
@@ -1856,7 +1878,6 @@ class Node:
             self._distribute_fees(time_slot, active_nodes)
 
     def _cleanup_slot(self, time_slot):
-        """Remove lottery data older than 10 slots and prune stale seen_ids."""
         with self._lottery_lock:
             for d in (self._commits, self._reveals):
                 old = [s for s in d if s < time_slot - 10]
@@ -1869,8 +1890,11 @@ class Node:
         with self.network._seen_lock:
             def _is_stale(sid):
                 try:
-                    return ((sid.startswith("reward:") or sid.startswith("checkpoint:"))
-                            and int(sid.split(":")[1]) < cutoff)
+                    if sid.startswith("reward:") or sid.startswith("checkpoint:"):
+                        return int(sid.split(":")[1]) < cutoff
+                    if sid.startswith("fee:"):
+                        return int(sid.split(":")[1]) < cutoff
+                    return False
                 except Exception:
                     return False
             stale = [sid for sid in self.network.seen_ids if _is_stale(sid)]
@@ -1883,42 +1907,40 @@ class Node:
                 self.network._seen_tx_order = self.network._seen_tx_order[-10000:]
 
     def _reward_lottery(self):
-        """Commit-reveal VRF lottery — decentralized, CGNAT-safe.
-
-        Bootstrap stores commits/reveals — nodes query it regardless of NAT.
-        Bootstrap cannot cheat — every entry is cryptographically verified by nodes.
+        """Commit-reveal VRF lottery.
 
         Every 5-second slot:
           t=0.0  Compute ticket. Submit COMMIT to bootstrap.
           t=2.0  Fetch all commits. Submit REVEAL to bootstrap.
           t=4.0  Fetch all reveals.
-          t=4.5  Pick lowest verified ticket — same answer on every node.
-                 Add reward to ledger, gossip to peers.
+          t=4.5  Pick lowest verified ticket. Add reward. Gossip.
         """
         time.sleep(45)
 
         while self.network._running:
-            # Align to next absolute slot boundary
             now            = time.time()
             elapsed        = now - GENESIS_TIME
             next_slot_time = GENESIS_TIME + (int(elapsed / REWARD_INTERVAL) + 1) * REWARD_INTERVAL
             time.sleep(max(0.05, next_slot_time - time.time()))
 
-            # Era 2: no more block rewards
             if is_era2():
                 continue
 
-            time_slot  = get_current_slot()
+            time_slot = get_current_slot()
+
+            # Guard: slot must be non-negative
+            if time_slot < 0:
+                continue
+
             slot_start = GENESIS_TIME + time_slot * REWARD_INTERVAL
 
-            # Skip if reward already arrived via gossip
             with self.ledger._lock:
                 already_won = any(r.get("time_slot") == time_slot for r in self.ledger.rewards)
             if already_won:
                 self._cleanup_slot(time_slot)
                 continue
 
-            # ── Phase 1: Submit commit (t=0.0) ─────────────────────────────
+            # Phase 1: Submit commit
             ticket, sig_hex, seed = self._vrf_ticket(time_slot)
             self._my_tickets[time_slot] = (ticket, sig_hex, seed)
             commit = self._make_commit(time_slot, ticket)
@@ -1933,9 +1955,8 @@ class Node:
                 "commit":    commit
             })
 
-            # ── Wait until t=2.0 then fetch all commits ─────────────────────
-            wait_commits = slot_start + 2.0
-            remaining    = wait_commits - time.time()
+            # Wait until t=2.0
+            remaining = slot_start + 2.0 - time.time()
             if remaining > 0:
                 time.sleep(remaining)
             with self.ledger._lock:
@@ -1951,7 +1972,7 @@ class Node:
                             self._commits[time_slot] = {}
                         self._commits[time_slot][device_id] = c
 
-            # ── Phase 2: Submit reveal (t=2.0) ──────────────────────────────
+            # Phase 2: Submit reveal
             self._bootstrap_submit({
                 "type":       "SUBMIT_REVEAL",
                 "device_id":  self.wallet.device_id,
@@ -1962,9 +1983,8 @@ class Node:
                 "public_key": self.wallet.public_key.hex()
             })
 
-            # ── Wait until t=4.0 then fetch all reveals ─────────────────────
-            wait_reveals = slot_start + 4.0
-            remaining    = wait_reveals - time.time()
+            # Wait until t=4.0
+            remaining = slot_start + 4.0 - time.time()
             if remaining > 0:
                 time.sleep(remaining)
             with self.ledger._lock:
@@ -1974,7 +1994,6 @@ class Node:
                 continue
             all_reveals = self._bootstrap_query("GET_REVEALS", time_slot)
 
-            # Always include our own reveal
             all_reveals[self.wallet.device_id] = {
                 "ticket":     ticket,
                 "sig":        sig_hex,
@@ -1982,9 +2001,8 @@ class Node:
                 "public_key": self.wallet.public_key.hex()
             }
 
-            # ── Wait until t=4.5 before claiming ────────────────────────────
-            wait_claim = slot_start + 4.5
-            remaining  = wait_claim - time.time()
+            # Wait until t=4.5
+            remaining = slot_start + 4.5 - time.time()
             if remaining > 0:
                 time.sleep(remaining)
             with self.ledger._lock:
@@ -2007,7 +2025,6 @@ class Node:
             print("\n  Amount must be greater than zero.")
             return False
 
-        # Normalize and validate recipient address
         peer_id = peer_id.lower().strip()
         if not (len(peer_id) == 64 and all(c in "0123456789abcdef" for c in peer_id)):
             print(f"\n  Invalid address. Must be a 64-character hex string.")
@@ -2068,7 +2085,6 @@ class Node:
         return True
 
     def _control_server(self):
-        """Local control socket — lets CLI subcommands talk to the running node."""
         token = os.urandom(32).hex()
         token_file = os.path.join(os.path.expanduser("~"), ".timpal_control.token")
         try:
@@ -2115,44 +2131,45 @@ class Node:
 
     def _handle_control(self, cmd: dict) -> dict:
         action = cmd.get("action")
-
         if action == "balance":
             balance = self.ledger.get_balance(self.wallet.device_id)
             return {"ok": True, "balance": balance, "address": self.wallet.device_id}
-
         elif action == "send":
             peer_id = cmd.get("peer_id")
             amount  = float(cmd.get("amount", 0))
             ok = self.send(peer_id, amount)
             return {"ok": ok}
-
         elif action == "network":
             summary = self.ledger.get_summary()
             peers   = self.network.get_online_peers()
             return {
-                "ok":           True,
-                "peers":        len(peers),
-                "transactions": summary.get("total_transactions", 0),
+                "ok":            True,
+                "peers":         len(peers),
+                "transactions":  summary.get("total_transactions", 0),
                 "total_rewards": summary.get("total_rewards", 0),
-                "minted":       summary.get("total_minted", 0),
-                "remaining":    summary.get("remaining_supply", 0)
+                "minted":        summary.get("total_minted", 0),
+                "remaining":     summary.get("remaining_supply", 0)
             }
-
         return {"ok": False, "error": "Unknown action"}
 
     def _push_to_explorer(self):
-        """Push ledger updates to the explorer API every 5 seconds."""
+        """Push ledger updates to the explorer API every 5 seconds.
+        Only pushes epoch-valid rewards — never pushes wrong-epoch data."""
         time.sleep(60)
-        # Use Python's built-in CA bundle — no certifi dependency needed
         ssl_ctx = ssl.create_default_context()
 
         while self.network._running:
             try:
                 import urllib.request
                 with self.ledger._lock:
-                    my_rewards     = [r for r in self.ledger.rewards
+                    # Only push block_rewards that pass epoch validation
+                    valid_rewards = [
+                        r for r in self.ledger.rewards
+                        if r.get("type") != "block_reward" or _is_valid_epoch_slot(r.get("time_slot"))
+                    ]
+                    my_rewards     = [r for r in valid_rewards
                                       if r.get("winner_id") == self.wallet.device_id][-200:]
-                    recent_rewards = list(self.ledger.rewards[-50:])
+                    recent_rewards = list(valid_rewards[-50:])
                     seen_ids = set()
                     rewards  = []
                     for r in my_rewards + recent_rewards:
@@ -2179,12 +2196,10 @@ class Node:
                 )
                 urllib.request.urlopen(req, timeout=5, context=ssl_ctx)
             except Exception:
-                pass   # Never crash the node over an explorer push failure
+                pass
             time.sleep(5)
 
     def _checkpoint_loop(self):
-        """Check every 30 seconds if a checkpoint is due.
-        Checkpoint slots are deterministic from GENESIS_TIME — all nodes agree."""
         while self.network._running:
             try:
                 current_slot = get_current_slot()
@@ -2192,7 +2207,6 @@ class Node:
                     last_slot       = self.ledger.checkpoints[-1]["slot"]
                     next_checkpoint = last_slot + CHECKPOINT_INTERVAL
                 else:
-                    # Align to the checkpoint grid from genesis
                     boundary        = (current_slot // CHECKPOINT_INTERVAL) * CHECKPOINT_INTERVAL
                     next_checkpoint = boundary if boundary > 0 else CHECKPOINT_INTERVAL
                 if current_slot >= next_checkpoint + CHECKPOINT_BUFFER:
@@ -2218,7 +2232,7 @@ class Node:
 
     def start(self):
         print("\n" + "\u2550" * 52)
-        print("  TIMPAL v2.1 \u2014 Quantum-Resistant Money Without Masters")
+        print("  TIMPAL v2.2 \u2014 Quantum-Resistant Money Without Masters")
         print("  Quantum-Resistant | Worldwide | Instant")
         print("\u2550" * 52)
         self.network.start()
@@ -2291,8 +2305,8 @@ class Node:
             elif raw == "send":
                 self._sending = True
                 try:
-                    peers     = self.network.get_online_peers()
-                    peer_list = list(peers.items())
+                    # Snapshot peer list before displaying — prevents list changing mid-interaction
+                    peer_list = list(self.network.get_online_peers().items())
                     if peer_list:
                         print(f"\n  Online peers:")
                     for i, (pid, info) in enumerate(peer_list):
@@ -2364,7 +2378,7 @@ class Node:
 if __name__ == "__main__":
     import sys
 
-    _check_genesis_time()   # Refuse to start if GENESIS_TIME is not set
+    _check_genesis_time()
 
     if len(sys.argv) >= 2 and sys.argv[1] == "send":
         if len(sys.argv) != 4:
@@ -2386,7 +2400,6 @@ if __name__ == "__main__":
                 all(c in "0123456789abcdef" for c in recipient_id)):
             print("Invalid address. Must be a 64-character hex string.")
             sys.exit(1)
-        # Send via control socket — running node is the single source of truth
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(5.0)
@@ -2429,7 +2442,6 @@ if __name__ == "__main__":
         if not os.path.exists(WALLET_FILE):
             print("No wallet found. Run python3 timpal.py first.")
             sys.exit(1)
-        # Read balance via control socket if node is running
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(2.0)
@@ -2459,7 +2471,6 @@ if __name__ == "__main__":
                 sys.exit(0)
         except Exception:
             pass
-        # Fallback: read directly from ledger file (node not running)
         ledger = Ledger()
         wallet = Wallet()
         with open(WALLET_FILE, "r") as f:

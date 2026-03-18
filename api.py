@@ -1,5 +1,5 @@
-"""TIMPAL API — serves live ledger data for timpal.org explorer.
-Nodes push updates to this API — no NAT issues, fully decentralized data."""
+"""TIMPAL API v2.2 — serves live ledger data for timpal.org explorer.
+Nodes push updates here — no NAT issues, fully decentralized data."""
 
 import json
 import os
@@ -16,14 +16,21 @@ _ledger      = {"rewards": [], "transactions": [], "total_minted": 0.0}
 _ledger_lock = threading.Lock()
 _last_update = 0
 
-# ── Cached computed stats (rebuilt on every POST) ──────────────────────────────
+# ── Cached computed stats ──────────────────────────────────────────────────────
 _stats_cache      = None
 _stats_cache_lock = threading.Lock()
 
 # ── Per-IP POST rate limiting ──────────────────────────────────────────────────
-_post_rate      = {}   # ip -> [timestamps]
+_post_rate      = {}
 _post_rate_lock = threading.Lock()
 POST_RATE_LIMIT = 5    # Max pushes per IP per 10 seconds
+
+
+def _is_valid_hex64(s) -> bool:
+    """True if s is a 64-character lowercase hex string."""
+    if not isinstance(s, str) or len(s) != 64:
+        return False
+    return all(c in "0123456789abcdef" for c in s)
 
 
 def fmt_time(ts):
@@ -32,8 +39,19 @@ def fmt_time(ts):
     return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _clean_post_rate():
+    """Background thread: remove stale IP entries from _post_rate every 60 seconds."""
+    while True:
+        time.sleep(60)
+        now = time.time()
+        with _post_rate_lock:
+            stale = [ip for ip, times in _post_rate.items()
+                     if not [t for t in times if now - t < 10]]
+            for ip in stale:
+                del _post_rate[ip]
+
+
 def _rebuild_stats_cache(rewards, txs, total_minted):
-    """Recompute node_stats and summary. Called after every successful POST."""
     block_rewards = [r for r in rewards if r.get("type") == "block_reward"]
     computed      = round(sum(r.get("amount", 0) for r in block_rewards), 8)
     total_minted  = max(computed, total_minted)
@@ -102,11 +120,9 @@ class Handler(BaseHTTPRequestHandler):
             params = urllib.parse.parse_qs(parsed.query)
 
             if path in ("", "/", "/api", "/api/"):
-                # Serve cached stats — built on POST, never on GET
                 with _stats_cache_lock:
                     cache = _stats_cache
                 if cache is None:
-                    # Nothing pushed yet — return empty state
                     self.wfile.write(json.dumps({
                         "total_minted":   0,
                         "remaining":      250_000_000,
@@ -124,6 +140,10 @@ class Handler(BaseHTTPRequestHandler):
                 addr = params.get("id", [""])[0].strip()
                 if not addr:
                     self.wfile.write(json.dumps({"error": "missing id"}).encode())
+                    return
+                # Validate — must be 64-char lowercase hex
+                if not _is_valid_hex64(addr):
+                    self.wfile.write(json.dumps({"error": "invalid address format"}).encode())
                     return
                 with _ledger_lock:
                     rewards = list(_ledger["rewards"])
@@ -154,8 +174,8 @@ class Handler(BaseHTTPRequestHandler):
                     ],
                     "transactions": [
                         {
-                            "tx_id":       t.get("tx_id", ""),
-                            "direction":   "sent" if t.get("sender_id") == addr else "received",
+                            "tx_id":        t.get("tx_id", ""),
+                            "direction":    "sent" if t.get("sender_id") == addr else "received",
                             "counterparty": (t.get("recipient_id", "")
                                             if t.get("sender_id") == addr
                                             else t.get("sender_id", "")),
@@ -171,6 +191,10 @@ class Handler(BaseHTTPRequestHandler):
                 tx_id = params.get("id", [""])[0].strip()
                 if not tx_id:
                     self.wfile.write(json.dumps({"error": "missing id"}).encode())
+                    return
+                # Basic format validation — UUID or hex string, max 64 chars
+                if not isinstance(tx_id, str) or len(tx_id) > 64 or not tx_id.replace("-", "").isalnum():
+                    self.wfile.write(json.dumps({"error": "invalid tx_id format"}).encode())
                     return
                 with _ledger_lock:
                     tx = next((t for t in _ledger["transactions"]
@@ -196,14 +220,12 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"error": str(e)}).encode())
 
     def do_POST(self):
-        """Nodes push ledger updates here."""
-        global _last_update
+        global _last_update, _stats_cache
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         try:
-            # Per-IP rate limiting
             ip  = self.client_address[0]
             now = time.time()
             with _post_rate_lock:
@@ -234,7 +256,6 @@ class Handler(BaseHTTPRequestHandler):
             rewards = data.get("rewards", [])
             txs     = data.get("transactions", [])
 
-            # Basic type validation — ignore malformed entries silently
             rewards = [r for r in rewards
                        if isinstance(r, dict)
                        and isinstance(r.get("amount"), (int, float))
@@ -245,7 +266,6 @@ class Handler(BaseHTTPRequestHandler):
                        and isinstance(t.get("tx_id"), str)]
 
             with _ledger_lock:
-                # Merge rewards — one per slot, lowest ticket wins
                 existing_slots = {
                     r.get("time_slot"): r
                     for r in _ledger["rewards"]
@@ -271,14 +291,12 @@ class Handler(BaseHTTPRequestHandler):
                                    for x in _ledger["rewards"]):
                             _ledger["rewards"].append(r)
 
-                # Merge transactions — dedup by tx_id
                 existing_txids = {t.get("tx_id") for t in _ledger["transactions"]}
                 for t in txs:
                     if t.get("tx_id") not in existing_txids:
                         _ledger["transactions"].append(t)
                         existing_txids.add(t.get("tx_id"))
 
-                # Cap memory usage
                 _ledger["rewards"]      = _ledger["rewards"][-10000:]
                 _ledger["transactions"] = _ledger["transactions"][-5000:]
 
@@ -289,10 +307,8 @@ class Handler(BaseHTTPRequestHandler):
                 txs_snapshot     = list(_ledger["transactions"])
                 minted_snapshot  = _ledger["total_minted"]
 
-            # Rebuild stats cache outside the ledger lock
             new_cache = _rebuild_stats_cache(rewards_snapshot, txs_snapshot, minted_snapshot)
             with _stats_cache_lock:
-                global _stats_cache
                 _stats_cache = new_cache
 
             _last_update = time.time()
@@ -302,10 +318,11 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"error": str(e)}).encode())
 
     def log_message(self, format, *args):
-        pass   # Suppress per-request access logs
+        pass
 
 
 if __name__ == "__main__":
-    print("TIMPAL API running on port 7781 — waiting for node pushes")
+    threading.Thread(target=_clean_post_rate, daemon=True).start()
+    print("TIMPAL API v2.2 running on port 7781 — waiting for node pushes")
     server = ThreadingHTTPServer(("0.0.0.0", 7781), Handler)
     server.serve_forever()

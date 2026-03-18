@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-TIMPAL Bootstrap Server v2.1
+TIMPAL Bootstrap Server v2.2
 ------------------------------
 Peer discovery + commit/reveal registry for decentralized lottery.
 Cannot cheat — every commit/reveal is cryptographically verified by nodes.
@@ -17,28 +17,32 @@ import time
 import random
 
 PORT        = 7777
-VERSION     = "2.1"
-MIN_VERSION = "2.1"   # Minimum node version allowed to connect
+VERSION     = "2.2"
+MIN_VERSION = "2.2"
 
 # ── GENESIS_TIME ──────────────────────────────────────────────────────────────
-# Must match the value in timpal.py exactly.
-# Used to validate that node slot numbers are in range.
+# Must match timpal.py exactly.
 # Set this to the same number you put in timpal.py.
-GENESIS_TIME = 0   # ← REPLACE 0 with the same number you set in timpal.py
+GENESIS_TIME = 0   # ← REPLACE with the same number as in timpal.py
 
-REWARD_INTERVAL = 5.0   # Must match timpal.py
+REWARD_INTERVAL = 5.0
 
 
 def _check_genesis_time():
     if GENESIS_TIME == 0:
-        print("\n  ERROR: GENESIS_TIME is not set.")
-        print("  Set GENESIS_TIME in bootstrap.py to the same value as in timpal.py.")
-        print("  Then restart bootstrap.py.\n")
+        print("\n  " + "=" * 50)
+        print("  ERROR: GENESIS_TIME is not set.")
+        print("  " + "=" * 50)
+        print("  Set GENESIS_TIME in bootstrap.py to the")
+        print("  same value as in timpal.py, then restart.")
+        print("")
+        print("  Run: python3 -c \"import time; print(int(time.time()))\"")
+        print("  Paste the result into both files.")
+        print("  " + "=" * 50 + "\n")
         exit(1)
 
 
 def get_current_slot() -> int:
-    """Current slot relative to genesis — must match every node's calculation."""
     return int((time.time() - GENESIS_TIME) / REWARD_INTERVAL)
 
 
@@ -50,38 +54,37 @@ def _ver(v: str) -> tuple:
 
 
 # ── State ─────────────────────────────────────────────────────────────────────
-peers      = {}   # device_id -> {ip, port, last_seen}
-commits    = {}   # slot -> {device_id: commit_hash}
-reveals    = {}   # slot -> {device_id: {ticket,sig,seed,public_key}}
+peers      = {}
+commits    = {}
+reveals    = {}
 peers_lock   = threading.Lock()
 lottery_lock = threading.Lock()
 rate_lock    = threading.Lock()
 
-commit_ip_rate = {}   # ip -> {slot -> count}
-reveal_ip_rate = {}   # ip -> {slot -> count}
-hello_ip_rate  = {}   # ip -> [timestamps]
-bs_ip_rate     = {}   # ip -> [timestamps]
+commit_ip_rate = {}
+reveal_ip_rate = {}
+hello_ip_rate  = {}
+bs_ip_rate     = {}
 
-bootstrap_servers      = {}   # "host:port" -> {host, port, last_seen}
+bootstrap_servers      = {}
 bootstrap_servers_lock = threading.Lock()
 
-COMMIT_RATE_LIMIT  = 3    # Max commits per IP per slot
-REVEAL_RATE_LIMIT  = 3    # Max reveals per IP per slot
-HELLO_RATE_LIMIT   = 10   # Max HELLO registrations per IP per minute
-BS_RATE_LIMIT      = 5    # Max REGISTER_BOOTSTRAP per IP per hour
-BS_MAX_SERVERS     = 100  # Max bootstrap servers stored
-HELLO_PEERS_SAMPLE = 50   # Max peers returned in HELLO response
+COMMIT_RATE_LIMIT  = 3
+REVEAL_RATE_LIMIT  = 3
+HELLO_RATE_LIMIT   = 10
+BS_RATE_LIMIT      = 5
+BS_MAX_SERVERS     = 100
+HELLO_PEERS_SAMPLE = 50
 
 
 def clean_old_data():
-    """Purge stale peers, old slot data, and expired rate limit entries."""
+    """Purge stale peers, old slot data, expired rate limit entries."""
     while True:
         time.sleep(60)
         now          = time.time()
         cutoff       = now - 300
         current_slot = get_current_slot()
 
-        # Clean stale peers
         with peers_lock:
             stale = [pid for pid, p in peers.items() if p["last_seen"] < cutoff]
             for pid in stale:
@@ -89,14 +92,12 @@ def clean_old_data():
             if stale:
                 print(f"  Cleaned {len(stale)} stale peers. Active: {len(peers)}")
 
-        # Clean old slot data (keep last 20 slots)
         with lottery_lock:
             for d in (commits, reveals):
                 old = [s for s in list(d) if s < current_slot - 20]
                 for s in old:
                     del d[s]
 
-        # Clean old rate limit slot data
         with rate_lock:
             for rate_dict in (commit_ip_rate, reveal_ip_rate):
                 for ip_key in list(rate_dict.keys()):
@@ -106,13 +107,11 @@ def clean_old_data():
                         del rate_dict[ip_key][s]
                     if not rate_dict[ip_key]:
                         del rate_dict[ip_key]
-            # Clean hello rate limit
             for ip_key in list(hello_ip_rate.keys()):
                 hello_ip_rate[ip_key] = [t for t in hello_ip_rate[ip_key] if now - t < 60]
                 if not hello_ip_rate[ip_key]:
                     del hello_ip_rate[ip_key]
 
-        # Clean stale bootstrap servers (not seen for 24 hours)
         bs_cutoff = now - 86400
         with bootstrap_servers_lock:
             stale_bs = [k for k, v in bootstrap_servers.items() if v["last_seen"] < bs_cutoff]
@@ -121,7 +120,6 @@ def clean_old_data():
             if stale_bs:
                 print(f"  Cleaned {len(stale_bs)} stale bootstrap servers. "
                       f"Active: {len(bootstrap_servers)}")
-            # Clean bs_ip_rate
             for ip_key in list(bs_ip_rate.keys()):
                 bs_ip_rate[ip_key] = [t for t in bs_ip_rate[ip_key] if now - t < 3600]
                 if not bs_ip_rate[ip_key]:
@@ -144,7 +142,7 @@ def handle_client(conn, addr):
         msg_type = msg.get("type")
         ip       = addr[0]
 
-        # ── Peer registration ────────────────────────────────────────────────
+        # ── Peer registration ─────────────────────────────────────────────────
         if msg_type == "HELLO":
             device_id    = msg.get("device_id", "")
             port         = msg.get("port", PORT)
@@ -154,13 +152,13 @@ def handle_client(conn, addr):
                 conn.sendall(json.dumps({
                     "type":   "VERSION_REJECTED",
                     "reason": (f"Your version ({node_version}) is below minimum "
-                               f"({MIN_VERSION}). Update from: "
-                               f"https://github.com/EvokiTimpal/timpal")
+                               f"({MIN_VERSION}). "
+                               f"Delete ~/.timpal_wallet.json and ~/.timpal_ledger.json, "
+                               f"then update from: https://github.com/EvokiTimpal/timpal")
                 }).encode())
                 print(f"  [!] Rejected old node v{node_version}: {device_id[:20]}... from {ip}")
                 return
 
-            # Rate limit — max HELLO_RATE_LIMIT registrations per IP per minute
             now_hello = time.time()
             with rate_lock:
                 hello_ip_rate.setdefault(ip, [])
@@ -211,13 +209,11 @@ def handle_client(conn, addr):
                 conn.sendall(json.dumps({"type": "ERROR", "msg": "invalid commit"}).encode())
                 return
 
-            # Validate slot is within 2 slots of current (GENESIS_TIME-relative)
             current_slot = get_current_slot()
             if abs(slot - current_slot) > 2:
                 conn.sendall(json.dumps({"type": "ERROR", "msg": "stale slot"}).encode())
                 return
 
-            # Rate limit — max COMMIT_RATE_LIMIT commits per IP per slot
             with rate_lock:
                 commit_ip_rate.setdefault(ip, {})
                 commit_ip_rate[ip].setdefault(slot, 0)
@@ -261,7 +257,8 @@ def handle_client(conn, addr):
             if len(ticket) != 64 or not all(c in "0123456789abcdef" for c in ticket.lower()):
                 conn.sendall(json.dumps({"type": "ERROR", "msg": "invalid ticket"}).encode())
                 return
-            if not isinstance(seed, str) or len(seed) > 64:
+            # Seed must equal str(slot) — any other value is invalid
+            if not isinstance(seed, str) or seed != str(slot):
                 conn.sendall(json.dumps({"type": "ERROR", "msg": "invalid seed"}).encode())
                 return
             if len(public_key) > 8192:
@@ -271,13 +268,11 @@ def handle_client(conn, addr):
                 conn.sendall(json.dumps({"type": "ERROR", "msg": "invalid sig"}).encode())
                 return
 
-            # Validate slot is within 2 slots of current (GENESIS_TIME-relative)
             current_slot = get_current_slot()
             if abs(slot - current_slot) > 2:
                 conn.sendall(json.dumps({"type": "ERROR", "msg": "stale slot"}).encode())
                 return
 
-            # Rate limit
             with rate_lock:
                 reveal_ip_rate.setdefault(ip, {})
                 reveal_ip_rate[ip].setdefault(slot, 0)
@@ -291,7 +286,6 @@ def handle_client(conn, addr):
                     peers[device_id]["last_seen"] = time.time()
 
             with lottery_lock:
-                # Only store reveal if commit exists for this node and slot
                 if slot in commits and device_id in commits[slot]:
                     if slot not in reveals:
                         reveals[slot] = {}
@@ -346,7 +340,7 @@ def handle_client(conn, addr):
                 "network_size": len(peers)
             }).encode())
 
-        # ── Peer list query (device_ids only — no IPs exposed) ───────────────
+        # ── Peer list query (device_ids only — no IPs exposed) ────────────────
         elif msg_type == "GET_PEERS":
             with peers_lock:
                 peer_list = [{"device_id": pid} for pid in peers]
@@ -363,7 +357,6 @@ def handle_client(conn, addr):
                 conn.sendall(json.dumps({"type": "ERROR", "msg": "invalid host"}).encode())
                 return
 
-            # Rate limit — skip for known bootstrap servers gossiping to each other
             now = time.time()
             known_bs_ips = set()
             with bootstrap_servers_lock:
@@ -382,7 +375,6 @@ def handle_client(conn, addr):
                         return
                     bs_ip_rate[ip].append(now)
 
-            # Verify server is actually reachable before storing
             key = f"{bs_host}:{bs_port}"
             try:
                 probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -407,7 +399,6 @@ def handle_client(conn, addr):
 
             conn.sendall(json.dumps({"type": "REGISTER_ACK", "key": key}).encode())
 
-            # Gossip to other known bootstrap servers
             def _gossip_new_bs(h, p):
                 with bootstrap_servers_lock:
                     targets = [(v["host"], v["port"])
@@ -427,7 +418,7 @@ def handle_client(conn, addr):
                         continue
             threading.Thread(target=_gossip_new_bs, args=(bs_host, bs_port), daemon=True).start()
 
-        # ── Bootstrap server list query ───────────────────────────────────────
+        # ── Bootstrap server list query ────────────────────────────────────────
         elif msg_type == "GET_BOOTSTRAP_SERVERS":
             with bootstrap_servers_lock:
                 bs_list = [
@@ -446,7 +437,6 @@ def handle_client(conn, addr):
 
 
 def _gossip_bootstrap_servers():
-    """Every 5 minutes, sync bootstrap server list with all known peers."""
     time.sleep(30)
     while True:
         time.sleep(300)
@@ -475,24 +465,25 @@ def main():
     _check_genesis_time()
 
     print("=" * 50)
-    print("  TIMPAL Bootstrap Server v2.1")
+    print("  TIMPAL Bootstrap Server v2.2")
     print("  Peer Discovery + Commit/Reveal Registry")
     print("  Cannot cheat — nodes verify everything")
     print("=" * 50)
     print(f"  Listening on port {PORT}")
+    print(f"  Min node version : {MIN_VERSION}")
     print(f"  Anyone can run this server.")
     print("=" * 50 + "\n")
 
-    threading.Thread(target=clean_old_data,           daemon=True).start()
+    threading.Thread(target=clean_old_data,            daemon=True).start()
     threading.Thread(target=_gossip_bootstrap_servers, daemon=True).start()
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("", PORT))
-    server.listen(200)   # Allow more queued connections
+    server.listen(200)
     print(f"  Ready. Waiting for nodes...\n")
 
-    _conn_sem = threading.Semaphore(200)   # Allow 200 concurrent connections
+    _conn_sem = threading.Semaphore(200)
 
     def _handle_with_sem(conn, addr):
         try:

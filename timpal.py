@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-TIMPAL Protocol v2.0 — Quantum-Resistant Money Without Masters
+TIMPAL Protocol v2.1 — Quantum-Resistant Money Without Masters
 
 Quantum-resistant. Worldwide. Instant transactions.
 Distributed ledger. No banks. No servers. No control.
@@ -298,6 +298,8 @@ class Ledger:
             if pub and seed and sig and tick:
                 if not Node._verify_ticket(pub, seed, sig, tick):
                     continue
+            if reward.get("amount", 0) <= 0:
+                continue
             verified_rewards.append(reward)
         with self._lock:
             changed = False
@@ -608,7 +610,7 @@ class Transaction:
         # Validate sender_id and recipient_id — must be 64-char lowercase hex
         for field in ("sender_id", "recipient_id"):
             val = d.get(field, "")
-            if not isinstance(val, str) or len(val) != 64 or not all(c in "0123456789abcdef" for c in val.lower()):
+            if not isinstance(val, str) or len(val) != 64 or not all(c in "0123456789abcdef" for c in val):
                 raise ValueError(f"invalid {field}: {val!r}")
         # Validate sender_pubkey — must be non-empty hex string
         pubkey = d.get("sender_pubkey", "")
@@ -767,7 +769,7 @@ class Network:
         Matches bootstrap cleanup interval and cutoff."""
         while self._running:
             time.sleep(60)
-            cutoff = time.time() - 300
+            cutoff = time.time() - 1200
             with self._peers_lock:
                 stale = [pid for pid, p in list(self.peers.items()) if p["last_seen"] < cutoff]
                 for pid in stale:
@@ -958,7 +960,7 @@ class Network:
             peer = peers[peer_id]
             try:
                 with self.ledger._lock:
-                    known_slots  = [r.get("time_slot") for r in self.ledger.rewards if r.get("time_slot")][-10000:]
+                    known_slots  = [r.get("time_slot") for r in self.ledger.rewards if r.get("time_slot") and r.get("type") == "block_reward"][-10000:]
                     known_tx_ids = [t.get("tx_id") for t in self.ledger.transactions if t.get("tx_id")][-10000:]
 
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1325,13 +1327,13 @@ class Network:
                 their_checkpoint_slot = msg.get("checkpoint_slot", 0)
 
                 with self.ledger._lock:
-                    our_slots = set(r.get("time_slot") for r in self.ledger.rewards if r.get("time_slot"))
+                    our_slots = set(r.get("time_slot") for r in self.ledger.rewards if r.get("time_slot") and r.get("type") == "block_reward")
                     our_tx_ids = set(t.get("tx_id") for t in self.ledger.transactions if t.get("tx_id"))
 
                     # What peer is missing (we have, they don't)
                     missing_rewards = [
                         r for r in self.ledger.rewards
-                        if r.get("time_slot") not in their_slots
+                        if r.get("type") == "fee_reward" or r.get("time_slot") not in their_slots
                     ][:5000]
                     missing_txs = [
                         t for t in self.ledger.transactions
@@ -1408,7 +1410,7 @@ class Network:
             return False
 
     def get_online_peers(self):
-        cutoff = time.time() - 30
+        cutoff = time.time() - 120
         with self._peers_lock:
             return {
                 pid: info for pid, info in self.peers.items()
@@ -2264,6 +2266,7 @@ class Node:
                 print(f"\n  Network Status:")
                 print(f"  Online peers      : {len(peers)}")
                 print(f"  Total transactions: {summary['total_transactions']}")
+                print(f"  Total rewards     : {summary['total_rewards']}")
                 print(f"  Total minted      : {summary['total_minted']:.8f} TMPL")
                 print(f"  Remaining supply  : {summary['remaining_supply']:.8f} TMPL")
                 print(f"  Bootstrap         : {BOOTSTRAP_HOST}:{BOOTSTRAP_PORT}\n")
@@ -2357,10 +2360,8 @@ if __name__ == "__main__":
         if not os.path.exists(WALLET_FILE):
             print("No wallet found. Run python3 timpal.py first.")
             sys.exit(1)
-        wallet.load()
-        balance = ledger.get_balance(wallet.device_id)
-        if amount <= 0 or balance < amount:
-            print(f"Insufficient balance. You have {balance:.8f} TMPL.")
+        if amount <= 0:
+            print("Amount must be greater than zero.")
             sys.exit(1)
         # Send via control socket to running node — one ledger, one source of truth
         import socket as _socket

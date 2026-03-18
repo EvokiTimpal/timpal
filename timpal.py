@@ -1477,7 +1477,7 @@ class Node:
                 ans = input("  Encrypt your wallet now? (yes/no): ").strip().lower()
                 if ans == "yes":
                     while True:
-                        pw  = getpass.getpass("  Set password: ")
+                        pw  = getpass.getpass("  Set password (min 8 characters): ")
                         pw2 = getpass.getpass("  Confirm password: ")
                         if pw != pw2:
                             print("  Passwords do not match. Try again.")
@@ -1499,7 +1499,7 @@ class Node:
             print("\n  Set a password to encrypt your wallet.")
             print("  If you forget it your TMPL is gone forever.")
             while True:
-                pw  = getpass.getpass("  Set password: ")
+                pw  = getpass.getpass("  Set password (min 8 characters): ")
                 pw2 = getpass.getpass("  Confirm password: ")
                 if pw != pw2:
                     print("  Passwords do not match. Try again.")

@@ -17,7 +17,7 @@ import time
 
 PORT        = 7777
 VERSION     = "2.1"
-MIN_VERSION = "2.0"   # Minimum node version allowed to connect
+MIN_VERSION = "2.1"   # Minimum node version allowed to connect
 
 def _ver(v: str) -> tuple:
     """Parse version string into comparable tuple. e.g. '2.1' -> (2, 1)"""

@@ -35,7 +35,7 @@ TIMPAL provides a simple protocol: run the software, earn rewards, send TMPL to 
 
 The protocol currently runs on Mac, Windows, and Linux computers running Python 3.8 or newer.
 ```
-pip3 install dilithium-py
+pip3 install dilithium-py cryptography
 curl -O https://raw.githubusercontent.com/EvokiTimpal/timpal/main/timpal.py
 python3 timpal.py
 ```
@@ -56,14 +56,24 @@ Double-spend prevention is enforced by checking the sender's balance before acce
 
 TIMPAL uses Dilithium3, selected as a post-quantum digital signature standard by NIST in 2024. Every device generates a unique key pair on first launch. The private key never leaves the device. All transactions and VRF tickets are signed and verifiable.
 
-### 3.3 Network Topology
+### 3.3 Wallet Encryption
+
+The private key is encrypted at rest using AES-256-GCM. The encryption key is derived from a user-supplied password using scrypt (N=131072, r=8, p=1) with a randomly generated 32-byte salt. A random 12-byte nonce is used for each save. The plaintext private key is never written to disk.
+
+On first run, the user is prompted to set a password before the wallet is saved. On subsequent runs, the password is required to decrypt and load the wallet. Wrong passwords are rejected before the key is loaded — the wallet file is never modified on a failed attempt.
+
+Existing unencrypted wallets from previous versions are detected on startup and the user is offered an immediate migration path. The protocol will not run with an unencrypted wallet without explicit user acknowledgment.
+
+The security of the wallet is bounded by the strength of the password. Users are advised to choose a passphrase they will remember, as there is no recovery mechanism — a forgotten password means permanent loss of access to the wallet.
+
+### 3.4 Network Topology
 
 - **Local:** UDP broadcast on port 7778 for same-network peer discovery.
 - **Global:** Bootstrap server at bootstrap.timpal.org:7777 introduces nodes worldwide. Stores no funds. Controls nothing.
 
 Once connected, nodes communicate directly peer-to-peer. The bootstrap server is not involved in transactions or rewards.
 
-### 3.4 VRF Reward Lottery
+### 3.5 VRF Reward Lottery
 
 Every 5 seconds, one node wins 1.0575 TMPL. The winner is selected using a Verifiable Random Function (VRF):
 
@@ -71,19 +81,19 @@ Each node signs the current time slot with its private key. The ticket is the ha
 
 Because the ticket is derived from each node's unique private key signature, it is different every round — no node has a permanent advantage over any other. The design scales to millions of nodes with zero coordination overhead. As the number of nodes grows, reward distribution converges to statistically equal.
 
-### 3.5 One Node Per Device
+### 3.6 One Node Per Device
 
 An OS-level file lock prevents more than one node running per device. Any second attempt exits immediately. More rewards require more physical devices — the same constraint for everyone.
 
-### 3.6 Ledger Conflict Resolution
+### 3.7 Ledger Conflict Resolution
 
 Each five-second time slot has exactly one winner. If two nodes claim the same slot — due to network latency or a temporary split — the reward with the lowest VRF ticket is canonical. This is the same rule used during the live lottery, so the conflict resolution is always consistent. After a checkpoint is applied, balances are calculated from the checkpoint snapshot forward rather than from the beginning of history.
 
-### 3.7 Transaction Rate Limiting
+### 3.8 Transaction Rate Limiting
 
 Each device is limited to 60 transactions per minute. This prevents spam and flood attacks while comfortably supporting all legitimate use cases. Since one node per device is enforced at the OS level, this limit applies equally to every participant on the network.
 
-### 3.8 Ledger Checkpoint System
+### 3.9 Ledger Checkpoint System
 
 Without checkpointing, the ledger would grow to approximately 118GB over 37.5 years, making it impractical for nodes in regions with limited storage or bandwidth.
 
@@ -95,7 +105,7 @@ Checkpoints are gossiped to peers automatically. A new node joining the network 
 
 The process is fully automatic and requires no human intervention. It runs identically on every node forever.
 
-### 3.9 Protocol Version Enforcement
+### 3.10 Protocol Version Enforcement
 
 As TIMPAL evolves, updates may change protocol rules. Nodes running outdated versions could cause conflicts if they remain on the network after a rule-changing update.
 
@@ -164,13 +174,15 @@ Dilithium3 protects all signatures against both classical and quantum computer a
 
 Every reward includes a cryptographic ticket derived from the winner's private key signature. Any node can verify the winner is legitimate by confirming the ticket is the lowest value submitted for that round.
 
-### 6.5 Bootstrap Server
+### 6.5 Wallet Security
+
+Private keys are encrypted at rest with AES-256-GCM. The encryption key is derived from the user's password via scrypt with a random salt. The plaintext private key exists only in memory while the node is running and is never written to disk in any form.
+
+### 6.6 Bootstrap Server
 
 Single point of failure for new node discovery only — not for network operation. Existing nodes continue peer-to-peer if bootstrap goes offline. Community-operated bootstrap servers are welcome.
 
----
-
-### 6.6 Era 2 Fee Distribution
+### 6.7 Era 2 Fee Distribution
 
 In Era 2, fee distribution is designed to resist centralization. Routing all transaction fees to the slot winner would mean one node captures all fee income every 5 seconds — a structural advantage for well-connected or high-uptime nodes that compounds over time.
 

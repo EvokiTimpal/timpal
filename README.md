@@ -8,9 +8,9 @@ TIMPAL is a peer-to-peer payment protocol. No banks. No servers. No company. No 
 
 ## Quick start
 
-**Step 1 — Install the dependency:**
+**Step 1 — Install dependencies:**
 ```
-pip3 install dilithium-py
+pip3 install dilithium-py cryptography
 ```
 
 **Step 2 — Download TIMPAL:**
@@ -23,7 +23,7 @@ curl -O https://raw.githubusercontent.com/EvokiTimpal/timpal/main/timpal.py
 python3 timpal.py
 ```
 
-Your node starts, creates a quantum-resistant wallet, connects to the worldwide network, and joins the reward lottery automatically.
+Your node starts, creates a quantum-resistant wallet, prompts you to set a password to encrypt it, connects to the worldwide network, and joins the reward lottery automatically.
 
 ---
 
@@ -44,6 +44,7 @@ Your node starts, creates a quantum-resistant wallet, connects to the worldwide 
 
 - **Distributed ledger** — Every node holds a full copy. No single point of failure.
 - **Quantum-resistant cryptography** — Dilithium3, NIST 2024 post-quantum standard.
+- **Encrypted wallet** — Private key encrypted with AES-256-GCM and a password you set. Never stored in plaintext.
 - **Instant finality** — Transactions confirm immediately.
 - **VRF reward lottery** — Every 5 seconds, one node wins 1.0575 TMPL. Winner selected by Verifiable Random Function using each node's private key signature — provably fair, no node has a permanent advantage.
 - **One node per device** — Fairness enforced by the protocol.
@@ -75,6 +76,16 @@ Your node starts, creates a quantum-resistant wallet, connects to the worldwide 
 
 ---
 
+## Wallet security
+
+On first run, TIMPAL prompts you to set a password. Your private key is encrypted with AES-256-GCM using a key derived from your password via scrypt. The plaintext private key is never written to disk.
+
+**If you forget your password, your TMPL is gone forever.** There is no recovery. Write it down and store it somewhere safe.
+
+If you have an existing unencrypted wallet from a previous version, TIMPAL will prompt you to encrypt it on next startup.
+
+---
+
 ## Auto-start on boot
 
 Run your node automatically every time your computer starts.
@@ -101,6 +112,7 @@ To stop auto-start, see instructions printed after running the script.
 ## Sending TMPL from the command line
 
 While your node is running in one terminal, open a second terminal to send:
+
 ```
 # Check your balance and full address
 python3 timpal.py balance
@@ -137,5 +149,3 @@ TIMPAL is a protocol, not a product. Nobody owns it. Nobody controls it. The rul
 ## License
 
 MIT
-
-Built March 8, 2026. First transaction sent the same day.

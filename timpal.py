@@ -895,7 +895,7 @@ class Network:
             peer = peers[peer_id]
             try:
                 with self.ledger._lock:
-                    known_slots  = [r.get("time_slot") for r in self.ledger.rewards if r.get("time_slot")]
+                    known_slots  = [r.get("time_slot") for r in self.ledger.rewards if r.get("time_slot")][-10000:]
                     known_tx_ids = [t.get("tx_id") for t in self.ledger.transactions if t.get("tx_id")]
 
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -2016,7 +2016,7 @@ class Node:
                 import urllib.request, ssl
                 with self.ledger._lock:
                     my_rewards     = [r for r in self.ledger.rewards
-                                      if r.get("winner_id") == self.wallet.device_id]
+                                      if r.get("winner_id") == self.wallet.device_id][-200:]
                     recent_rewards = list(self.ledger.rewards[-50:])
                     seen_ids = set()
                     rewards  = []

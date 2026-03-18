@@ -31,6 +31,18 @@ except ImportError:
     print("  Then restart Timpal.\n")
     exit(1)
 
+# Wallet encryption — AES-256-GCM with scrypt key derivation
+try:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+    from cryptography.hazmat.backends import default_backend
+    ENCRYPTION_AVAILABLE = True
+except ImportError:
+    print("\n  [!] cryptography not installed.")
+    print("  Run: pip3 install cryptography")
+    print("  Then restart Timpal.\n")
+    exit(1)
+
 # ─────────────────────────────────────────────
 # PROTOCOL CONSTANTS — NEVER CHANGE
 # ─────────────────────────────────────────────
@@ -464,26 +476,62 @@ class Wallet:
     def _derive_device_id(self):
         return hashlib.sha256(self.public_key).hexdigest()
 
-    def save(self, path=WALLET_FILE):
+    @staticmethod
+    def _derive_key(password: str, salt: bytes) -> bytes:
+        kdf = Scrypt(salt=salt, length=32, n=131072, r=8, p=1, backend=default_backend())
+        return kdf.derive(password.encode())
+
+    def save(self, path=WALLET_FILE, password=None):
         # Atomic write — write to temp file then os.replace to avoid corruption on crash
-        data = {
-            "version":     VERSION,
-            "device_id":   self.device_id,
-            "public_key":  self.public_key.hex(),
-            "private_key": self.private_key.hex(),
-            "quantum":     True
-        }
+        if password:
+            salt       = os.urandom(32)
+            key        = Wallet._derive_key(password, salt)
+            nonce      = os.urandom(12)
+            ciphertext = AESGCM(key).encrypt(nonce, self.private_key, None)
+            data = {
+                "version":         VERSION,
+                "device_id":       self.device_id,
+                "public_key":      self.public_key.hex(),
+                "encrypted":       True,
+                "kdf":             "scrypt",
+                "scrypt_n":        131072,
+                "scrypt_r":        8,
+                "scrypt_p":        1,
+                "salt":            salt.hex(),
+                "nonce":           nonce.hex(),
+                "private_key_enc": ciphertext.hex()
+            }
+        else:
+            data = {
+                "version":     VERSION,
+                "device_id":   self.device_id,
+                "public_key":  self.public_key.hex(),
+                "private_key": self.private_key.hex(),
+                "quantum":     True
+            }
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(data, f, indent=2)
         os.replace(tmp, path)
 
-    def load(self, path=WALLET_FILE):
+    def load(self, path=WALLET_FILE, password=None):
         with open(path, "r") as f:
             data = json.load(f)
-        self.public_key  = bytes.fromhex(data["public_key"])
-        self.private_key = bytes.fromhex(data["private_key"])
-        self.device_id   = data["device_id"]
+        self.public_key = bytes.fromhex(data["public_key"])
+        self.device_id  = data["device_id"]
+        if data.get("encrypted"):
+            if password is None:
+                raise ValueError("wallet is encrypted — password required")
+            salt       = bytes.fromhex(data["salt"])
+            nonce      = bytes.fromhex(data["nonce"])
+            ciphertext = bytes.fromhex(data["private_key_enc"])
+            key        = Wallet._derive_key(password, salt)
+            try:
+                self.private_key = AESGCM(key).decrypt(nonce, ciphertext, None)
+            except Exception:
+                raise ValueError("wrong password")
+        else:
+            self.private_key = bytes.fromhex(data["private_key"])
 
     def get_public_key_hex(self):
         return self.public_key.hex()
@@ -757,6 +805,7 @@ class Network:
                         "port":      self.port,
                         "version":   VERSION
                     }).encode())
+                    sock.shutdown(socket.SHUT_WR)
                     response = b""
                     while True:
                         chunk = sock.recv(65536)
@@ -908,7 +957,7 @@ class Network:
             try:
                 with self.ledger._lock:
                     known_slots  = [r.get("time_slot") for r in self.ledger.rewards if r.get("time_slot")][-10000:]
-                    known_tx_ids = [t.get("tx_id") for t in self.ledger.transactions if t.get("tx_id")]
+                    known_tx_ids = [t.get("tx_id") for t in self.ledger.transactions if t.get("tx_id")][-10000:]
 
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(30.0)
@@ -1404,15 +1453,63 @@ class Node:
             exit(0)
 
     def _load_or_create_wallet(self):
+        import getpass
         if os.path.exists(WALLET_FILE):
-            self.wallet.load()
+            with open(WALLET_FILE, "r") as f:
+                wallet_data = json.load(f)
+            if wallet_data.get("encrypted"):
+                # Encrypted wallet — prompt for password, retry on wrong password
+                while True:
+                    try:
+                        pw = getpass.getpass("  Wallet password: ")
+                        self.wallet.load(password=pw)
+                        break
+                    except ValueError as e:
+                        if "wrong password" in str(e):
+                            print("  Wrong password. Try again.")
+                        else:
+                            raise
+            else:
+                # Plaintext wallet — load then offer to encrypt
+                self.wallet.load()
+                print("\n  ⚠️  Your wallet is not encrypted.")
+                print("  Anyone with access to this device can steal your TMPL.")
+                ans = input("  Encrypt your wallet now? (yes/no): ").strip().lower()
+                if ans == "yes":
+                    while True:
+                        pw  = getpass.getpass("  Set password: ")
+                        pw2 = getpass.getpass("  Confirm password: ")
+                        if pw != pw2:
+                            print("  Passwords do not match. Try again.")
+                            continue
+                        if len(pw) < 8:
+                            print("  Password must be at least 8 characters.")
+                            continue
+                        self.wallet.save(password=pw)
+                        print("  Wallet encrypted successfully.")
+                        break
+                else:
+                    print("  Wallet left unencrypted.")
             balance = self.ledger.get_balance(self.wallet.device_id)
             print(f"\n  Wallet loaded.")
             print(f"  Device ID : {self.wallet.device_id[:24]}...")
             print(f"  Balance   : {balance:.8f} TMPL")
         else:
             self.wallet.create_new()
-            self.wallet.save()
+            print("\n  Set a password to encrypt your wallet.")
+            print("  If you forget it your TMPL is gone forever.")
+            while True:
+                pw  = getpass.getpass("  Set password: ")
+                pw2 = getpass.getpass("  Confirm password: ")
+                if pw != pw2:
+                    print("  Passwords do not match. Try again.")
+                    continue
+                if len(pw) < 8:
+                    print("  Password must be at least 8 characters.")
+                    continue
+                self.wallet.save(password=pw)
+                print("  Wallet encrypted and saved.")
+                break
 
     _tx_rate      = {}               # device_id -> [timestamps]
     _tx_rate_lock = threading.Lock()
@@ -1433,10 +1530,7 @@ class Node:
             if len(times) >= 60:
                 return
             times.append(now)
-            if times:
-                Node._tx_rate[sender] = times
-            else:
-                Node._tx_rate.pop(sender, None)
+            Node._tx_rate[sender] = times
 
         # Add to ledger — ledger checks balance automatically
         added = self.ledger.add_transaction(tx.to_dict())

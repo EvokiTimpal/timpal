@@ -34,8 +34,8 @@ except ImportError:
 # ─────────────────────────────────────────────
 # PROTOCOL CONSTANTS — NEVER CHANGE
 # ─────────────────────────────────────────────
-VERSION            = "2.0"
-MIN_VERSION        = "2.0"   # Minimum version allowed to connect
+VERSION            = "2.1"
+MIN_VERSION        = "2.1"   # Minimum version allowed to connect
 BOOTSTRAP_SERVERS   = [
     ("bootstrap.timpal.org", 7777),   # Timpal foundation — always running
     # Community bootstrap servers can be added here
@@ -768,8 +768,20 @@ class Network:
                     sock.close()
                     data = json.loads(response.decode())
                     if data.get("type") == "VERSION_REJECTED":
-                        print(f"\n  [!] {data.get('reason', 'Version rejected by bootstrap')}")
-                        print(f"  > ", end="", flush=True)
+                        print(f"\n  ╔" + "═" * 50 + "╗")
+                        print(f"  ║  TIMPAL UPDATE REQUIRED                           ║")
+                        print(f"  ╠" + "═" * 50 + "╣")
+                        print(f"  ║  Your version is no longer supported.            ║")
+                        print(f"  ║  You must update before joining the network.     ║")
+                        print(f"  ╠" + "═" * 50 + "╣")
+                        print(f"  ║  Step 1: Delete your old ledger:                 ║")
+                        print(f"  ║    rm ~/.timpal_ledger.json                       ║")
+                        print(f"  ║  Step 2: Download the new version:               ║")
+                        print(f"  ║    curl -O https://raw.githubusercontent.com/     ║")
+                        print(f"  ║    EvokiTimpal/timpal/main/timpal.py              ║")
+                        print(f"  ║  Step 3: Restart:                                ║")
+                        print(f"  ║    python3 timpal.py                             ║")
+                        print(f"  ╚" + "═" * 50 + "╝")
                         return
                     if data.get("type") == "PEERS":
                         for peer in data.get("peers", []):
@@ -2091,7 +2103,7 @@ class Node:
 
     def start(self):
         print("\n" + "═" * 52)
-        print("  TIMPAL v2.0 — Quantum-Resistant Money Without Masters")
+        print("  TIMPAL v2.1 — Quantum-Resistant Money Without Masters")
         print("  Quantum-Resistant | Worldwide | Instant")
         print("═" * 52)
         self.network.start()

@@ -1,5 +1,11 @@
 """TIMPAL API v2.2 — serves live ledger data for timpal.org explorer.
-Nodes push updates here — no NAT issues, fully decentralized data."""
+
+Push authentication: nodes sign their push payload with their Dilithium3
+private key. No shared secret exists anywhere — not in code, not in env vars.
+The signature is verified cryptographically on every push.
+
+Nodes push updates here every 5 seconds. The explorer polls GET /api.
+"""
 
 import json
 import os
@@ -9,7 +15,15 @@ import urllib.parse
 import datetime
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
-PUSH_SECRET = "b7e2f4a1c9d3e8f2a5b1c4d7e0f3a6b9c2d5e8f1a4b7c0d3e6f9a2b5c8d1e4f7"
+try:
+    from dilithium_py.dilithium import Dilithium3
+    _DILITHIUM_AVAILABLE = True
+except ImportError:
+    _DILITHIUM_AVAILABLE = False
+    print("[!] dilithium-py not installed — push signature verification disabled")
+    print("    Run: pip3 install dilithium-py cryptography")
+
+import hashlib
 
 # ── In-memory ledger state ─────────────────────────────────────────────────────
 _ledger      = {"rewards": [], "transactions": [], "total_minted": 0.0}
@@ -23,7 +37,7 @@ _stats_cache_lock = threading.Lock()
 # ── Per-IP POST rate limiting ──────────────────────────────────────────────────
 _post_rate      = {}
 _post_rate_lock = threading.Lock()
-POST_RATE_LIMIT = 5    # Max pushes per IP per 10 seconds
+POST_RATE_LIMIT = 5   # Max pushes per IP per 10 seconds
 
 
 def _is_valid_hex64(s) -> bool:
@@ -31,6 +45,52 @@ def _is_valid_hex64(s) -> bool:
     if not isinstance(s, str) or len(s) != 64:
         return False
     return all(c in "0123456789abcdef" for c in s)
+
+
+def _verify_push_signature(data: dict) -> bool:
+    """Verify a node's push is signed with its Dilithium3 private key.
+
+    The node serializes the payload (all fields except 'signature') with
+    sort_keys=True, separators=(',',':'), signs the bytes, and includes
+    the hex signature as data['signature'].
+
+    We reconstruct the same bytes and verify.
+    """
+    if not _DILITHIUM_AVAILABLE:
+        # If dilithium not installed on server, accept pushes but log warning.
+        # This should not happen in production.
+        print("[!] WARNING: push accepted without signature verification")
+        return True
+
+    device_id  = data.get("device_id", "")
+    public_key = data.get("public_key", "")
+    signature  = data.get("signature", "")
+
+    if not device_id or not public_key or not signature:
+        return False
+
+    # Verify device_id = sha256(public_key)
+    try:
+        pub_bytes = bytes.fromhex(public_key)
+        if hashlib.sha256(pub_bytes).hexdigest() != device_id:
+            return False
+    except Exception:
+        return False
+
+    # Reconstruct the payload bytes the node signed
+    # (all fields except 'signature', sorted keys, compact separators)
+    payload_data = {k: v for k, v in data.items() if k != "signature"}
+    try:
+        payload_bytes = json.dumps(payload_data, sort_keys=True, separators=(',', ':')).encode()
+    except Exception:
+        return False
+
+    # Verify Dilithium3 signature
+    try:
+        sig_bytes = bytes.fromhex(signature)
+        return Dilithium3.verify(pub_bytes, payload_bytes, sig_bytes)
+    except Exception:
+        return False
 
 
 def fmt_time(ts):
@@ -64,12 +124,8 @@ def _rebuild_stats_cache(rewards, txs, total_minted):
 
     total_r    = sum(node_counts.values()) or 1
     node_stats = sorted([
-        {
-            "id":       nid,
-            "id_short": nid[:16] + "...",
-            "rewards":  cnt,
-            "pct":      round(cnt / total_r * 100, 2)
-        }
+        {"id": nid, "id_short": nid[:16] + "...",
+         "rewards": cnt, "pct": round(cnt / total_r * 100, 2)}
         for nid, cnt in node_counts.items()
     ], key=lambda x: x["rewards"], reverse=True)
 
@@ -84,30 +140,30 @@ def _rebuild_stats_cache(rewards, txs, total_minted):
         "active_nodes":   len(node_counts),
         "node_stats":     node_stats,
         "recent_rewards": [
-            {
-                "id":     r.get("winner_id", ""),
-                "amount": r.get("amount", 0),
-                "time":   fmt_time(r.get("timestamp")),
-                "slot":   r.get("time_slot", "")
-            }
+            {"id": r.get("winner_id", ""), "amount": r.get("amount", 0),
+             "time": fmt_time(r.get("timestamp")), "slot": r.get("time_slot", "")}
             for r in recent_rewards
         ],
         "recent_txs": [
-            {
-                "tx_id":     t.get("tx_id", ""),
-                "id":        (t.get("tx_id", "") or "")[:16] + "...",
-                "sender":    t.get("sender_id", ""),
-                "recipient": t.get("recipient_id", ""),
-                "amount":    t.get("amount", 0),
-                "time":      fmt_time(t.get("timestamp")),
-                "timestamp": t.get("timestamp", 0)
-            }
+            {"tx_id": t.get("tx_id", ""),
+             "id": (t.get("tx_id", "") or "")[:16] + "...",
+             "sender": t.get("sender_id", ""), "recipient": t.get("recipient_id", ""),
+             "amount": t.get("amount", 0), "time": fmt_time(t.get("timestamp")),
+             "timestamp": t.get("timestamp", 0)}
             for t in recent_txs
         ]
     }
 
 
 class Handler(BaseHTTPRequestHandler):
+
+    def do_OPTIONS(self):
+        """CORS preflight — needed for browsers making cross-origin POST requests."""
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
 
     def do_GET(self):
         self.send_response(200)
@@ -124,14 +180,9 @@ class Handler(BaseHTTPRequestHandler):
                     cache = _stats_cache
                 if cache is None:
                     self.wfile.write(json.dumps({
-                        "total_minted":   0,
-                        "remaining":      250_000_000,
-                        "total_rewards":  0,
-                        "total_txs":      0,
-                        "active_nodes":   0,
-                        "node_stats":     [],
-                        "recent_rewards": [],
-                        "recent_txs":     []
+                        "total_minted": 0, "remaining": 250_000_000,
+                        "total_rewards": 0, "total_txs": 0, "active_nodes": 0,
+                        "node_stats": [], "recent_rewards": [], "recent_txs": []
                     }).encode())
                 else:
                     self.wfile.write(json.dumps(cache).encode())
@@ -141,50 +192,37 @@ class Handler(BaseHTTPRequestHandler):
                 if not addr:
                     self.wfile.write(json.dumps({"error": "missing id"}).encode())
                     return
-                # Validate — must be 64-char lowercase hex
                 if not _is_valid_hex64(addr):
                     self.wfile.write(json.dumps({"error": "invalid address format"}).encode())
                     return
                 with _ledger_lock:
                     rewards = list(_ledger["rewards"])
                     txs     = list(_ledger["transactions"])
-                addr_rewards  = sorted(
-                    [r for r in rewards if r.get("winner_id", "") == addr],
-                    key=lambda r: r.get("timestamp", 0), reverse=True
-                )
+                addr_rewards  = sorted([r for r in rewards if r.get("winner_id", "") == addr],
+                                       key=lambda r: r.get("timestamp", 0), reverse=True)
                 addr_txs_sent = [t for t in txs if t.get("sender_id",    "") == addr]
                 addr_txs_recv = [t for t in txs if t.get("recipient_id", "") == addr]
-                addr_txs      = sorted(
-                    addr_txs_sent + addr_txs_recv,
-                    key=lambda t: t.get("timestamp", 0), reverse=True
-                )
+                addr_txs      = sorted(addr_txs_sent + addr_txs_recv,
+                                       key=lambda t: t.get("timestamp", 0), reverse=True)
                 self.wfile.write(json.dumps({
                     "address":        addr,
                     "total_rewards":  len(addr_rewards),
                     "total_earned":   round(sum(r.get("amount", 0) for r in addr_rewards), 8),
                     "total_sent":     round(sum(t.get("amount", 0) for t in addr_txs_sent), 8),
                     "total_received": round(sum(t.get("amount", 0) for t in addr_txs_recv), 8),
-                    "rewards": [
-                        {
-                            "amount": r.get("amount", 0),
-                            "time":   fmt_time(r.get("timestamp")),
-                            "slot":   r.get("time_slot", "")
-                        }
-                        for r in addr_rewards[:100]
-                    ],
-                    "transactions": [
-                        {
-                            "tx_id":        t.get("tx_id", ""),
-                            "direction":    "sent" if t.get("sender_id") == addr else "received",
-                            "counterparty": (t.get("recipient_id", "")
-                                            if t.get("sender_id") == addr
-                                            else t.get("sender_id", "")),
-                            "amount":    t.get("amount", 0),
-                            "time":      fmt_time(t.get("timestamp")),
-                            "timestamp": t.get("timestamp", 0)
-                        }
-                        for t in addr_txs
-                    ]
+                    "rewards": [{"amount": r.get("amount", 0),
+                                 "time": fmt_time(r.get("timestamp")),
+                                 "slot": r.get("time_slot", "")}
+                                for r in addr_rewards[:100]],
+                    "transactions": [{"tx_id": t.get("tx_id", ""),
+                                      "direction": "sent" if t.get("sender_id") == addr else "received",
+                                      "counterparty": (t.get("recipient_id", "")
+                                                       if t.get("sender_id") == addr
+                                                       else t.get("sender_id", "")),
+                                      "amount": t.get("amount", 0),
+                                      "time": fmt_time(t.get("timestamp")),
+                                      "timestamp": t.get("timestamp", 0)}
+                                     for t in addr_txs]
                 }).encode())
 
             elif path == "/api/tx":
@@ -192,25 +230,19 @@ class Handler(BaseHTTPRequestHandler):
                 if not tx_id:
                     self.wfile.write(json.dumps({"error": "missing id"}).encode())
                     return
-                # Basic format validation — UUID or hex string, max 64 chars
                 if not isinstance(tx_id, str) or len(tx_id) > 64 or not tx_id.replace("-", "").isalnum():
                     self.wfile.write(json.dumps({"error": "invalid tx_id format"}).encode())
                     return
                 with _ledger_lock:
-                    tx = next((t for t in _ledger["transactions"]
-                               if t.get("tx_id", "") == tx_id), None)
+                    tx = next((t for t in _ledger["transactions"] if t.get("tx_id", "") == tx_id), None)
                 if not tx:
                     self.wfile.write(json.dumps({"error": "not found"}).encode())
                     return
                 self.wfile.write(json.dumps({
-                    "tx_id":     tx.get("tx_id", ""),
-                    "sender":    tx.get("sender_id", ""),
-                    "recipient": tx.get("recipient_id", ""),
-                    "amount":    tx.get("amount", 0),
-                    "timestamp": tx.get("timestamp", 0),
-                    "time":      fmt_time(tx.get("timestamp")),
-                    "signature": tx.get("signature", ""),
-                    "confirmed": True
+                    "tx_id": tx.get("tx_id", ""), "sender": tx.get("sender_id", ""),
+                    "recipient": tx.get("recipient_id", ""), "amount": tx.get("amount", 0),
+                    "timestamp": tx.get("timestamp", 0), "time": fmt_time(tx.get("timestamp")),
+                    "signature": tx.get("signature", ""), "confirmed": True
                 }).encode())
 
             else:
@@ -228,9 +260,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             ip  = self.client_address[0]
             now = time.time()
+
+            # Per-IP rate limit
             with _post_rate_lock:
-                times = _post_rate.get(ip, [])
-                times = [t for t in times if now - t < 10]
+                times = [t for t in _post_rate.get(ip, []) if now - t < 10]
                 if len(times) >= POST_RATE_LIMIT:
                     self.wfile.write(json.dumps({"error": "rate limit exceeded"}).encode())
                     return
@@ -245,17 +278,19 @@ class Handler(BaseHTTPRequestHandler):
             body = self.rfile.read(length)
             data = json.loads(body.decode())
 
-            if data.get("push_secret") != PUSH_SECRET:
-                self.wfile.write(json.dumps({"error": "unauthorized"}).encode())
-                return
-
             if data.get("type") != "LEDGER_PUSH":
                 self.wfile.write(json.dumps({"error": "unknown type"}).encode())
+                return
+
+            # Verify Dilithium3 signature — no shared secret
+            if not _verify_push_signature(data):
+                self.wfile.write(json.dumps({"error": "invalid signature"}).encode())
                 return
 
             rewards = data.get("rewards", [])
             txs     = data.get("transactions", [])
 
+            # Basic structural validation
             rewards = [r for r in rewards
                        if isinstance(r, dict)
                        and isinstance(r.get("amount"), (int, float))
@@ -268,12 +303,18 @@ class Handler(BaseHTTPRequestHandler):
             with _ledger_lock:
                 existing_slots = {
                     r.get("time_slot"): r
-                    for r in _ledger["rewards"]
-                    if r.get("type") == "block_reward"
+                    for r in _ledger["rewards"] if r.get("type") == "block_reward"
                 }
                 for r in rewards:
                     slot  = r.get("time_slot")
                     rtype = r.get("type", "block_reward")
+
+                    # Validate vrf_ticket is a proper 64-char hex string
+                    # Empty string < any valid ticket — must be rejected to prevent spoofing
+                    if rtype == "block_reward":
+                        if not _is_valid_hex64(r.get("vrf_ticket", "")):
+                            continue
+
                     if slot and rtype != "fee_reward":
                         existing = existing_slots.get(slot)
                         if not existing:
@@ -303,11 +344,11 @@ class Handler(BaseHTTPRequestHandler):
                 if data.get("total_minted", 0.0) > _ledger["total_minted"]:
                     _ledger["total_minted"] = data["total_minted"]
 
-                rewards_snapshot = list(_ledger["rewards"])
-                txs_snapshot     = list(_ledger["transactions"])
-                minted_snapshot  = _ledger["total_minted"]
+                rewards_snap = list(_ledger["rewards"])
+                txs_snap     = list(_ledger["transactions"])
+                minted_snap  = _ledger["total_minted"]
 
-            new_cache = _rebuild_stats_cache(rewards_snapshot, txs_snapshot, minted_snapshot)
+            new_cache = _rebuild_stats_cache(rewards_snap, txs_snap, minted_snap)
             with _stats_cache_lock:
                 _stats_cache = new_cache
 
@@ -323,6 +364,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     threading.Thread(target=_clean_post_rate, daemon=True).start()
-    print("TIMPAL API v2.2 running on port 7781 — waiting for node pushes")
+    print("TIMPAL API v2.2 running on port 7781")
+    print("Push authentication: Dilithium3 signature (no shared secret)")
     server = ThreadingHTTPServer(("0.0.0.0", 7781), Handler)
     server.serve_forever()

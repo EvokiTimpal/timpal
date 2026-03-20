@@ -179,7 +179,7 @@
   <div class="hero">
     <div class="hero-eyebrow">Peer-to-peer payment protocol · Est. March 8, 2026</div>
     <div class="hero-title">MONEY<br><span>WITHOUT</span><br>MASTERS</div>
-    <div class="hero-subtitle">Quantum-Resistant · Worldwide · Instant · Free</div>
+    <div class="hero-subtitle">Quantum-Resistant · Worldwide · Instant · Open</div>
     <div class="hero-desc">No banks. No central control. No company. Just people sending value directly to each other.</div>
     <div class="hero-actions">
       <button class="btn-primary" onclick="showPage('docs')">Get Started</button>
@@ -192,7 +192,7 @@
     <div class="stat-item"><div class="stat-label">Network Status</div><div class="stat-value accent">● LIVE</div></div>
     <div class="stat-item"><div class="stat-label">Total Supply</div><div class="stat-value">250,000,000 TMPL</div></div>
     <div class="stat-item"><div class="stat-label">Reward Interval</div><div class="stat-value">5 seconds</div></div>
-    <div class="stat-item"><div class="stat-label">Transaction Fee</div><div class="stat-value accent">FREE</div></div>
+    <div class="stat-item"><div class="stat-label">Transaction Fee</div><div class="stat-value accent">0.0005 TMPL</div></div>
     <div class="stat-item"><div class="stat-label">Cryptography</div><div class="stat-value">Dilithium3</div></div>
   </div>
 
@@ -247,12 +247,12 @@
       <div class="era-card era1">
         <div class="era-badge">Era 1 · Now → Year 37.5</div>
         <div class="era-title">Distribution</div>
-        <div class="era-desc">All transactions are free. Nodes earn through the VRF lottery: 1.0575 TMPL every 5 seconds. 250 million TMPL distributed over 37.5 years. No pre-mine. No insider allocation. Zero.</div>
+        <div class="era-desc">Nodes earn through the VRF lottery: 1.0575 TMPL every 5 seconds. Every transaction costs 0.0005 TMPL, paid to the slot winner. 250 million TMPL distributed over 37.5 years. No pre-mine. No insider allocation. Zero.</div>
       </div>
       <div class="era-card era2">
         <div class="era-badge">Era 2 · Year 37.5 onwards</div>
         <div class="era-title">Sustaining</div>
-        <div class="era-desc">Supply fixed forever at 250 million TMPL. Every transaction carries a fee of 0.0005 TMPL paid to the slot winner. The network sustains itself indefinitely.</div>
+        <div class="era-desc">Lottery rewards stop — supply is fixed forever at 250 million TMPL. Transactions still cost 0.0005 TMPL, paid to the slot winner. The network sustains itself indefinitely through fees alone.</div>
       </div>
     </div>
     <table class="token-table">
@@ -265,8 +265,7 @@
       <tr><td class="prop">Eligible Nodes Per Slot</td><td class="val">~10 (scales with network size)</td></tr>
       <tr><td class="prop">Confirmation Depth</td><td class="val">6 slots (~30 seconds)</td></tr>
       <tr><td class="prop">Checkpoint Interval</td><td class="val">Every 1,000 slots (~83 minutes)</td></tr>
-      <tr><td class="prop">Transaction Fee (Era 1)</td><td class="val green">Free</td></tr>
-      <tr><td class="prop">Transaction Fee (Era 2)</td><td class="val">0.0005 TMPL → slot winner</td></tr>
+      <tr><td class="prop">Transaction Fee</td><td class="val accent">0.0005 TMPL → slot winner (all eras)</td></tr>
       <tr><td class="prop">Pre-mine</td><td class="val green">None</td></tr>
       <tr><td class="prop">Insider Allocation</td><td class="val green">None</td></tr>
     </table>
@@ -464,16 +463,15 @@ winner = min(nodes, key=lambda n: |ticket_int - target_int|)</div>
           <tr><td>Eligible Nodes Per Slot</td><td>~10</td></tr>
           <tr><td>Confirmation Depth</td><td>6 slots (~30 seconds)</td></tr>
           <tr><td>Checkpoint Interval</td><td>Every 1,000 slots (~83 minutes)</td></tr>
-          <tr><td>Transaction Fee (Era 1)</td><td>Free</td></tr>
-          <tr><td>Transaction Fee (Era 2)</td><td>0.0005 TMPL → slot winner</td></tr>
+          <tr><td>Transaction Fee</td><td>0.0005 TMPL → slot winner (all eras)</td></tr>
           <tr><td>Pre-mine</td><td>None</td></tr>
           <tr><td>Insider Allocation</td><td>None</td></tr>
         </table>
       </div>
       <div class="docs-section" id="doc-eras">
         <div class="docs-h2">Two Eras</div>
-        <p class="docs-p"><strong style="color:var(--accent)">Era 1 — Distribution (Years 0 to 37.5):</strong> All transactions free. Nodes earn through VRF lottery. No pre-mine.</p>
-        <p class="docs-p"><strong style="color:var(--green)">Era 2 — Sustaining (Year 37.5 onwards):</strong> Supply fixed at 250 million forever. 0.0005 TMPL fee per transaction goes to the slot winner. Network self-sustaining indefinitely.</p>
+        <p class="docs-p"><strong style="color:var(--accent)">Era 1 — Distribution (Years 0 to 37.5):</strong> Every transaction costs 0.0005 TMPL, paid to the slot winner. Nodes also earn through the VRF lottery. 250 million TMPL distributed over 37.5 years. No pre-mine.</p>
+        <p class="docs-p"><strong style="color:var(--green)">Era 2 — Sustaining (Year 37.5 onwards):</strong> Lottery rewards stop. Supply is fixed at 250 million forever. Transactions still cost 0.0005 TMPL paid to the slot winner. Network self-sustaining indefinitely through fees alone.</p>
         <p class="docs-p">The transition is automatic. No upgrade required. No vote.</p>
       </div>
     </div>

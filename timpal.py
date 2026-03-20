@@ -71,8 +71,8 @@ UNIT                = 100_000_000            # 1 TMPL = 10^8 units (immutable po
 TOTAL_SUPPLY        = 25_000_000_000_000_000 # 250_000_000 * UNIT
 REWARD_PER_ROUND    = 105_750_000            # 1.0575 TMPL in units
 REWARD_INTERVAL     = 5.0
-MIN_TX_FEE          = 0                      # Zero at genesis; raise when spam is real
-TX_FEE_ERA2         = 50_000                 # 0.0005 TMPL in units (Era 2 only)
+MIN_TX_FEE          = 50_000                 # 0.0005 TMPL in units — applies from genesis
+TX_FEE_ERA2         = 50_000                 # same value; kept for clarity
 CHECKPOINT_INTERVAL = 1000                   # Slots between checkpoints (immutable post-genesis)
 CHECKPOINT_BUFFER   = 120
 MAX_PEERS           = 125
@@ -109,8 +109,8 @@ def is_era2() -> bool:
 
 
 def get_current_fee() -> int:
-    """Return the current minimum tx fee in units (int)."""
-    return TX_FEE_ERA2 if is_era2() else MIN_TX_FEE
+    """Return the current tx fee in units (int). Flat 0.0005 TMPL in all eras."""
+    return MIN_TX_FEE
 
 
 def _ver(v: str) -> tuple:

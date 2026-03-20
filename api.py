@@ -315,7 +315,7 @@ class Handler(BaseHTTPRequestHandler):
                         if not _is_valid_hex64(r.get("vrf_ticket", "")):
                             continue
 
-                    if slot and rtype != "fee_reward":
+                    if slot is not None and rtype != "fee_reward":
                         if slot not in existing_slots:
                             # First writer wins — accept the first valid claim per slot.
                             # All honest nodes agree on the winner via the collective target,

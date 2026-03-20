@@ -375,16 +375,22 @@ class Ledger:
             t_keep  = [t for t in self.transactions if (t.get("slot") or 0) >= prune_before]
             prev_bal = dict(self.checkpoints[-1]["balances"]) if self.checkpoints else {}
             addrs = set(prev_bal.keys())
-            for r in r_prune: addrs.add(r["winner_id"])
-            for t in t_prune: addrs.update([t["sender_id"], t["recipient_id"]])
+            for r in r_prune:
+                wid = r.get("winner_id", "")
+                if wid: addrs.add(wid)
+            for t in t_prune:
+                sid = t.get("sender_id", "")
+                rid = t.get("recipient_id", "")
+                if sid: addrs.add(sid)
+                if rid: addrs.add(rid)
             balances = {}
             for addr in addrs:
                 bal = prev_bal.get(addr, 0.0)
                 for t in t_prune:
-                    if t["recipient_id"] == addr: bal += t["amount"]
-                    if t["sender_id"]    == addr: bal -= t["amount"] + t.get("fee", 0.0)
+                    if t.get("recipient_id") == addr: bal += t.get("amount", 0.0)
+                    if t.get("sender_id")    == addr: bal -= t.get("amount", 0.0) + t.get("fee", 0.0)
                 for r in r_prune:
-                    if r["winner_id"] == addr: bal += r["amount"]
+                    if r.get("winner_id") == addr: bal += r.get("amount", 0.0)
                 balances[addr] = round(bal, 8)
             prev_spent   = list(self.checkpoints[-1].get("spent_tx_ids", [])) if self.checkpoints else []
             spent_tx_ids = list(set(prev_spent + [t["tx_id"] for t in t_prune]))
@@ -846,7 +852,7 @@ class Network:
             try:
                 with self.ledger._lock:
                     known_slots  = [r.get("time_slot") for r in self.ledger.rewards
-                                    if r.get("time_slot") and r.get("type") == "block_reward"][-10000:]
+                                    if r.get("time_slot") is not None and r.get("type") == "block_reward"][-10000:]
                     known_tx_ids = [t.get("tx_id") for t in self.ledger.transactions if t.get("tx_id")][-10000:]
                     checkpoint_slot = self.ledger.checkpoints[-1]["slot"] if self.ledger.checkpoints else 0
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1117,7 +1123,7 @@ class Network:
                 their_cp     = msg.get("checkpoint_slot", 0)
                 with self.ledger._lock:
                     our_slots  = set(r.get("time_slot") for r in self.ledger.rewards
-                                     if r.get("time_slot") and r.get("type") == "block_reward")
+                                     if r.get("time_slot") is not None and r.get("type") == "block_reward")
                     our_tx_ids = set(t.get("tx_id") for t in self.ledger.transactions if t.get("tx_id"))
                     missing_r  = [r for r in self.ledger.rewards
                                   if r.get("type") == "fee_reward" or r.get("time_slot") not in their_slots][:5000]

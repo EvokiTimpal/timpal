@@ -670,6 +670,16 @@ def handle_client(conn, addr):
 
         # ── Bootstrap server list query ────────────────────────────────────────
         elif msg_type == "GET_BOOTSTRAP_SERVERS":
+            now_bs = time.time()
+            with rate_lock:
+                hello_ip_rate.setdefault(ip, [])
+                hello_ip_rate[ip] = [t for t in hello_ip_rate[ip] if now_bs - t < 60]
+                if len(hello_ip_rate[ip]) >= HELLO_RATE_LIMIT:
+                    conn.sendall(json.dumps({
+                        "type": "ERROR", "msg": "rate limit exceeded"
+                    }).encode())
+                    return
+                hello_ip_rate[ip].append(now_bs)
             with bootstrap_servers_lock:
                 bs_list = [
                     {"host": v["host"], "port": v["port"]}

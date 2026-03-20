@@ -1,5 +1,4 @@
 # TIMPAL — Quantum-Resistant Money Without Masters
-
 Quantum-resistant. Worldwide. Instant. Free.
 
 TIMPAL is a peer-to-peer payment protocol. No banks. No servers. No company. No control. Just people sending value directly to each other.
@@ -46,7 +45,8 @@ Your node starts, creates a quantum-resistant wallet, prompts you to set a passw
 - **Quantum-resistant cryptography** — Dilithium3, NIST 2024 post-quantum standard.
 - **Encrypted wallet** — Private key encrypted with AES-256-GCM and a password you set. Never stored in plaintext.
 - **Instant finality** — Transactions confirm immediately.
-- **VRF reward lottery** — Every 5 seconds, one node wins 1.0575 TMPL. Winner selected by Verifiable Random Function using each node's private key signature — provably fair, no node has a permanent advantage.
+- **Eligibility-gated VRF lottery** — Every 5 seconds, one node wins 1.0575 TMPL. Only ~10 nodes are randomly eligible per slot regardless of how large the network grows, keeping participation fair and efficient at any scale. The winner is selected by a commit-reveal scheme — provably fair, no node has a permanent advantage.
+- **Collective target** — The winning ticket is the one closest to a target that cannot be known until all reveals are in. No node can predict or cherry-pick the outcome.
 - **One node per device** — Fairness enforced by the protocol.
 - **250 million TMPL total supply** — Over 37.5 years. No pre-mine. No insider allocation.
 
@@ -61,6 +61,7 @@ Your node starts, creates a quantum-resistant wallet, prompts you to set a passw
 | Reward per round | 1.0575 TMPL |
 | Round interval | 5 seconds |
 | Distribution period | 37.5 years |
+| Eligible nodes per slot | ~10 (scales automatically with network size) |
 | Transaction fee | Free (first 37.5 years) |
 | Transaction fee (after 37.5 years) | 0.0005 TMPL |
 | Fee recipient | All nodes that submitted a VRF commit for the slot (split equally) |

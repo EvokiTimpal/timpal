@@ -1,6 +1,12 @@
-"""TIMPAL API v3.0 — serves live ledger data for timpal.org explorer.
+"""TIMPAL API v3.1 — serves live ledger data for timpal.org explorer.
 
-v3.0 changes:
+v3.1 changes:
+  - UNIT = 100_000_000 added. All amounts from nodes are now int (units).
+    API converts to TMPL (float) at the display boundary by dividing by UNIT.
+    All JSON responses carry TMPL values — index.html requires no changes.
+  - total_minted comparison updated for integer arithmetic.
+
+v3.0 changes (unchanged):
   - Nodes push "blocks" (chain blocks) instead of flat "rewards" list
   - Explorer shows chain height, slot, prev_hash linkage, confirmed status
   - All existing endpoints unchanged — block structure is a superset of reward
@@ -27,13 +33,17 @@ except ImportError:
 
 import hashlib
 
+# ── v3.1 integer migration ─────────────────────────────────────────────────────
+UNIT               = 100_000_000        # 1 TMPL = 10^8 units (must match timpal.py)
+TOTAL_SUPPLY_TMPL  = 250_000_000.0      # display constant (TMPL)
+
 CONFIRMATION_DEPTH = 6   # must match timpal.py
 
 # ── In-memory ledger state ─────────────────────────────────────────────────────
 _ledger = {
-    "blocks":       [],   # v3.0: was "rewards" — now chain blocks
+    "blocks":       [],   # chain blocks (amounts stored as received — int units)
     "transactions": [],
-    "total_minted": 0.0,
+    "total_minted": 0,    # int units; convert to TMPL for display
     "chain_height": 0,
     "chain_tip_slot": -1,
     "chain_tip_hash": "0" * 64
@@ -49,6 +59,14 @@ _stats_cache_lock = threading.Lock()
 _post_rate      = {}
 _post_rate_lock = threading.Lock()
 POST_RATE_LIMIT = 5
+
+
+def _to_tmpl(units) -> float:
+    """Convert internal units to TMPL for display. Handles int and float gracefully."""
+    try:
+        return units / UNIT
+    except Exception:
+        return 0.0
 
 
 def _is_valid_hex64(s) -> bool:
@@ -110,11 +128,15 @@ def _clean_post_rate():
                 del _post_rate[ip]
 
 
-def _rebuild_stats_cache(blocks, txs, total_minted, chain_height, chain_tip_slot, chain_tip_hash):
+def _rebuild_stats_cache(blocks, txs, total_minted_units, chain_height,
+                         chain_tip_slot, chain_tip_hash):
+    """Build stats cache. All amounts converted from units to TMPL here."""
     current_slot  = chain_tip_slot
     block_rewards = [b for b in blocks if b.get("type") == "block_reward"]
-    computed      = round(sum(b.get("amount", 0) for b in block_rewards), 8)
-    total_minted  = max(computed, total_minted)
+
+    # Convert block amounts (units) to TMPL for display
+    computed_tmpl  = sum(_to_tmpl(b.get("amount", 0)) for b in block_rewards)
+    total_minted_tmpl = max(computed_tmpl, _to_tmpl(total_minted_units))
 
     node_counts = {}
     for b in block_rewards:
@@ -133,8 +155,8 @@ def _rebuild_stats_cache(blocks, txs, total_minted, chain_height, chain_tip_slot
     recent_txs    = sorted(txs,    key=lambda t: t.get("timestamp", 0), reverse=True)[:50]
 
     return {
-        "total_minted":    total_minted,
-        "remaining":       round(250_000_000 - total_minted, 8),
+        "total_minted":    round(total_minted_tmpl, 8),
+        "remaining":       round(TOTAL_SUPPLY_TMPL - total_minted_tmpl, 8),
         "total_rewards":   len(block_rewards),
         "total_txs":       len(txs),
         "active_nodes":    len(node_counts),
@@ -145,7 +167,7 @@ def _rebuild_stats_cache(blocks, txs, total_minted, chain_height, chain_tip_slot
         "recent_blocks": [
             {
                 "id":        b.get("winner_id", ""),
-                "amount":    b.get("amount", 0),
+                "amount":    round(_to_tmpl(b.get("amount", 0)), 8),
                 "time":      fmt_time(b.get("timestamp")),
                 "slot":      b.get("slot", ""),
                 "prev_hash": b.get("prev_hash", "")[:16] + "..." if b.get("prev_hash") else "",
@@ -159,7 +181,7 @@ def _rebuild_stats_cache(blocks, txs, total_minted, chain_height, chain_tip_slot
                 "id":        (t.get("tx_id", "") or "")[:16] + "...",
                 "sender":    t.get("sender_id", ""),
                 "recipient": t.get("recipient_id", ""),
-                "amount":    t.get("amount", 0),
+                "amount":    round(_to_tmpl(t.get("amount", 0)), 8),
                 "time":      fmt_time(t.get("timestamp")),
                 "timestamp": t.get("timestamp", 0)
             }
@@ -193,7 +215,7 @@ class Handler(BaseHTTPRequestHandler):
                     cache = _stats_cache
                 if cache is None:
                     self.wfile.write(json.dumps({
-                        "total_minted": 0, "remaining": 250_000_000,
+                        "total_minted": 0, "remaining": TOTAL_SUPPLY_TMPL,
                         "total_rewards": 0, "total_txs": 0, "active_nodes": 0,
                         "chain_height": 0, "chain_tip_slot": -1,
                         "chain_tip_hash": "0" * 64,
@@ -222,14 +244,14 @@ class Handler(BaseHTTPRequestHandler):
                 addr_txs      = sorted(addr_txs_sent + addr_txs_recv,
                                        key=lambda t: t.get("timestamp", 0), reverse=True)
                 self.wfile.write(json.dumps({
-                    "address":       addr,
-                    "total_rewards": len(addr_blocks),
-                    "total_earned":  round(sum(b.get("amount", 0) for b in addr_blocks), 8),
-                    "total_sent":    round(sum(t.get("amount", 0) for t in addr_txs_sent), 8),
-                    "total_received":round(sum(t.get("amount", 0) for t in addr_txs_recv), 8),
+                    "address":        addr,
+                    "total_rewards":  len(addr_blocks),
+                    "total_earned":   round(sum(_to_tmpl(b.get("amount", 0)) for b in addr_blocks), 8),
+                    "total_sent":     round(sum(_to_tmpl(t.get("amount", 0)) for t in addr_txs_sent), 8),
+                    "total_received": round(sum(_to_tmpl(t.get("amount", 0)) for t in addr_txs_recv), 8),
                     "blocks": [
                         {
-                            "amount":    b.get("amount", 0),
+                            "amount":    round(_to_tmpl(b.get("amount", 0)), 8),
                             "time":      fmt_time(b.get("timestamp")),
                             "slot":      b.get("slot", ""),
                             "prev_hash": b.get("prev_hash", ""),
@@ -244,7 +266,7 @@ class Handler(BaseHTTPRequestHandler):
                             "counterparty":(t.get("recipient_id", "")
                                             if t.get("sender_id") == addr
                                             else t.get("sender_id", "")),
-                            "amount":      t.get("amount", 0),
+                            "amount":      round(_to_tmpl(t.get("amount", 0)), 8),
                             "time":        fmt_time(t.get("timestamp")),
                             "timestamp":   t.get("timestamp", 0)
                         }
@@ -271,7 +293,8 @@ class Handler(BaseHTTPRequestHandler):
                     "tx_id":     tx.get("tx_id", ""),
                     "sender":    tx.get("sender_id", ""),
                     "recipient": tx.get("recipient_id", ""),
-                    "amount":    tx.get("amount", 0),
+                    "amount":    round(_to_tmpl(tx.get("amount", 0)), 8),
+                    "fee":       round(_to_tmpl(tx.get("fee", 0)), 8),
                     "timestamp": tx.get("timestamp", 0),
                     "time":      fmt_time(tx.get("timestamp")),
                     "signature": tx.get("signature", ""),
@@ -299,7 +322,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps({
                     "slot":       block.get("slot"),
                     "winner":     block.get("winner_id", ""),
-                    "amount":     block.get("amount", 0),
+                    "amount":     round(_to_tmpl(block.get("amount", 0)), 8),
                     "prev_hash":  block.get("prev_hash", ""),
                     "time":       fmt_time(block.get("timestamp")),
                     "timestamp":  block.get("timestamp", 0),
@@ -347,7 +370,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps({"error": "invalid signature"}).encode())
                 return
 
-            # v3.0: nodes push "blocks" (chain blocks) instead of flat rewards
+            # v3.1: node pushes amounts as int units. Accept int or float for
+            # backward compat at the API ingest layer; display always divides by UNIT.
             incoming_blocks = data.get("blocks", [])
             txs             = data.get("transactions", [])
 
@@ -377,8 +401,6 @@ class Handler(BaseHTTPRequestHandler):
 
                     if slot is not None and rtype != "fee_reward":
                         if slot not in existing_slots:
-                            # First writer wins — first valid block per slot is accepted.
-                            # Consistent with node behavior.
                             _ledger["blocks"].append(b)
                             existing_slots[slot] = b
                     else:
@@ -395,8 +417,10 @@ class Handler(BaseHTTPRequestHandler):
                 _ledger["blocks"]       = _ledger["blocks"][-10000:]
                 _ledger["transactions"] = _ledger["transactions"][-5000:]
 
-                if data.get("total_minted", 0.0) > _ledger["total_minted"]:
-                    _ledger["total_minted"] = data["total_minted"]
+                # total_minted now in units; store as-is, convert at display boundary
+                incoming_minted = data.get("total_minted", 0)
+                if incoming_minted > _ledger["total_minted"]:
+                    _ledger["total_minted"] = incoming_minted
 
                 # Update chain height and tip from incoming data
                 block_rewards = [b for b in _ledger["blocks"] if b.get("type") == "block_reward"]
@@ -406,12 +430,12 @@ class Handler(BaseHTTPRequestHandler):
                     _ledger["chain_tip_slot"] = tip_block.get("slot", -1)
                     _ledger["chain_tip_hash"] = tip_block.get("prev_hash", "0" * 64)
 
-                blocks_snap      = list(_ledger["blocks"])
-                txs_snap         = list(_ledger["transactions"])
-                minted_snap      = _ledger["total_minted"]
-                height_snap      = _ledger["chain_height"]
-                tip_slot_snap    = _ledger["chain_tip_slot"]
-                tip_hash_snap    = _ledger["chain_tip_hash"]
+                blocks_snap   = list(_ledger["blocks"])
+                txs_snap      = list(_ledger["transactions"])
+                minted_snap   = _ledger["total_minted"]
+                height_snap   = _ledger["chain_height"]
+                tip_slot_snap = _ledger["chain_tip_slot"]
+                tip_hash_snap = _ledger["chain_tip_hash"]
 
             new_cache = _rebuild_stats_cache(
                 blocks_snap, txs_snap, minted_snap,
@@ -432,8 +456,8 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     threading.Thread(target=_clean_post_rate, daemon=True).start()
-    print("TIMPAL API v3.0 running on port 7781")
+    print("TIMPAL API v3.1 running on port 7781")
     print("Push authentication: Dilithium3 signature (no shared secret)")
-    print("v3.0: chain blocks, height, tip tracking, /api/block endpoint")
+    print("v3.1: UNIT=10^8 integer migration; amounts divided by UNIT at display boundary")
     server = ThreadingHTTPServer(("0.0.0.0", 7781), Handler)
     server.serve_forever()

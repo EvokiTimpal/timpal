@@ -445,9 +445,15 @@ class Ledger:
         4. Switch if the alternative is strictly longer from the fork point.
            On equal length: lower tip hash wins (deterministic tie-break).
 
-        This is what gives the protocol global convergence under partitions:
-        whichever chain grows one block longer wins, and all nodes switch to it
-        deterministically.
+        FIX #2: Reorgs that would anchor before the checkpoint boundary are
+        rejected outright. We cannot re-derive checkpoint balances from a
+        different chain without the pruned history.
+
+        FIX #3: MAX_SLOT_GAP is NOT applied during reorg validation. It applies
+        only to live block acceptance in add_block(). During a reorg we are
+        validating a historical chain from a fork point — a long partition could
+        produce legitimate gaps that would otherwise cause us to reject a valid
+        longer chain and fail to converge.
         """
         if not valid_blocks:
             return False
@@ -484,6 +490,13 @@ class Ledger:
         if fork_start_in_input is None:
             return False  # No connection to our chain found
 
+        # FIX #2: Never reorg before the checkpoint boundary.
+        # A reorg anchoring at checkpoint_tip_hash would require re-deriving
+        # checkpoint balances from a different chain — which we cannot do
+        # without the pruned history. Reject it outright.
+        if fork_anchor_chain_idx == -1 and self.checkpoints:
+            return False
+
         fork_blocks = valid_blocks[fork_start_in_input:]
 
         # How many blocks does our current chain have from the fork point onward?
@@ -499,7 +512,11 @@ class Ledger:
             anchor_hash  = compute_block_hash(anchor_block)
             anchor_slot  = anchor_block.get("slot", -1)
 
-        # Validate fork blocks sequentially from anchor
+        # Validate fork blocks sequentially from anchor.
+        # FIX #3: MAX_SLOT_GAP is intentionally NOT checked here.
+        # It is enforced in add_block() for live blocks only. During reorg
+        # validation we must accept historically valid chains that may have
+        # large slot gaps due to network partitions.
         validated  = []
         prev_hash  = anchor_hash
         prev_slot  = anchor_slot
@@ -523,8 +540,7 @@ class Ledger:
                 break
             if slot <= prev_slot:
                 break
-            if prev_slot >= 0 and slot - prev_slot > MAX_SLOT_GAP:
-                break
+            # NOTE: MAX_SLOT_GAP check deliberately omitted here (FIX #3)
             validated.append(block)
             prev_hash = compute_block_hash(block)
             prev_slot = slot

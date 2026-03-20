@@ -109,11 +109,14 @@ def find_free_port(start=7779):
 
 class Ledger:
     def __init__(self):
-        self.transactions = []
-        self.rewards      = []
-        self.total_minted = 0.0
-        self.checkpoints  = []
-        self._lock        = threading.RLock()
+        self.transactions     = []
+        self.rewards          = []
+        self.total_minted     = 0.0
+        self.checkpoints      = []
+        self._lock            = threading.RLock()
+        # O(1) duplicate detection for pruned tx_ids.
+        # Maintained in sync with checkpoints[-1]["spent_tx_ids"].
+        self._spent_tx_ids_set: set = set()
         self._load()
 
     def _load(self):
@@ -132,6 +135,8 @@ class Ledger:
                     clean.append(r)
                 self.rewards = clean
                 self.recalculate_totals()
+                if self.checkpoints:
+                    self._spent_tx_ids_set = set(self.checkpoints[-1].get("spent_tx_ids", []))
             except Exception:
                 pass
 
@@ -164,9 +169,9 @@ class Ledger:
             return round(balance, 8)
 
     def has_transaction(self, tx_id: str) -> bool:
-        if self.checkpoints:
-            if tx_id in self.checkpoints[-1].get("spent_tx_ids", []):
-                return True
+        # O(1) check against the set of all pruned tx_ids across checkpoints
+        if tx_id in self._spent_tx_ids_set:
+            return True
         return any(tx["tx_id"] == tx_id for tx in self.transactions)
 
     def can_spend(self, device_id: str, amount: float) -> bool:
@@ -214,35 +219,33 @@ class Ledger:
             reward_id = reward_dict.get("reward_id", "")
             if not reward_id:
                 return False
-            pub  = reward_dict.get("vrf_public_key")
-            seed = reward_dict.get("vrf_seed")
-            sig  = reward_dict.get("vrf_sig")
-            tick = reward_dict.get("vrf_ticket")
-            if pub and seed and sig and tick:
+            rtype = reward_dict.get("type", "block_reward")
+            # block_reward MUST carry all four VRF fields.
+            # Accepting a block_reward without them would let any peer mint TMPL
+            # to any address without a valid proof — a full inflation attack.
+            if rtype == "block_reward":
+                pub  = reward_dict.get("vrf_public_key", "")
+                seed = reward_dict.get("vrf_seed", "")
+                sig  = reward_dict.get("vrf_sig", "")
+                tick = reward_dict.get("vrf_ticket", "")
+                if not (pub and seed and sig and tick):
+                    return False
                 if not Node._verify_ticket(pub, seed, sig, tick):
                     return False
-            slot       = reward_dict.get("time_slot")
-            new_ticket = reward_dict.get("vrf_ticket", "z")
+            slot = reward_dict.get("time_slot")
             if reward_dict.get("type", "block_reward") == "block_reward":
                 if not _is_valid_epoch_slot(slot):
                     return False
             if slot is not None:
-                existing = next(
-                    (r for r in self.rewards
-                     if r.get("time_slot") == slot and r.get("type") != "fee_reward"),
-                    None
-                )
-                if existing:
-                    if (existing.get("reward_id") == reward_id and
-                            existing.get("winner_id") == reward_dict.get("winner_id")):
-                        return False
-                    if new_ticket < existing.get("vrf_ticket", "z"):
-                        self.rewards = [r for r in self.rewards
-                                        if r.get("time_slot") != slot
-                                        or r.get("type") == "fee_reward"]
-                        self.total_minted -= existing["amount"]
-                    else:
-                        return False
+                # First writer wins — once a slot has a winner it is final.
+                # All honest nodes independently compute the same winner via the
+                # collective target, so the first valid REWARD for any slot is
+                # authoritative. Replacing with a "lower ticket" is meaningless
+                # under the new lottery and would allow a malicious node to
+                # displace the legitimate winner by ticket manipulation.
+                if any(r.get("time_slot") == slot and r.get("type") != "fee_reward"
+                       for r in self.rewards):
+                    return False
             else:
                 if any(r.get("reward_id") == reward_id for r in self.rewards):
                     return False
@@ -290,12 +293,23 @@ class Ledger:
         for r in other.get("rewards", []):
             if not r.get("reward_id", ""):
                 continue
-            pub  = r.get("vrf_public_key")
-            seed = r.get("vrf_seed")
-            sig  = r.get("vrf_sig")
-            tick = r.get("vrf_ticket")
-            if pub and seed and sig and tick:
+            rtype = r.get("type", "block_reward")
+            # block_reward MUST carry all four VRF fields.
+            # If any are absent, a peer can mint TMPL to any address without proof.
+            if rtype == "block_reward":
+                pub  = r.get("vrf_public_key", "")
+                seed = r.get("vrf_seed", "")
+                sig  = r.get("vrf_sig", "")
+                tick = r.get("vrf_ticket", "")
+                if not (pub and seed and sig and tick):
+                    continue
                 if not Node._verify_ticket(pub, seed, sig, tick):
+                    continue
+            # fee_rewards only exist in Era 2.  Accepting them in Era 1 lets a
+            # malicious peer inflate any balance by sending fake fee_reward dicts
+            # (they bypass the supply cap and carry no VRF proof).
+            elif rtype == "fee_reward":
+                if not is_era2():
                     continue
             if r.get("amount", 0) <= 0:
                 continue
@@ -318,21 +332,18 @@ class Ledger:
                 rid   = r.get("reward_id", "")
                 slot  = r.get("time_slot")
                 rtype = r.get("type", "block_reward")
+                # Whitelist known types — reject any unknown reward type
+                if rtype not in ("block_reward", "fee_reward"):
+                    continue
                 if rtype == "block_reward" and not _is_valid_epoch_slot(slot):
                     continue
                 if any(x.get("reward_id") == rid and x.get("winner_id") == r.get("winner_id")
                        for x in self.rewards):
                     continue
                 if slot is not None and rtype != "fee_reward" and slot in existing_slots:
-                    ex = existing_slots[slot]
-                    if r.get("vrf_ticket", "z") < ex.get("vrf_ticket", "z"):
-                        self.rewards = [x for x in self.rewards
-                                        if x.get("time_slot") != slot
-                                        or x.get("type") == "fee_reward"]
-                        running = round(running - ex["amount"], 8)
-                        del existing_slots[slot]
-                    else:
-                        continue
+                    # First writer wins — slot already has a winner, reject all replacements.
+                    # Ticket comparison is meaningless under the collective-target lottery.
+                    continue
                 if rtype == "fee_reward":
                     self.rewards.append(r)
                     changed = True
@@ -392,6 +403,7 @@ class Ledger:
             self.rewards      = r_keep
             self.transactions = t_keep
             self.checkpoints.append(cp)
+            self._spent_tx_ids_set = set(spent_tx_ids)
             self.save()
             return True
 
@@ -414,6 +426,7 @@ class Ledger:
             self.rewards      = [r for r in self.rewards if r.get("time_slot", prune_before) >= prune_before]
             self.transactions = [t for t in self.transactions if (t.get("slot") or 0) >= prune_before]
             self.checkpoints.append(checkpoint)
+            self._spent_tx_ids_set = set(checkpoint.get("spent_tx_ids", []))
             self.total_minted = checkpoint.get("total_minted", 0.0)
             self.save()
             return True
@@ -835,13 +848,14 @@ class Network:
                     known_slots  = [r.get("time_slot") for r in self.ledger.rewards
                                     if r.get("time_slot") and r.get("type") == "block_reward"][-10000:]
                     known_tx_ids = [t.get("tx_id") for t in self.ledger.transactions if t.get("tx_id")][-10000:]
+                    checkpoint_slot = self.ledger.checkpoints[-1]["slot"] if self.ledger.checkpoints else 0
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(30.0)
                 sock.connect((peer["ip"], peer["port"]))
                 sock.sendall(json.dumps({
                     "type": "SYNC_REQUEST", "known_slots": known_slots,
                     "known_tx_ids": known_tx_ids,
-                    "checkpoint_slot": self.ledger.checkpoints[-1]["slot"] if self.ledger.checkpoints else 0
+                    "checkpoint_slot": checkpoint_slot
                 }).encode())
                 sock.shutdown(socket.SHUT_WR)
                 data = b""
@@ -1164,7 +1178,6 @@ class Node:
         self._sending      = False
         self._my_tickets   = {}
         self._commits      = {}
-        self._reveals      = {}
         self._lottery_lock = threading.Lock()
 
     def _acquire_lock(self):
@@ -1469,25 +1482,34 @@ class Node:
         with self._lottery_lock:
             known_commits = dict(self._commits.get(time_slot, {}))
         for device_id, r in all_reveals.items():
+            # Use .get() on all fields — data comes from untrusted bootstrap.
+            # Missing fields raise KeyError which would silently kill winner
+            # selection for the entire slot.
+            ticket     = r.get("ticket", "")
+            public_key = r.get("public_key", "")
+            seed       = r.get("seed", "")
+            sig        = r.get("sig", "")
+            if not (ticket and public_key and seed and sig):
+                continue
             commit = known_commits.get(device_id)
             if not commit:
                 continue
-            expected = hashlib.sha256(f"{r['ticket']}:{device_id}:{time_slot}".encode()).hexdigest()
+            expected = hashlib.sha256(f"{ticket}:{device_id}:{time_slot}".encode()).hexdigest()
             if expected != commit:
                 continue
-            if not Node._verify_ticket(r["public_key"], r["seed"], r["sig"], r["ticket"]):
+            if not Node._verify_ticket(public_key, seed, sig, ticket):
                 continue
             verified[device_id] = r
         if not verified:
             return None
-        if all_reveals:
-            tickets    = sorted(r["ticket"] for r in all_reveals.values())
-            target     = hashlib.sha256(":".join(tickets).encode()).hexdigest()
-            target_int = int(target, 16)
-            winner_id  = min(verified, key=lambda d: (
-                abs(int(verified[d]["ticket"], 16) - target_int), d))
-        else:
-            winner_id = min(verified, key=lambda d: (verified[d]["ticket"], d))
+        # Collective target: sha256 of ALL reveals (not just verified) sorted and joined.
+        # Cannot be predicted before the reveal window closes.
+        # Only include reveals that have a ticket field (malformed reveals are excluded).
+        tickets    = sorted(r["ticket"] for r in all_reveals.values() if r.get("ticket"))
+        target     = hashlib.sha256(":".join(tickets).encode()).hexdigest()
+        target_int = int(target, 16)
+        winner_id  = min(verified, key=lambda d: (
+            abs(int(verified[d]["ticket"], 16) - target_int), d))
         w = verified[winner_id]
         return {"winner_id": winner_id, "ticket": w["ticket"],
                 "sig": w["sig"], "seed": w["seed"], "public_key": w["public_key"]}
@@ -1552,9 +1574,8 @@ class Node:
 
     def _cleanup_slot(self, time_slot: int):
         with self._lottery_lock:
-            for d in (self._commits, self._reveals):
-                for s in [s for s in d if s < time_slot - 10]:
-                    del d[s]
+            for s in [s for s in self._commits if s < time_slot - 10]:
+                del self._commits[s]
         for s in [s for s in self._my_tickets if s < time_slot - 10]:
             del self._my_tickets[s]
         cutoff = time_slot - 100
@@ -1797,7 +1818,8 @@ class Node:
                             seen_rids.add(rid)
                             rewards.append({k: v for k, v in r.items()
                                             if k not in ("vrf_sig", "vrf_public_key")})
-                    txs = list(self.ledger.transactions[-20:])
+                    txs          = list(self.ledger.transactions[-20:])
+                    total_minted = self.ledger.total_minted  # captured inside lock
 
                 payload_data = {
                     "type":         "LEDGER_PUSH",
@@ -1805,7 +1827,7 @@ class Node:
                     "public_key":   self.wallet.get_public_key_hex(),
                     "rewards":      rewards,
                     "transactions": txs,
-                    "total_minted": self.ledger.total_minted,
+                    "total_minted": total_minted,
                     "timestamp":    int(time.time())
                 }
                 payload_bytes = json.dumps(payload_data, sort_keys=True, separators=(',', ':')).encode()
@@ -1944,10 +1966,11 @@ class Node:
                 finally:
                     self._sending = False
             elif raw == "history":
-                my_id      = self.wallet.device_id
-                my_tx      = [t for t in self.ledger.transactions
-                              if t["sender_id"] == my_id or t["recipient_id"] == my_id]
-                my_rewards = [r for r in self.ledger.rewards if r["winner_id"] == my_id]
+                my_id = self.wallet.device_id
+                with self.ledger._lock:
+                    my_tx      = [t for t in self.ledger.transactions
+                                  if t["sender_id"] == my_id or t["recipient_id"] == my_id]
+                    my_rewards = [r for r in self.ledger.rewards if r["winner_id"] == my_id]
                 if not my_tx and not my_rewards:
                     print("\n  No transactions yet.\n")
                 else:

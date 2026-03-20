@@ -211,9 +211,10 @@ def clean_old_data():
                 old = [s for s in list(d) if s < current_slot - 20]
                 for s in old:
                     del d[s]
-            # Expired bans and associated miss counts
+            # Expired bans and associated miss counts.
+            # Prune as soon as the ban slot has passed — no extra delay.
             expired = [did for did, slot in list(ban_until.items())
-                       if slot < current_slot - 20]
+                       if slot < current_slot]
             for did in expired:
                 del ban_until[did]
                 missed_reveals.pop(did, None)
@@ -483,7 +484,15 @@ def handle_client(conn, addr):
                     peers[device_id]["last_seen"] = time.time()
 
             with lottery_lock:
-                # Only accept reveal if a commit exists for this device_id and slot
+                # Only accept reveal if a commit exists for this device_id and slot.
+                # Reveal without a prior commit is silently ignored.
+                #
+                # Note: bootstrap does NOT verify the Dilithium3 VRF signature here.
+                # Bootstrap is a relay, not a consensus participant. All nodes
+                # independently verify every reveal in _pick_winner() before accepting
+                # any winner. Verifying signatures here would require importing
+                # dilithium-py on every bootstrap server — an operational burden that
+                # adds no security because nodes verify anyway.
                 if slot in commits and device_id in commits[slot]:
                     if slot not in reveals:
                         reveals[slot] = {}
@@ -496,7 +505,6 @@ def handle_client(conn, addr):
                         }
                         print(f"  [slot {slot}] Reveal:  {device_id[:20]}... "
                               f"({len(reveals[slot])} revealed)")
-                # Reveal without a prior commit is silently ignored
 
             conn.sendall(json.dumps({"type": "REVEAL_ACK", "slot": slot}).encode())
 

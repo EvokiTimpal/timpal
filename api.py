@@ -290,11 +290,11 @@ class Handler(BaseHTTPRequestHandler):
             rewards = data.get("rewards", [])
             txs     = data.get("transactions", [])
 
-            # Basic structural validation
+            # Structural validation — winner_id must be a valid 64-char hex device_id
             rewards = [r for r in rewards
                        if isinstance(r, dict)
                        and isinstance(r.get("amount"), (int, float))
-                       and isinstance(r.get("winner_id"), str)]
+                       and _is_valid_hex64(r.get("winner_id", ""))]
             txs     = [t for t in txs
                        if isinstance(t, dict)
                        and isinstance(t.get("amount"), (int, float))
@@ -309,22 +309,20 @@ class Handler(BaseHTTPRequestHandler):
                     slot  = r.get("time_slot")
                     rtype = r.get("type", "block_reward")
 
-                    # Validate vrf_ticket is a proper 64-char hex string
-                    # Empty string < any valid ticket — must be rejected to prevent spoofing
+                    # Validate vrf_ticket is a proper 64-char hex string.
+                    # Empty string < any valid ticket — must be rejected to prevent spoofing.
                     if rtype == "block_reward":
                         if not _is_valid_hex64(r.get("vrf_ticket", "")):
                             continue
 
                     if slot and rtype != "fee_reward":
-                        existing = existing_slots.get(slot)
-                        if not existing:
-                            _ledger["rewards"].append(r)
-                            existing_slots[slot] = r
-                        elif r.get("vrf_ticket", "z") < existing.get("vrf_ticket", "z"):
-                            _ledger["rewards"] = [
-                                x for x in _ledger["rewards"]
-                                if x.get("time_slot") != slot or x.get("type") == "fee_reward"
-                            ]
+                        if slot not in existing_slots:
+                            # First writer wins — accept the first valid claim per slot.
+                            # All honest nodes agree on the winner via the collective target,
+                            # so the first pushed reward for a slot is the correct one.
+                            # Replacing by ticket comparison is meaningless under the new
+                            # lottery and would allow stale/malicious data to displace the
+                            # legitimate winner.
                             _ledger["rewards"].append(r)
                             existing_slots[slot] = r
                     else:

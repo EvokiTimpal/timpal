@@ -255,7 +255,7 @@ class Ledger:
                 "reward_id": reward_id,
                 "winner_id": node_id,
                 "amount":    round(amount, 8),
-                "timestamp": time.time(),
+                "timestamp": int(time.time()),
                 "time_slot": slot,
                 "type":      "fee_reward"
             })
@@ -278,8 +278,6 @@ class Ledger:
         """
         with self._lock:
             # 1. VRF proof — identical checks as v2.2 add_reward for block_rewards.
-            #    Accepting a block without VRF fields allows any peer to mint TMPL
-            #    to any address without proof — full inflation attack.
             pub  = block.get("vrf_public_key", "")
             seed = block.get("vrf_seed", "")
             sig  = block.get("vrf_sig", "")
@@ -294,7 +292,7 @@ class Ledger:
             if not _is_valid_epoch_slot(slot):
                 return False
 
-            # 3. winner_id validation (carried forward from v2.2 fix #8)
+            # 3. winner_id validation
             winner_id = block.get("winner_id", "")
             if not (len(winner_id) == 64 and all(c in "0123456789abcdef" for c in winner_id)):
                 return False
@@ -306,12 +304,11 @@ class Ledger:
             # 4 + 5 + 6. Chain linkage — the new v3.0 invariant
             tip_hash, tip_slot = self._get_tip()
             if block.get("prev_hash") != tip_hash:
-                return False          # wrong chain link — reject
+                return False
             if slot <= tip_slot:
-                return False          # slot must advance forward
-            # Gap only enforced once chain started; first block can be at any current slot
+                return False
             if tip_slot >= 0 and slot - tip_slot > MAX_SLOT_GAP:
-                return False          # gap too large — reject
+                return False
 
             # 7. Supply cap
             if round(self.total_minted + block.get("amount", 0), 8) > TOTAL_SUPPLY:
@@ -355,13 +352,8 @@ class Ledger:
         - Validate VRF proofs on all incoming blocks
         - Sort by slot, then try to extend our current chain tip one block at a time
         - A block is accepted only if its prev_hash matches our current tip exactly
-        - If the peer is ahead and their blocks don't connect to our tip, we can't
-          merge them here — the sync protocol handles requesting missing gap blocks
+        - If normal extension fails (fork detected), attempt reorg via _attempt_reorg()
         - Transactions: unchanged from v2.2
-
-        Fork resolution is handled at the sync protocol level (_sync_ledger):
-        if a peer has a longer chain, we request all blocks from our tip onwards
-        and the extension loop here accepts them in slot order.
         """
         # --- Validate VRF proofs on all incoming blocks ---
         valid_blocks = []
@@ -417,7 +409,7 @@ class Ledger:
 
                 # Block must extend our current tip exactly
                 if block.get("prev_hash") != tip_hash:
-                    continue   # gap or fork — sync protocol will handle it
+                    continue   # gap or fork — reorg check below handles it
                 slot = block.get("slot", -1)
                 if slot <= tip_slot:
                     continue
@@ -430,9 +422,206 @@ class Ledger:
                 self.total_minted = round(self.total_minted + block.get("amount", 0), 8)
                 changed = True
 
+            # Reorg check: if any valid blocks didn't connect to our tip,
+            # they may represent a longer competing chain.
+            if self._attempt_reorg(valid_blocks):
+                changed = True
+
             if changed:
                 self.save()
             return changed
+
+    def _attempt_reorg(self, valid_blocks: list) -> bool:
+        """Try to replace current chain tail with a longer (or tie-broken) alternative.
+
+        Called from merge() while self._lock is already held.
+
+        Algorithm:
+        1. Build a hash→index map of our current chain blocks.
+        2. Find the first incoming block whose prev_hash connects to our chain
+           (or to the checkpoint tip if our chain is empty post-pruning).
+        3. Walk forward from that point, validating each block's chain linkage
+           and VRF proof sequentially.
+        4. Switch if the alternative is strictly longer from the fork point.
+           On equal length: lower tip hash wins (deterministic tie-break).
+
+        This is what gives the protocol global convergence under partitions:
+        whichever chain grows one block longer wins, and all nodes switch to it
+        deterministically.
+        """
+        if not valid_blocks:
+            return False
+
+        # Build hash index of our current chain for O(1) fork-point lookup
+        our_hash_to_idx = {}
+        for i, block in enumerate(self.chain):
+            our_hash_to_idx[compute_block_hash(block)] = i
+
+        # The anchor point for a fork from before the chain start (checkpoint level)
+        if self.checkpoints:
+            cp = self.checkpoints[-1]
+            checkpoint_tip_hash = cp.get("chain_tip_hash", GENESIS_PREV_HASH)
+            checkpoint_tip_slot = cp.get("chain_tip_slot", -1)
+        else:
+            checkpoint_tip_hash = GENESIS_PREV_HASH
+            checkpoint_tip_slot = -1
+
+        # Find the first valid_block that connects to our chain or checkpoint tip
+        fork_anchor_chain_idx = None  # index in self.chain; -1 = connects at checkpoint level
+        fork_start_in_input   = None  # index in valid_blocks where the fork chain begins
+
+        for i, block in enumerate(valid_blocks):
+            prev = block.get("prev_hash", "")
+            if prev == checkpoint_tip_hash:
+                fork_anchor_chain_idx = -1
+                fork_start_in_input   = i
+                break
+            if prev in our_hash_to_idx:
+                fork_anchor_chain_idx = our_hash_to_idx[prev]
+                fork_start_in_input   = i
+                break
+
+        if fork_start_in_input is None:
+            return False  # No connection to our chain found
+
+        fork_blocks = valid_blocks[fork_start_in_input:]
+
+        # How many blocks does our current chain have from the fork point onward?
+        # fork_anchor_chain_idx == -1 means the fork diverges before self.chain[0]
+        our_tail_length = len(self.chain) - (fork_anchor_chain_idx + 1)
+
+        # Anchor hash/slot for sequential validation of the fork chain
+        if fork_anchor_chain_idx == -1:
+            anchor_hash = checkpoint_tip_hash
+            anchor_slot = checkpoint_tip_slot
+        else:
+            anchor_block = self.chain[fork_anchor_chain_idx]
+            anchor_hash  = compute_block_hash(anchor_block)
+            anchor_slot  = anchor_block.get("slot", -1)
+
+        # Validate fork blocks sequentially from anchor
+        validated  = []
+        prev_hash  = anchor_hash
+        prev_slot  = anchor_slot
+
+        for block in fork_blocks:
+            pub  = block.get("vrf_public_key", "")
+            seed = block.get("vrf_seed", "")
+            sig  = block.get("vrf_sig", "")
+            tick = block.get("vrf_ticket", "")
+            if not (pub and seed and sig and tick):
+                break
+            if not Node._verify_ticket(pub, seed, sig, tick):
+                break
+            slot = block.get("slot")
+            if not _is_valid_epoch_slot(slot):
+                break
+            wid = block.get("winner_id", "")
+            if not (len(wid) == 64 and all(c in "0123456789abcdef" for c in wid)):
+                break
+            if block.get("prev_hash") != prev_hash:
+                break
+            if slot <= prev_slot:
+                break
+            if prev_slot >= 0 and slot - prev_slot > MAX_SLOT_GAP:
+                break
+            validated.append(block)
+            prev_hash = compute_block_hash(block)
+            prev_slot = slot
+
+        if not validated:
+            return False
+
+        alt_length = len(validated)
+
+        # Decision: switch to alternative chain?
+        if alt_length < our_tail_length:
+            return False  # Shorter — keep ours
+
+        if alt_length == our_tail_length:
+            # Equal length — deterministic tie-break: lower tip hash wins.
+            # This guarantees all nodes converge to the same chain even if they
+            # saw the two competing chains in different orders.
+            our_tip = compute_block_hash(self.chain[-1]) if self.chain else GENESIS_PREV_HASH
+            alt_tip = compute_block_hash(validated[-1])
+            if alt_tip >= our_tip:
+                return False  # Our tip hash wins or is equal — keep ours
+
+        # Supply cap check on the reconstructed chain
+        keep_count = fork_anchor_chain_idx + 1  # 0 when fork_anchor_chain_idx == -1
+        if self.checkpoints:
+            cp          = self.checkpoints[-1]
+            pruned_base = cp["total_minted"] - cp.get("kept_minted", 0.0)
+        else:
+            pruned_base = 0.0
+        kept_chain_minted = sum(b.get("amount", 0) for b in self.chain[:keep_count])
+        alt_minted = round(pruned_base + kept_chain_minted +
+                           sum(b.get("amount", 0) for b in validated), 8)
+        if alt_minted > TOTAL_SUPPLY:
+            return False
+
+        # ── Perform the reorg ──────────────────────────────────────────────────
+        # Replace the tail of our chain with the validated alternative.
+        # recalculate_totals() rebuilds total_minted from checkpoint + chain.
+        self.chain = self.chain[:keep_count] + validated
+        self.recalculate_totals()
+
+        # After the chain changes, some transactions may have been funded by
+        # block rewards that are now gone. Prune them to prevent phantom balances.
+        self._prune_invalid_transactions()
+
+        tip_slot = validated[-1].get("slot", "?")
+        print(f"\n  [reorg] Switched to longer chain at slot {tip_slot} "
+              f"(depth {alt_length} vs {our_tail_length})\n  > ", end="", flush=True)
+        return True
+
+    def _prune_invalid_transactions(self):
+        """Remove transactions whose sender can no longer afford them.
+
+        Called after every reorg while self._lock is already held.
+
+        A reorg can remove block rewards from chain A that funded transactions.
+        Example: Alice earned 10 TMPL in chain A, sent 5 TMPL to Bob (valid tx),
+        then chain B reorgs and Alice's rewards are gone. Without this prune,
+        Alice's balance would go negative and Bob would hold phantom TMPL.
+
+        Algorithm: walk transactions in chronological order, tracking running
+        balance deltas. Keep a tx only if the sender can still afford it at
+        that point in the sequence. O(n) pass.
+        """
+        def _chain_balance(device_id: str) -> float:
+            """Balance from checkpoint + current chain only (no transactions)."""
+            bal = 0.0
+            if self.checkpoints:
+                bal = self.checkpoints[-1].get("balances", {}).get(device_id, 0.0)
+            for b in self.chain:
+                if b.get("winner_id") == device_id:
+                    bal += b.get("amount", 0.0)
+            for fr in self.fee_rewards:
+                if fr.get("winner_id") == device_id:
+                    bal += fr.get("amount", 0.0)
+            return round(bal, 8)
+
+        valid_txs = []
+        running   = {}  # running balance delta from valid txs kept so far
+
+        for tx in self.transactions:
+            sid  = tx.get("sender_id", "")
+            rid  = tx.get("recipient_id", "")
+            cost = round(tx.get("amount", 0) + tx.get("fee", 0), 8)
+
+            sender_balance = round(_chain_balance(sid) + running.get(sid, 0.0), 8)
+            if sender_balance >= cost:
+                valid_txs.append(tx)
+                running[sid] = round(running.get(sid, 0.0) - cost, 8)
+                running[rid] = round(running.get(rid, 0.0) + tx.get("amount", 0), 8)
+            # else: tx is no longer fundable — drop it silently
+
+        pruned = len(self.transactions) - len(valid_txs)
+        if pruned > 0:
+            self.transactions = valid_txs
+            print(f"\n  [reorg] Pruned {pruned} transaction(s) no longer fundable "
+                  f"after chain switch\n  > ", end="", flush=True)
 
     @staticmethod
     def _compute_hash(entries: list) -> str:
@@ -476,10 +665,6 @@ class Ledger:
             spent_tx_ids = list(set(prev_spent + [t["tx_id"] for t in t_prune]))
             kept_minted  = round(sum(b.get("amount", 0) for b in c_keep), 8)
 
-            # Store the hash and slot of the last pruned block.
-            # After pruning, new blocks must link from this point.
-            # Without chain_tip_hash in the checkpoint, post-checkpoint blocks
-            # would have no prev_hash to validate against — chain linkage breaks.
             if c_prune:
                 chain_tip_hash = compute_block_hash(c_prune[-1])
                 chain_tip_slot = c_prune[-1].get("slot", -1)
@@ -499,9 +684,9 @@ class Ledger:
                 "chain_hash":     Ledger._compute_hash(sorted(c_prune, key=lambda b: b.get("slot", 0))),
                 "txs_hash":       Ledger._compute_hash(sorted(t_prune, key=lambda t: t.get("timestamp", 0))),
                 "spent_tx_ids":   spent_tx_ids,
-                "chain_tip_hash": chain_tip_hash,  # ← v3.0: link for post-checkpoint blocks
-                "chain_tip_slot": chain_tip_slot,  # ← v3.0
-                "timestamp":      time.time()
+                "chain_tip_hash": chain_tip_hash,
+                "chain_tip_slot": chain_tip_slot,
+                "timestamp":      int(time.time())
             }
 
             self.chain        = c_keep
@@ -730,7 +915,7 @@ class Network:
         self.wallet            = wallet
         self.ledger            = ledger
         self.on_transaction    = on_transaction
-        self.on_block          = on_block          # v3.0: was on_reward
+        self.on_block          = on_block
         self.peers             = {}
         self._peers_lock       = threading.Lock()
         self.seen_ids          = set()
@@ -855,7 +1040,6 @@ class Network:
                         ns = data.get("network_size", 0)
                         if ns > 0:
                             self._network_size = ns
-                        # v3.0: if bootstrap knows a chain tip ahead of ours, sync
                         bs_tip_slot = data.get("chain_tip_slot", -1)
                         with self.ledger._lock:
                             _, our_tip_slot = self.ledger._get_tip()
@@ -960,11 +1144,6 @@ class Network:
         return confirmed.is_set()
 
     def _sync_ledger(self):
-        """v3.0 chain sync.
-        Sends our chain_height + chain_tip_hash + chain_tip_slot.
-        Receives blocks we're missing. Sends blocks the peer is missing.
-        This handles the gap-sync case: node was offline, reconnects,
-        requests only the blocks it missed — no full re-download."""
         time.sleep(1)
         peers = self.get_online_peers()
         if not peers:
@@ -1001,7 +1180,6 @@ class Network:
                 msg = json.loads(data.decode())
 
                 if msg.get("type") == "SYNC_RESPONSE":
-                    # Apply checkpoint if peer has a newer one
                     if msg.get("checkpoint"):
                         cp = msg["checkpoint"]
                         prune_before = cp.get("prune_before", 0)
@@ -1014,7 +1192,6 @@ class Network:
                         elif self._confirm_checkpoint_with_peers(cp, exclude_ip=peer["ip"]):
                             self.ledger.apply_checkpoint(cp)
 
-                    # Merge incoming blocks and transactions
                     delta = {
                         "blocks":       msg.get("blocks", []),
                         "transactions": msg.get("txs", [])
@@ -1040,7 +1217,6 @@ class Network:
                                         print(f"  ║  Balance : {bal:.8f} TMPL")
                                         print(f"  ╚══════════════════════════════════════╝\n  > ", end="", flush=True)
 
-                    # Push blocks the peer is missing (gap-sync)
                     we_need_from_slot = msg.get("we_need_from_slot")
                     we_need_tx_ids    = set(msg.get("we_need_tx_ids", []))
                     if we_need_from_slot is not None or we_need_tx_ids:
@@ -1197,8 +1373,6 @@ class Network:
                                     self.ledger.add_fee_reward(ts, fr["winner_id"], fr["amount"])
 
             elif msg_type == "BLOCK":
-                # v3.0: was REWARD in v2.2
-                # Rate limit: max REWARD_RATE_LIMIT BLOCK msgs per peer IP per slot
                 current_slot = get_current_slot()
                 with self._block_rate_lock:
                     s, cnt = self._block_rate.get(sender_ip, (current_slot, 0))
@@ -1251,7 +1425,6 @@ class Network:
                             self.broadcast({"type": "CHECKPOINT", "checkpoint": cp})
 
             elif msg_type == "SYNC_REQUEST":
-                # Rate limit: max 1 per IP per SYNC_RATE_WINDOW seconds
                 now = time.time()
                 with self._sync_rate_lock:
                     if now - self._sync_rate.get(sender_ip, 0) < SYNC_RATE_WINDOW:
@@ -1274,16 +1447,12 @@ class Network:
                         if latest["slot"] > their_cp:
                             our_cp = latest
 
-                    # Blocks the peer needs: any block with slot > their_tip_slot.
-                    # If tip_hashes match, we're in sync — skip block transfer.
                     if their_tip_hash == tip_hash:
                         missing_blocks = []
                     else:
                         missing_blocks = [b for b in self.ledger.chain
                                           if b.get("slot", -1) > their_tip_slot][:5000]
 
-                    # Slot from which we need blocks from the peer
-                    # (None means we don't need anything from them)
                     we_need_from_slot = their_tip_slot if their_tip_slot > tip_slot else None
 
                 conn.sendall(json.dumps({
@@ -1447,7 +1616,6 @@ class Node:
             print(f"  ╚══════════════════════════════════════╝\n  > ", end="", flush=True)
 
     def _on_block_received(self, block: dict):
-        """v3.0: handles incoming BLOCK messages from peers (was _on_reward_received)."""
         if not self.ledger.add_block(block):
             return
         if block.get("winner_id") == self.wallet.device_id and not self._sending:
@@ -1484,7 +1652,6 @@ class Node:
         return hashlib.sha256(f"{ticket}:{self.wallet.device_id}:{time_slot}".encode()).hexdigest()
 
     def _is_eligible_this_slot(self, time_slot: int, network_size: int) -> bool:
-        """Identical formula to bootstrap.py — must stay in sync."""
         if network_size <= TARGET_PARTICIPANTS:
             return True
         threshold = TARGET_PARTICIPANTS / network_size
@@ -1492,7 +1659,6 @@ class Node:
         return h < int(threshold * (2 ** 256))
 
     def _bootstrap_submit(self, msg: dict):
-        """Fire-and-forget — used for reveals and tip submissions."""
         def _send(host, port):
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1634,8 +1800,6 @@ class Node:
         return results, bs_target[0]
 
     def _pick_winner(self, time_slot: int, all_reveals: dict):
-        """Winner = node with valid ticket closest to collective target.
-        Unchanged from v2.2 — the lottery mechanics are v3.0's core innovation."""
         verified = {}
         with self._lottery_lock:
             known_commits = dict(self._commits.get(time_slot, {}))
@@ -1680,33 +1844,29 @@ class Node:
             if self.ledger.add_fee_reward(time_slot, node_id, per_node):
                 fee_rewards.append({"reward_id": f"fee:{time_slot}:{node_id}",
                                     "winner_id": node_id, "amount": per_node,
-                                    "timestamp": time.time(), "time_slot": time_slot,
+                                    "timestamp": int(time.time()), "time_slot": time_slot,
                                     "type": "fee_reward"})
         if fee_rewards:
             self.network.broadcast({"type": "FEE_REWARDS", "time_slot": time_slot,
                                     "fee_rewards": fee_rewards})
 
     def _claim_reward(self, winner: dict, time_slot: int, active_nodes=None):
-        """v3.0: builds a chain block instead of a flat reward dict.
+        """v3.0: builds a chain block with int timestamp (not float).
 
-        Key difference from v2.2:
-        - Reads current chain tip (prev_hash) under lock before building the block
-        - Block carries prev_hash linking it to the previous block
-        - add_block() validates the chain link atomically
-        - On rare race (another block arrived between tip-read and add_block),
-          add_block() returns False and we skip — correct first-writer-wins behavior
+        int(time.time()) is used instead of time.time() to eliminate float
+        precision divergence across nodes when the block is serialized for
+        hashing. Since GENESIS_TIME is set before block 1 exists, this is
+        safe to enforce from the start.
         """
         if not Node._verify_ticket(winner["public_key"], winner["seed"],
                                    winner["sig"], winner["ticket"]):
             return
 
-        # Read current chain tip to embed as prev_hash
         with self.ledger._lock:
             if any(b.get("slot") == time_slot for b in self.ledger.chain):
-                return  # slot already filled
+                return
             tip_hash, tip_slot = self.ledger._get_tip()
 
-        # Basic slot sanity (add_block will recheck atomically)
         if time_slot <= tip_slot:
             return
         if time_slot - tip_slot > MAX_SLOT_GAP:
@@ -1716,10 +1876,10 @@ class Node:
         block = {
             "reward_id":      reward_id,
             "slot":           time_slot,
-            "prev_hash":      tip_hash,        # ← v3.0 chain link
+            "prev_hash":      tip_hash,
             "winner_id":      winner["winner_id"],
             "amount":         REWARD_PER_ROUND,
-            "timestamp":      time.time(),
+            "timestamp":      int(time.time()),   # ← int, not float
             "vrf_ticket":     winner["ticket"],
             "vrf_seed":       winner["seed"],
             "vrf_sig":        winner["sig"],
@@ -1729,14 +1889,12 @@ class Node:
         }
 
         if not self.ledger.add_block(block):
-            return  # chain link invalid (race) or other rejection — skip slot
+            return
 
-        # Mark as seen so we don't re-process our own broadcast
         gid = reward_id + ":" + winner["winner_id"]
         with self.network._seen_lock:
             self.network.seen_ids.add(gid)
 
-        # Notify bootstrap of new chain tip (so joining nodes know where to sync from)
         self._bootstrap_submit({
             "type":      "SUBMIT_TIP",
             "device_id": self.wallet.device_id,
@@ -1785,7 +1943,6 @@ class Node:
                 self.network._seen_tx_order = self.network._seen_tx_order[-10000:]
 
     def _reward_lottery(self):
-        """Eligibility-gated commit-reveal VRF lottery. Unchanged from v2.2."""
         time.sleep(45)
         while self.network._running:
             now            = time.time()
@@ -1969,8 +2126,6 @@ class Node:
         return {"ok": False, "error": "Unknown action"}
 
     def _push_to_explorer(self):
-        """Push signed ledger updates to explorer API.
-        v3.0: pushes chain blocks instead of flat rewards list."""
         time.sleep(60)
         ssl_ctx = ssl.create_default_context()
         while self.network._running:
@@ -1995,7 +2150,7 @@ class Node:
                     "type":         "LEDGER_PUSH",
                     "device_id":    self.wallet.device_id,
                     "public_key":   self.wallet.get_public_key_hex(),
-                    "blocks":       blocks_push,     # v3.0: was "rewards"
+                    "blocks":       blocks_push,
                     "transactions": txs,
                     "total_minted": total_minted,
                     "timestamp":    int(time.time())
@@ -2086,7 +2241,6 @@ class Node:
                 bal = self.ledger.get_balance(self.wallet.device_id)
                 print(f"\n  Balance: {bal:.8f} TMPL\n  Device : {self.wallet.device_id}\n")
             elif raw == "chain":
-                # v3.0 new command — shows chain state
                 with self.ledger._lock:
                     tip_hash, tip_slot = self.ledger._get_tip()
                     height = len(self.ledger.chain)

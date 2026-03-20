@@ -2,15 +2,15 @@
 
 A Quantum-Resistant Peer-to-Peer Payment Protocol
 
-March 2026 — v2.2
+March 2026 — v3.0
 
 ---
 
 ## Abstract
 
-TIMPAL is a peer-to-peer payment protocol designed to function without banks, payment processors, or centralized infrastructure. It uses quantum-resistant Dilithium3 cryptography, a distributed append-only ledger, an eligibility-gated commit-reveal VRF lottery, and a two-era economic model to create a fair, decentralized monetary system with a fixed supply of 250 million TMPL distributed over 37.5 years.
+TIMPAL is a peer-to-peer payment protocol designed to function without banks, payment processors, or centralized infrastructure. It uses quantum-resistant Dilithium3 cryptography, a chain-anchored distributed ledger, an eligibility-gated commit-reveal VRF lottery, and a two-era economic model to create a fair, decentralized monetary system with a fixed supply of 250 million TMPL distributed over 37.5 years.
 
-The protocol enforces one node per physical device, preventing Sybil attacks and ensuring that participation in the reward system remains fair regardless of computational resources. Transactions are free and confirm instantly. No pre-mine. No insider allocation. No central authority.
+The protocol enforces one node per physical device, preventing Sybil attacks and ensuring that participation in the reward system remains fair regardless of computational resources. Transactions are free and confirm within seconds. No pre-mine. No insider allocation. No central authority.
 
 ---
 
@@ -47,11 +47,15 @@ No configuration. No account creation. No KYC.
 
 ## 3. Protocol Architecture
 
-### 3.1 Distributed Ledger
+### 3.1 Chain-Anchored Distributed Ledger
 
-TIMPAL uses a distributed append-only ledger rather than a blockchain. Every node holds a complete copy. There are no blocks, no mining, and no proof-of-work. Transactions confirm immediately.
+TIMPAL uses a chain-anchored distributed ledger. Every node holds a complete copy. There is no proof-of-work and no mining. Each five-second time slot produces exactly one block — the reward won by the VRF lottery winner for that slot. Every block carries a `prev_hash` field: the SHA-256 hash of the previous block's canonical serialization. This links every block to a single unambiguous history.
 
-Double-spend prevention is enforced by checking the sender's balance against the full ledger before accepting any transaction. The first transaction seen by the network wins. Every two weeks the network automatically creates a checkpoint — a cryptographically verified snapshot of all balances — and prunes the raw history before it. Nodes only need to store data since the last checkpoint, keeping the ledger lightweight forever.
+The chain gives the protocol global ordering and partition recovery. When two nodes that were disconnected reconnect, their chains are compared. The longest valid chain wins. On equal length, the chain with the lower tip hash wins — a deterministic rule that produces identical outcomes on every node regardless of which chain arrived first.
+
+Blocks at least six slots deep are considered confirmed (~30 seconds). This is the protocol's finality depth — a transaction buried under six blocks cannot be reversed under normal network conditions.
+
+Double-spend prevention is enforced by checking the sender's balance against the full chain before accepting any transaction. Every two weeks the network automatically creates a checkpoint — a cryptographically verified snapshot of all balances — and prunes the raw history before it. Nodes only need to store data since the last checkpoint, keeping the ledger lightweight forever.
 
 ### 3.2 Quantum-Resistant Cryptography
 
@@ -110,7 +114,9 @@ winner = min(verified_nodes, key=lambda d: (|ticket_int - target_int|, device_id
 
 Every node independently verifies all reveals using the committed hashes and Dilithium3 signatures, then picks the same winner using identical math. The bootstrap server stores commits and reveals but cannot influence the outcome — all verification and winner selection happens on the nodes.
 
-**Push and gossip.** The node that computed the winner claims the reward, adds it to its ledger, and broadcasts it to the peer-to-peer network. All nodes verify the reward against their local commits and the same collective target before accepting it. The first valid reward for any slot is final — subsequent claims for the same slot are rejected.
+**Block construction.** The winning node builds a block containing the winner's identity, the reward amount, all four VRF proof fields, and — critically — the SHA-256 hash of the previous block (`prev_hash`). This links the new block to the chain. The block is added to the local chain and broadcast to all peers.
+
+**SUBMIT_TIP.** After winning, the node also notifies the bootstrap server of the new chain tip. This allows joining nodes to immediately know how far ahead the chain is and request only the blocks they are missing.
 
 ### 3.6 Reveal Obligation Enforcement
 
@@ -124,9 +130,24 @@ The ban counter resets to zero after a ban is served. This makes selective revea
 
 An OS-level file lock prevents more than one node running per device. Any second attempt exits immediately. More rewards require more physical devices — the same constraint for everyone.
 
-### 3.8 Ledger Conflict Resolution
+### 3.8 Fork Choice and Chain Convergence
 
-Each five-second time slot has exactly one winner. If two nodes claim the same slot — due to network latency or a temporary partition — the first valid reward received is canonical. All subsequent claims for the same slot are rejected. This is consistent with the lottery design: all honest nodes independently compute the same winner, so the first arriving reward is always the correct one. A node that arrives later with the same winner is simply redundant; a node that arrives later with a different winner has either computed incorrectly or is acting maliciously.
+v3.0 implements full Nakamoto-style fork resolution without proof-of-work.
+
+**Normal extension.** When a node receives a new block, it validates the VRF proof, checks that `prev_hash` matches the current chain tip, and appends the block. This is the common case.
+
+**Fork detection and reorg.** When a node receives blocks that do not connect to its current tip — because the network was partitioned, or because two nodes won the lottery in the same slot due to a race — the protocol detects a fork and attempts a chain reorganization:
+
+1. Build a hash-to-index map of the current chain.
+2. Find the block in the incoming set whose `prev_hash` connects to the local chain or checkpoint tip.
+3. Walk forward from that fork point, validating every block in the incoming set sequentially (VRF proof, chain linkage, slot ordering, supply cap).
+4. Compare the length of the incoming tail to the local tail from the fork point.
+
+**Fork choice rule.** The longer chain wins. On equal length, the chain whose tip hash is numerically lower wins. This tie-breaking rule is deterministic and order-independent — every node in the network arrives at the same decision regardless of which chain it saw first.
+
+**Post-reorg state cleanup.** After switching chains, the protocol recomputes `total_minted` from the new chain and removes any transactions that are no longer funded by surviving block rewards. This prevents phantom balances.
+
+**Finality.** A block is considered confirmed once it is at least `CONFIRMATION_DEPTH = 6` slots deep (~30 seconds). Confirmed blocks cannot be reversed under normal network conditions.
 
 ### 3.9 Transaction Rate Limiting
 
@@ -136,11 +157,9 @@ Each device is limited to 60 transactions per minute. This prevents spam and flo
 
 Without checkpointing, the ledger would grow to approximately 118GB over 37.5 years, making it impractical for nodes in regions with limited storage or bandwidth.
 
-Every 241,920 slots (approximately two weeks), every node independently creates a checkpoint. The checkpoint records the balance of every address at that moment, the total supply minted, and SHA256 cryptographic hashes of all pruned rewards and transactions. These hashes are permanent proof that the pruned data was valid — anyone with the original data can verify the checkpoint is honest.
+Every 241,920 slots (approximately two weeks), every node independently creates a checkpoint. The checkpoint records the balance of every address at that moment, the total supply minted, the SHA-256 hash of the chain tip at the time of pruning, and cryptographic hashes of all pruned rewards and transactions. The chain tip hash is stored so that blocks produced after the checkpoint can be correctly linked — a block's `prev_hash` must match the stored tip even though the block it references has been pruned.
 
-A 120-slot buffer (10 minutes) is applied before pruning, giving late-arriving data time to propagate across the network before being permanently removed. All rewards and transactions older than the buffer are pruned after the checkpoint is written.
-
-Checkpoints are gossiped to peers automatically. A new node joining the network receives the latest checkpoint first, then only the data since that checkpoint — never the full history. The checkpoint system runs in a background thread and never interferes with the lottery or transactions.
+A 120-slot buffer (10 minutes) is applied before pruning, giving late-arriving data time to propagate across the network before being permanently removed. Checkpoints are gossiped to peers automatically. A new node joining the network receives the latest checkpoint first, then only the blocks since that checkpoint — never the full history.
 
 The process is fully automatic and requires no human intervention. It runs identically on every node forever.
 
@@ -191,6 +210,7 @@ Every node periodically pushes its ledger data to the explorer API at timpal.org
 | Fee Recipient | All nodes that submitted a VRF commit for the slot (split equally) |
 | Pre-mine | None |
 | Insider Allocation | None |
+| Confirmation Depth | 6 slots (~30 seconds) |
 
 **Verification:**
 1.0575 × 12 rounds/min × 60 × 24 × 365 = 6,669,864 TMPL/year
@@ -206,7 +226,7 @@ One node per device enforced at the OS level. Additionally, the eligibility gate
 
 ### 6.2 Double-Spend Prevention
 
-Every node validates sender balance against the full ledger before accepting any transaction. The first valid transaction spending a given balance is canonical. All nodes independently enforce this rule.
+Every node validates sender balance against the full chain before accepting any transaction. The first valid transaction spending a given balance is canonical. All nodes independently enforce this rule. After a chain reorganization, transactions that are no longer funded by surviving block rewards are automatically removed from the ledger.
 
 ### 6.3 Quantum Resistance
 
@@ -214,39 +234,50 @@ Dilithium3 protects all signatures — transactions, VRF tickets, and push authe
 
 ### 6.4 VRF Integrity
 
-Every reward carries a cryptographic VRF ticket derived from the winner's Dilithium3 private key signature. Any node can independently verify the winner by confirming:
+Every block carries a cryptographic VRF ticket derived from the winner's Dilithium3 private key signature. Any node can independently verify the winner by confirming:
 
 1. The committed hash matches: `sha256(ticket:device_id:slot) == commit`
 2. The Dilithium3 signature is valid for the slot seed
 3. The ticket matches: `sha256(signature) == ticket`
 4. The ticket is the closest to the collective target among all verified participants
 
-All four checks must pass. A reward missing any VRF field is rejected outright — there is no fallback path that accepts unverified rewards.
+All four checks must pass. A block missing any VRF field is rejected outright — there is no fallback path that accepts unverified blocks.
 
 ### 6.5 Selective Reveal Prevention
 
 The collective target is the SHA256 of all tickets sorted and joined. It cannot be known until the reveal window closes. A node that commits cannot predict whether its ticket will win, so there is no information advantage to committing early and revealing selectively. Nodes that commit but do not reveal accumulate missed-reveal counts and are banned for 10 slots after two consecutive misses.
 
-### 6.6 Wallet Security
+### 6.6 Chain Integrity
+
+Every block's `prev_hash` must equal the SHA-256 of the previous block's canonical serialization. Canonical serialization uses `json.dumps(block, sort_keys=True, separators=(",",":"))` — deterministic across all nodes regardless of platform or Python version. Integer timestamps are used throughout to eliminate floating-point precision divergence.
+
+Any block with an incorrect `prev_hash` is rejected. An attacker cannot insert or reorder blocks without recomputing every subsequent hash in the chain, which requires forging all VRF proofs — computationally infeasible.
+
+### 6.7 Fork Attack Resistance
+
+A fork attack requires building a chain longer than the honest chain. Since there is no proof-of-work, the relevant resource is time: an attacker can produce at most one block per slot per eligible device. The honest network collectively produces blocks at a faster rate than any single attacker with a realistic number of devices. The longest-chain rule ensures the honest chain always wins.
+
+### 6.8 Wallet Security
 
 Private keys are encrypted at rest with AES-256-GCM. The encryption key is derived from the user's password via scrypt with a random salt. The plaintext private key exists only in memory while the node is running and is never written to disk in any form.
 
-### 6.7 Bootstrap Server Trust Model
+### 6.9 Bootstrap Server Trust Model
 
-The bootstrap server is a relay. It records commits and reveals but cannot verify Dilithium3 signatures — that is done on every node independently. A compromised or malicious bootstrap server can:
+The bootstrap server is a relay. It records commits and reveals but cannot verify Dilithium3 signatures — that is done on every node independently. In v3.0, the bootstrap server also relays chain tip information. A compromised or malicious bootstrap server can:
 
 - Refuse to record commits (causing nodes to skip slots)
 - Selectively withhold reveals (causing incorrect winner selection for nodes that query only that server)
+- Report a false or stale chain tip
 
 It cannot:
 
 - Forge a valid VRF ticket (requires the target node's private key)
-- Force a node to accept an invalid reward (every node verifies independently)
+- Force a node to accept an invalid block (every node verifies chain linkage and VRF independently)
 - Steal funds or alter balances
 
 Community-operated bootstrap servers reduce the impact of any single server failing or misbehaving. The more servers, the more resilient the network.
 
-### 6.8 Era 2 Fee Distribution
+### 6.10 Era 2 Fee Distribution
 
 In Era 2, fee distribution is designed to resist centralization. Routing all transaction fees to the slot winner would mean one node captures all fee income every 5 seconds — a structural advantage for well-connected or high-uptime nodes that compounds over time.
 
@@ -270,7 +301,7 @@ Community bootstrap servers, community tools, and community applications are all
 
 TIMPAL provides what the global financial system has failed to provide: a way for any person, anywhere, to hold and send value — instantly, for free, without asking permission.
 
-The eligibility-gated lottery ensures the reward system remains fair and efficient whether the network has 10 nodes or 10 million. The collective target prevents any node from predicting or manipulating the outcome. The reveal obligation closes the selective-reveal attack. The two-era model ensures the network is self-sustaining forever — first through the lottery, then through transaction fees.
+The eligibility-gated lottery ensures the reward system remains fair and efficient whether the network has 10 nodes or 10 million. The collective target prevents any node from predicting or manipulating the outcome. The reveal obligation closes the selective-reveal attack. The chain spine anchors all rewards to a single, deterministic history. Nakamoto-style fork resolution with deterministic tie-breaking guarantees global convergence under any network partition. The two-era model ensures the network is self-sustaining forever — first through the lottery, then through transaction fees.
 
 ---
 

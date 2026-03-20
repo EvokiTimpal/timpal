@@ -31,6 +31,7 @@ Your node starts, creates a quantum-resistant wallet, prompts you to set a passw
 | Command | What it does |
 |---|---|
 | `balance` | Your current TMPL balance |
+| `chain` | Chain height, tip hash, and recent confirmed blocks |
 | `peers` | Online nodes connected to you |
 | `send` | Send TMPL to a peer |
 | `history` | Your transaction and reward history |
@@ -41,12 +42,13 @@ Your node starts, creates a quantum-resistant wallet, prompts you to set a passw
 
 ## How it works
 
-- **Distributed ledger** — Every node holds a full copy. No single point of failure.
+- **Chain-anchored distributed ledger** — Every node holds a full copy. Each reward is a block carrying a cryptographic link to the previous one — a single, unambiguous history. No proof-of-work. No mining.
 - **Quantum-resistant cryptography** — Dilithium3, NIST 2024 post-quantum standard.
 - **Encrypted wallet** — Private key encrypted with AES-256-GCM and a password you set. Never stored in plaintext.
-- **Instant finality** — Transactions confirm immediately.
+- **~30-second finality** — Blocks confirmed after 6 slots. Transactions are final and irreversible once confirmed.
 - **Eligibility-gated VRF lottery** — Every 5 seconds, one node wins 1.0575 TMPL. Only ~10 nodes are randomly eligible per slot regardless of how large the network grows, keeping participation fair and efficient at any scale. The winner is selected by a commit-reveal scheme — provably fair, no node has a permanent advantage.
 - **Collective target** — The winning ticket is the one closest to a target that cannot be known until all reveals are in. No node can predict or cherry-pick the outcome.
+- **Fork resolution** — Longest valid chain wins. Equal-length forks resolve deterministically by comparing tip hashes. All nodes converge to the same chain regardless of arrival order.
 - **One node per device** — Fairness enforced by the protocol.
 - **250 million TMPL total supply** — Over 37.5 years. No pre-mine. No insider allocation.
 
@@ -62,6 +64,7 @@ Your node starts, creates a quantum-resistant wallet, prompts you to set a passw
 | Round interval | 5 seconds |
 | Distribution period | 37.5 years |
 | Eligible nodes per slot | ~10 (scales automatically with network size) |
+| Confirmation depth | 6 slots (~30 seconds) |
 | Transaction fee | Free (first 37.5 years) |
 | Transaction fee (after 37.5 years) | 0.0005 TMPL |
 | Fee recipient | All nodes that submitted a VRF commit for the slot (split equally) |

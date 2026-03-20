@@ -973,8 +973,8 @@
         </div>
         <div class="feature">
           <div class="feature-icon">🎲</div>
-          <div class="feature-title">VRF Lottery</div>
-          <div class="feature-desc">Every 5 seconds, one node wins 1.0575 TMPL. Selected by Verifiable Random Function — pure cryptographic fairness. Scales to millions of nodes.</div>
+          <div class="feature-title">Eligibility-Gated VRF Lottery</div>
+          <div class="feature-desc">Every 5 seconds, one node wins 1.0575 TMPL. Only ~10 nodes are eligible per slot regardless of network size. The winner is the node whose ticket lands closest to an unpredictable collective target — no node can predict or manipulate the outcome.</div>
         </div>
         <div class="feature">
           <div class="feature-icon">🖥️</div>
@@ -1005,7 +1005,7 @@
         <div class="era-badge">Era 1 · Now → Year 37.5</div>
         <div class="era-title">Distribution</div>
         <div class="era-desc">
-          All transactions are free. Nodes earn through the VRF lottery: 1.0575 TMPL every 5 seconds. 
+          All transactions are free. Nodes earn through the VRF lottery: 1.0575 TMPL every 5 seconds.
           250 million TMPL distributed over 37.5 years. No pre-mine. No insider allocation. Zero.
         </div>
       </div>
@@ -1024,6 +1024,7 @@
       <tr><td class="prop">Reward Per Round</td><td class="val accent">1.0575 TMPL</td></tr>
       <tr><td class="prop">Round Interval</td><td class="val">Every 5 seconds</td></tr>
       <tr><td class="prop">Distribution Period</td><td class="val">37.5 years</td></tr>
+      <tr><td class="prop">Eligible Nodes Per Slot</td><td class="val">~10 (scales with network size)</td></tr>
       <tr><td class="prop">Transaction Fee (Era 1)</td><td class="val green">Free</td></tr>
       <tr><td class="prop">Transaction Fee (Era 2)</td><td class="val">0.0005 TMPL</td></tr>
       <tr><td class="prop">Pre-mine</td><td class="val green">None</td></tr>
@@ -1219,23 +1220,30 @@ python3 timpal.py send &lt;address&gt; &lt;amount&gt;</div>
 
       <div class="docs-section" id="doc-vrf">
         <div class="docs-h2">VRF Lottery</div>
-        <p class="docs-p">Every 5 seconds, one node wins 1.0575 TMPL. The winner is selected by a Verifiable Random Function:</p>
-        <div class="docs-code"><span class="comment"># Each node signs the time slot with its private key</span>
-signature = Dilithium3.sign(private_key, time_slot)
+        <p class="docs-p">Every 5 seconds, one node wins 1.0575 TMPL. The lottery uses an eligibility gate and a commit-reveal scheme to ensure fairness at any network size.</p>
+        <p class="docs-p"><strong style="color:var(--accent)">Eligibility gate.</strong> Before each slot, every node independently checks whether it is eligible to participate using a deterministic hash of its device ID and the slot number. The gate targets ~10 eligible nodes per slot regardless of total network size — so at 1,000,000 nodes, roughly 10 participate, keeping the lottery efficient and fair forever.</p>
+        <div class="docs-code"><span class="comment"># Each eligible node signs the slot number with its private key</span>
+signature = Dilithium3.sign(private_key, slot_number)
 
-<span class="comment"># Ticket is the hash of that signature — unpredictable without the private key</span>
+<span class="comment"># VRF ticket is the hash of that signature — unpredictable without the private key</span>
 ticket = SHA256(signature)
 
-<span class="comment"># The node with the lowest ticket wins</span>
-winner = node with minimum(ticket)</div>
-        <p class="docs-p">This scales to millions of nodes because no peer list is required. Every node independently computes its ticket. Because the ticket is derived from a private key signature, it is different every round — no node has a permanent advantage over any other.</p>
-        <p class="docs-p">Every reward includes the VRF ticket as cryptographic proof. Any node can verify the winner is legitimate by confirming the ticket is the lowest value submitted for that round.</p>
+<span class="comment"># Commit: hide the ticket until reveal phase</span>
+commit = SHA256(ticket + device_id + slot)
+
+<span class="comment"># After all reveals are in, compute the collective target</span>
+target = SHA256(all_tickets_sorted_and_joined)
+
+<span class="comment"># Winner = node whose ticket is closest to the target</span>
+winner = min(verified_nodes, key=lambda n: abs(ticket_int - target_int))</div>
+        <p class="docs-p">The collective target cannot be known until the reveal window closes — no node can predict it in advance or cherry-pick whether to reveal. Every node independently verifies all reveals using the committed hashes and Dilithium3 signatures, then picks the same winner using identical math.</p>
+        <p class="docs-p">Every reward includes the full VRF proof. Any node can verify the winner is legitimate by confirming the commit, the signature, and that the ticket is the closest to the collective target among all verified participants.</p>
       </div>
 
       <div class="docs-section" id="doc-ledger">
         <div class="docs-h2">Ledger</div>
         <p class="docs-p">The ledger is an append-only record of every transaction and reward ever. Your local copy is stored at <span class="inline-code">~/.timpal_ledger.json</span>.</p>
-        <p class="docs-p">When two nodes that were disconnected reconnect, their ledgers merge automatically. Conflict resolution rules are deterministic: for rewards, the earlier timestamp wins. For transactions, the first one seen with a valid balance wins.</p>
+        <p class="docs-p">When two nodes that were disconnected reconnect, their ledgers merge automatically. Conflict resolution is deterministic: for rewards, the first valid reward received for a slot is final — all honest nodes independently compute the same winner, so the first arrival is always correct. For transactions, the first one seen with a valid balance wins.</p>
         <p class="docs-p">After every merge, the total minted supply is recalculated from scratch — never trusted from incremental additions. This prevents floating point drift at any scale.</p>
       </div>
 
@@ -1247,7 +1255,7 @@ winner = node with minimum(ticket)</div>
           <tr><td>Local</td><td>UDP broadcast on port 7778</td><td>Same WiFi network</td></tr>
           <tr><td>Global</td><td>TCP bootstrap at bootstrap.timpal.org:7777</td><td>Worldwide</td></tr>
         </table>
-        <p class="docs-p">The bootstrap server is a directory — it introduces nodes to each other. It stores no funds and controls nothing. If it goes offline, nodes already connected continue operating peer-to-peer.</p>
+        <p class="docs-p">The bootstrap server is a directory — it introduces nodes to each other and serves as the commit/reveal registry for the lottery. It stores no funds and controls nothing. If it goes offline, nodes already connected continue operating peer-to-peer.</p>
       </div>
 
       <div class="docs-section" id="doc-tokenomics">
@@ -1258,6 +1266,7 @@ winner = node with minimum(ticket)</div>
           <tr><td>Reward Per Round</td><td>1.0575 TMPL</td></tr>
           <tr><td>Round Interval</td><td>Every 5 seconds</td></tr>
           <tr><td>Distribution Period</td><td>37.5 years</td></tr>
+          <tr><td>Eligible Nodes Per Slot</td><td>~10 (scales with network size)</td></tr>
           <tr><td>Transaction Fee (Era 1)</td><td>Free</td></tr>
           <tr><td>Transaction Fee (Era 2)</td><td>0.0005 TMPL</td></tr>
           <tr><td>Pre-mine</td><td>None</td></tr>

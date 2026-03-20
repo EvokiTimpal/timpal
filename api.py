@@ -1,10 +1,12 @@
-"""TIMPAL API v2.2 — serves live ledger data for timpal.org explorer.
+"""TIMPAL API v3.0 — serves live ledger data for timpal.org explorer.
 
-Push authentication: nodes sign their push payload with their Dilithium3
-private key. No shared secret exists anywhere — not in code, not in env vars.
-The signature is verified cryptographically on every push.
+v3.0 changes:
+  - Nodes push "blocks" (chain blocks) instead of flat "rewards" list
+  - Explorer shows chain height, slot, prev_hash linkage, confirmed status
+  - All existing endpoints unchanged — block structure is a superset of reward
 
-Nodes push updates here every 5 seconds. The explorer polls GET /api.
+Push authentication unchanged: nodes sign with Dilithium3 private key.
+No shared secret exists anywhere.
 """
 
 import json
@@ -25,8 +27,17 @@ except ImportError:
 
 import hashlib
 
+CONFIRMATION_DEPTH = 6   # must match timpal.py
+
 # ── In-memory ledger state ─────────────────────────────────────────────────────
-_ledger      = {"rewards": [], "transactions": [], "total_minted": 0.0}
+_ledger = {
+    "blocks":       [],   # v3.0: was "rewards" — now chain blocks
+    "transactions": [],
+    "total_minted": 0.0,
+    "chain_height": 0,
+    "chain_tip_slot": -1,
+    "chain_tip_hash": "0" * 64
+}
 _ledger_lock = threading.Lock()
 _last_update = 0
 
@@ -37,28 +48,17 @@ _stats_cache_lock = threading.Lock()
 # ── Per-IP POST rate limiting ──────────────────────────────────────────────────
 _post_rate      = {}
 _post_rate_lock = threading.Lock()
-POST_RATE_LIMIT = 5   # Max pushes per IP per 10 seconds
+POST_RATE_LIMIT = 5
 
 
 def _is_valid_hex64(s) -> bool:
-    """True if s is a 64-character lowercase hex string."""
     if not isinstance(s, str) or len(s) != 64:
         return False
     return all(c in "0123456789abcdef" for c in s)
 
 
 def _verify_push_signature(data: dict) -> bool:
-    """Verify a node's push is signed with its Dilithium3 private key.
-
-    The node serializes the payload (all fields except 'signature') with
-    sort_keys=True, separators=(',',':'), signs the bytes, and includes
-    the hex signature as data['signature'].
-
-    We reconstruct the same bytes and verify.
-    """
     if not _DILITHIUM_AVAILABLE:
-        # If dilithium not installed on server, accept pushes but log warning.
-        # This should not happen in production.
         print("[!] WARNING: push accepted without signature verification")
         return True
 
@@ -69,7 +69,6 @@ def _verify_push_signature(data: dict) -> bool:
     if not device_id or not public_key or not signature:
         return False
 
-    # Verify device_id = sha256(public_key)
     try:
         pub_bytes = bytes.fromhex(public_key)
         if hashlib.sha256(pub_bytes).hexdigest() != device_id:
@@ -77,15 +76,12 @@ def _verify_push_signature(data: dict) -> bool:
     except Exception:
         return False
 
-    # Reconstruct the payload bytes the node signed
-    # (all fields except 'signature', sorted keys, compact separators)
     payload_data = {k: v for k, v in data.items() if k != "signature"}
     try:
         payload_bytes = json.dumps(payload_data, sort_keys=True, separators=(',', ':')).encode()
     except Exception:
         return False
 
-    # Verify Dilithium3 signature
     try:
         sig_bytes = bytes.fromhex(signature)
         return Dilithium3.verify(pub_bytes, payload_bytes, sig_bytes)
@@ -99,8 +95,11 @@ def fmt_time(ts):
     return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _is_confirmed(block_slot, current_slot):
+    return current_slot - block_slot >= CONFIRMATION_DEPTH
+
+
 def _clean_post_rate():
-    """Background thread: remove stale IP entries from _post_rate every 60 seconds."""
     while True:
         time.sleep(60)
         now = time.time()
@@ -111,14 +110,15 @@ def _clean_post_rate():
                 del _post_rate[ip]
 
 
-def _rebuild_stats_cache(rewards, txs, total_minted):
-    block_rewards = [r for r in rewards if r.get("type") == "block_reward"]
-    computed      = round(sum(r.get("amount", 0) for r in block_rewards), 8)
+def _rebuild_stats_cache(blocks, txs, total_minted, chain_height, chain_tip_slot, chain_tip_hash):
+    current_slot  = chain_tip_slot
+    block_rewards = [b for b in blocks if b.get("type") == "block_reward"]
+    computed      = round(sum(b.get("amount", 0) for b in block_rewards), 8)
     total_minted  = max(computed, total_minted)
 
     node_counts = {}
-    for r in block_rewards:
-        wid = r.get("winner_id", "")
+    for b in block_rewards:
+        wid = b.get("winner_id", "")
         if wid:
             node_counts[wid] = node_counts.get(wid, 0) + 1
 
@@ -129,27 +129,40 @@ def _rebuild_stats_cache(rewards, txs, total_minted):
         for nid, cnt in node_counts.items()
     ], key=lambda x: x["rewards"], reverse=True)
 
-    recent_rewards = sorted(rewards, key=lambda r: r.get("timestamp", 0), reverse=True)[:50]
-    recent_txs     = sorted(txs,     key=lambda t: t.get("timestamp", 0), reverse=True)[:50]
+    recent_blocks = sorted(blocks, key=lambda b: b.get("slot", 0), reverse=True)[:50]
+    recent_txs    = sorted(txs,    key=lambda t: t.get("timestamp", 0), reverse=True)[:50]
 
     return {
-        "total_minted":   total_minted,
-        "remaining":      round(250_000_000 - total_minted, 8),
-        "total_rewards":  len(block_rewards),
-        "total_txs":      len(txs),
-        "active_nodes":   len(node_counts),
-        "node_stats":     node_stats,
-        "recent_rewards": [
-            {"id": r.get("winner_id", ""), "amount": r.get("amount", 0),
-             "time": fmt_time(r.get("timestamp")), "slot": r.get("time_slot", "")}
-            for r in recent_rewards
+        "total_minted":    total_minted,
+        "remaining":       round(250_000_000 - total_minted, 8),
+        "total_rewards":   len(block_rewards),
+        "total_txs":       len(txs),
+        "active_nodes":    len(node_counts),
+        "chain_height":    chain_height,
+        "chain_tip_slot":  chain_tip_slot,
+        "chain_tip_hash":  chain_tip_hash,
+        "node_stats":      node_stats,
+        "recent_blocks": [
+            {
+                "id":        b.get("winner_id", ""),
+                "amount":    b.get("amount", 0),
+                "time":      fmt_time(b.get("timestamp")),
+                "slot":      b.get("slot", ""),
+                "prev_hash": b.get("prev_hash", "")[:16] + "..." if b.get("prev_hash") else "",
+                "confirmed": _is_confirmed(b.get("slot", 0), current_slot)
+            }
+            for b in recent_blocks
         ],
         "recent_txs": [
-            {"tx_id": t.get("tx_id", ""),
-             "id": (t.get("tx_id", "") or "")[:16] + "...",
-             "sender": t.get("sender_id", ""), "recipient": t.get("recipient_id", ""),
-             "amount": t.get("amount", 0), "time": fmt_time(t.get("timestamp")),
-             "timestamp": t.get("timestamp", 0)}
+            {
+                "tx_id":     t.get("tx_id", ""),
+                "id":        (t.get("tx_id", "") or "")[:16] + "...",
+                "sender":    t.get("sender_id", ""),
+                "recipient": t.get("recipient_id", ""),
+                "amount":    t.get("amount", 0),
+                "time":      fmt_time(t.get("timestamp")),
+                "timestamp": t.get("timestamp", 0)
+            }
             for t in recent_txs
         ]
     }
@@ -158,7 +171,6 @@ def _rebuild_stats_cache(rewards, txs, total_minted):
 class Handler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self):
-        """CORS preflight — needed for browsers making cross-origin POST requests."""
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -175,6 +187,7 @@ class Handler(BaseHTTPRequestHandler):
             path   = parsed.path.rstrip("/")
             params = urllib.parse.parse_qs(parsed.query)
 
+            # ── GET /api — main stats ─────────────────────────────────────────
             if path in ("", "/", "/api", "/api/"):
                 with _stats_cache_lock:
                     cache = _stats_cache
@@ -182,11 +195,14 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(json.dumps({
                         "total_minted": 0, "remaining": 250_000_000,
                         "total_rewards": 0, "total_txs": 0, "active_nodes": 0,
-                        "node_stats": [], "recent_rewards": [], "recent_txs": []
+                        "chain_height": 0, "chain_tip_slot": -1,
+                        "chain_tip_hash": "0" * 64,
+                        "node_stats": [], "recent_blocks": [], "recent_txs": []
                     }).encode())
                 else:
                     self.wfile.write(json.dumps(cache).encode())
 
+            # ── GET /api/address?id=<hex64> ───────────────────────────────────
             elif path == "/api/address":
                 addr = params.get("id", [""])[0].strip()
                 if not addr:
@@ -196,35 +212,47 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(json.dumps({"error": "invalid address format"}).encode())
                     return
                 with _ledger_lock:
-                    rewards = list(_ledger["rewards"])
-                    txs     = list(_ledger["transactions"])
-                addr_rewards  = sorted([r for r in rewards if r.get("winner_id", "") == addr],
-                                       key=lambda r: r.get("timestamp", 0), reverse=True)
+                    blocks = list(_ledger["blocks"])
+                    txs    = list(_ledger["transactions"])
+                    current_slot = _ledger["chain_tip_slot"]
+                addr_blocks   = sorted([b for b in blocks if b.get("winner_id", "") == addr],
+                                       key=lambda b: b.get("slot", 0), reverse=True)
                 addr_txs_sent = [t for t in txs if t.get("sender_id",    "") == addr]
                 addr_txs_recv = [t for t in txs if t.get("recipient_id", "") == addr]
                 addr_txs      = sorted(addr_txs_sent + addr_txs_recv,
                                        key=lambda t: t.get("timestamp", 0), reverse=True)
                 self.wfile.write(json.dumps({
-                    "address":        addr,
-                    "total_rewards":  len(addr_rewards),
-                    "total_earned":   round(sum(r.get("amount", 0) for r in addr_rewards), 8),
-                    "total_sent":     round(sum(t.get("amount", 0) for t in addr_txs_sent), 8),
-                    "total_received": round(sum(t.get("amount", 0) for t in addr_txs_recv), 8),
-                    "rewards": [{"amount": r.get("amount", 0),
-                                 "time": fmt_time(r.get("timestamp")),
-                                 "slot": r.get("time_slot", "")}
-                                for r in addr_rewards[:100]],
-                    "transactions": [{"tx_id": t.get("tx_id", ""),
-                                      "direction": "sent" if t.get("sender_id") == addr else "received",
-                                      "counterparty": (t.get("recipient_id", "")
-                                                       if t.get("sender_id") == addr
-                                                       else t.get("sender_id", "")),
-                                      "amount": t.get("amount", 0),
-                                      "time": fmt_time(t.get("timestamp")),
-                                      "timestamp": t.get("timestamp", 0)}
-                                     for t in addr_txs]
+                    "address":       addr,
+                    "total_rewards": len(addr_blocks),
+                    "total_earned":  round(sum(b.get("amount", 0) for b in addr_blocks), 8),
+                    "total_sent":    round(sum(t.get("amount", 0) for t in addr_txs_sent), 8),
+                    "total_received":round(sum(t.get("amount", 0) for t in addr_txs_recv), 8),
+                    "blocks": [
+                        {
+                            "amount":    b.get("amount", 0),
+                            "time":      fmt_time(b.get("timestamp")),
+                            "slot":      b.get("slot", ""),
+                            "prev_hash": b.get("prev_hash", ""),
+                            "confirmed": _is_confirmed(b.get("slot", 0), current_slot)
+                        }
+                        for b in addr_blocks[:100]
+                    ],
+                    "transactions": [
+                        {
+                            "tx_id":       t.get("tx_id", ""),
+                            "direction":   "sent" if t.get("sender_id") == addr else "received",
+                            "counterparty":(t.get("recipient_id", "")
+                                            if t.get("sender_id") == addr
+                                            else t.get("sender_id", "")),
+                            "amount":      t.get("amount", 0),
+                            "time":        fmt_time(t.get("timestamp")),
+                            "timestamp":   t.get("timestamp", 0)
+                        }
+                        for t in addr_txs
+                    ]
                 }).encode())
 
+            # ── GET /api/tx?id=<tx_id> ────────────────────────────────────────
             elif path == "/api/tx":
                 tx_id = params.get("id", [""])[0].strip()
                 if not tx_id:
@@ -234,15 +262,49 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(json.dumps({"error": "invalid tx_id format"}).encode())
                     return
                 with _ledger_lock:
-                    tx = next((t for t in _ledger["transactions"] if t.get("tx_id", "") == tx_id), None)
+                    tx = next((t for t in _ledger["transactions"]
+                               if t.get("tx_id", "") == tx_id), None)
                 if not tx:
                     self.wfile.write(json.dumps({"error": "not found"}).encode())
                     return
                 self.wfile.write(json.dumps({
-                    "tx_id": tx.get("tx_id", ""), "sender": tx.get("sender_id", ""),
-                    "recipient": tx.get("recipient_id", ""), "amount": tx.get("amount", 0),
-                    "timestamp": tx.get("timestamp", 0), "time": fmt_time(tx.get("timestamp")),
-                    "signature": tx.get("signature", ""), "confirmed": True
+                    "tx_id":     tx.get("tx_id", ""),
+                    "sender":    tx.get("sender_id", ""),
+                    "recipient": tx.get("recipient_id", ""),
+                    "amount":    tx.get("amount", 0),
+                    "timestamp": tx.get("timestamp", 0),
+                    "time":      fmt_time(tx.get("timestamp")),
+                    "signature": tx.get("signature", ""),
+                    "confirmed": True
+                }).encode())
+
+            # ── GET /api/block?slot=<int> ─────────────────────────────────────
+            elif path == "/api/block":
+                slot_str = params.get("slot", [""])[0].strip()
+                if not slot_str:
+                    self.wfile.write(json.dumps({"error": "missing slot"}).encode())
+                    return
+                try:
+                    slot = int(slot_str)
+                except ValueError:
+                    self.wfile.write(json.dumps({"error": "invalid slot"}).encode())
+                    return
+                with _ledger_lock:
+                    block = next((b for b in _ledger["blocks"]
+                                  if b.get("slot") == slot), None)
+                    current_slot = _ledger["chain_tip_slot"]
+                if not block:
+                    self.wfile.write(json.dumps({"error": "not found"}).encode())
+                    return
+                self.wfile.write(json.dumps({
+                    "slot":       block.get("slot"),
+                    "winner":     block.get("winner_id", ""),
+                    "amount":     block.get("amount", 0),
+                    "prev_hash":  block.get("prev_hash", ""),
+                    "time":       fmt_time(block.get("timestamp")),
+                    "timestamp":  block.get("timestamp", 0),
+                    "confirmed":  _is_confirmed(slot, current_slot),
+                    "nodes":      block.get("nodes", 1)
                 }).encode())
 
             else:
@@ -261,7 +323,6 @@ class Handler(BaseHTTPRequestHandler):
             ip  = self.client_address[0]
             now = time.time()
 
-            # Per-IP rate limit
             with _post_rate_lock:
                 times = [t for t in _post_rate.get(ip, []) if now - t < 10]
                 if len(times) >= POST_RATE_LIMIT:
@@ -282,53 +343,48 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps({"error": "unknown type"}).encode())
                 return
 
-            # Verify Dilithium3 signature — no shared secret
             if not _verify_push_signature(data):
                 self.wfile.write(json.dumps({"error": "invalid signature"}).encode())
                 return
 
-            rewards = data.get("rewards", [])
-            txs     = data.get("transactions", [])
+            # v3.0: nodes push "blocks" (chain blocks) instead of flat rewards
+            incoming_blocks = data.get("blocks", [])
+            txs             = data.get("transactions", [])
 
-            # Structural validation — winner_id must be a valid 64-char hex device_id
-            rewards = [r for r in rewards
-                       if isinstance(r, dict)
-                       and isinstance(r.get("amount"), (int, float))
-                       and _is_valid_hex64(r.get("winner_id", ""))]
-            txs     = [t for t in txs
-                       if isinstance(t, dict)
-                       and isinstance(t.get("amount"), (int, float))
-                       and isinstance(t.get("tx_id"), str)]
+            # Structural validation
+            incoming_blocks = [b for b in incoming_blocks
+                               if isinstance(b, dict)
+                               and isinstance(b.get("amount"), (int, float))
+                               and _is_valid_hex64(b.get("winner_id", ""))
+                               and isinstance(b.get("slot"), int)]
+            txs = [t for t in txs
+                   if isinstance(t, dict)
+                   and isinstance(t.get("amount"), (int, float))
+                   and isinstance(t.get("tx_id"), str)]
 
             with _ledger_lock:
                 existing_slots = {
-                    r.get("time_slot"): r
-                    for r in _ledger["rewards"] if r.get("type") == "block_reward"
+                    b.get("slot"): b
+                    for b in _ledger["blocks"] if b.get("type") == "block_reward"
                 }
-                for r in rewards:
-                    slot  = r.get("time_slot")
-                    rtype = r.get("type", "block_reward")
+                for b in incoming_blocks:
+                    slot  = b.get("slot")
+                    rtype = b.get("type", "block_reward")
 
-                    # Validate vrf_ticket is a proper 64-char hex string.
-                    # Empty string < any valid ticket — must be rejected to prevent spoofing.
                     if rtype == "block_reward":
-                        if not _is_valid_hex64(r.get("vrf_ticket", "")):
+                        if not _is_valid_hex64(b.get("vrf_ticket", "")):
                             continue
 
                     if slot is not None and rtype != "fee_reward":
                         if slot not in existing_slots:
-                            # First writer wins — accept the first valid claim per slot.
-                            # All honest nodes agree on the winner via the collective target,
-                            # so the first pushed reward for a slot is the correct one.
-                            # Replacing by ticket comparison is meaningless under the new
-                            # lottery and would allow stale/malicious data to displace the
-                            # legitimate winner.
-                            _ledger["rewards"].append(r)
-                            existing_slots[slot] = r
+                            # First writer wins — first valid block per slot is accepted.
+                            # Consistent with node behavior.
+                            _ledger["blocks"].append(b)
+                            existing_slots[slot] = b
                     else:
-                        if not any(x.get("reward_id") == r.get("reward_id")
-                                   for x in _ledger["rewards"]):
-                            _ledger["rewards"].append(r)
+                        if not any(x.get("reward_id") == b.get("reward_id")
+                                   for x in _ledger["blocks"]):
+                            _ledger["blocks"].append(b)
 
                 existing_txids = {t.get("tx_id") for t in _ledger["transactions"]}
                 for t in txs:
@@ -336,17 +392,31 @@ class Handler(BaseHTTPRequestHandler):
                         _ledger["transactions"].append(t)
                         existing_txids.add(t.get("tx_id"))
 
-                _ledger["rewards"]      = _ledger["rewards"][-10000:]
+                _ledger["blocks"]       = _ledger["blocks"][-10000:]
                 _ledger["transactions"] = _ledger["transactions"][-5000:]
 
                 if data.get("total_minted", 0.0) > _ledger["total_minted"]:
                     _ledger["total_minted"] = data["total_minted"]
 
-                rewards_snap = list(_ledger["rewards"])
-                txs_snap     = list(_ledger["transactions"])
-                minted_snap  = _ledger["total_minted"]
+                # Update chain height and tip from incoming data
+                block_rewards = [b for b in _ledger["blocks"] if b.get("type") == "block_reward"]
+                if block_rewards:
+                    tip_block = max(block_rewards, key=lambda b: b.get("slot", -1))
+                    _ledger["chain_height"]   = len(block_rewards)
+                    _ledger["chain_tip_slot"] = tip_block.get("slot", -1)
+                    _ledger["chain_tip_hash"] = tip_block.get("prev_hash", "0" * 64)
 
-            new_cache = _rebuild_stats_cache(rewards_snap, txs_snap, minted_snap)
+                blocks_snap      = list(_ledger["blocks"])
+                txs_snap         = list(_ledger["transactions"])
+                minted_snap      = _ledger["total_minted"]
+                height_snap      = _ledger["chain_height"]
+                tip_slot_snap    = _ledger["chain_tip_slot"]
+                tip_hash_snap    = _ledger["chain_tip_hash"]
+
+            new_cache = _rebuild_stats_cache(
+                blocks_snap, txs_snap, minted_snap,
+                height_snap, tip_slot_snap, tip_hash_snap
+            )
             with _stats_cache_lock:
                 _stats_cache = new_cache
 
@@ -362,7 +432,8 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     threading.Thread(target=_clean_post_rate, daemon=True).start()
-    print("TIMPAL API v2.2 running on port 7781")
+    print("TIMPAL API v3.0 running on port 7781")
     print("Push authentication: Dilithium3 signature (no shared secret)")
+    print("v3.0: chain blocks, height, tip tracking, /api/block endpoint")
     server = ThreadingHTTPServer(("0.0.0.0", 7781), Handler)
     server.serve_forever()

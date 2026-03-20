@@ -922,10 +922,10 @@
       <div class="qs-step">
         <div class="qs-num">1</div>
         <div class="qs-content">
-          <div class="qs-title">Install the dependency</div>
+          <div class="qs-title">Install dependencies</div>
           <div class="qs-code">
-            <span>pip3 install dilithium-py</span>
-            <button class="copy-btn" onclick="copyCode(this, 'pip3 install dilithium-py')">copy</button>
+            <span>pip3 install dilithium-py cryptography</span>
+            <button class="copy-btn" onclick="copyCode(this, 'pip3 install dilithium-py cryptography')">copy</button>
           </div>
         </div>
       </div>
@@ -1027,6 +1027,7 @@
       <tr><td class="prop">Round Interval</td><td class="val">Every 5 seconds</td></tr>
       <tr><td class="prop">Distribution Period</td><td class="val">37.5 years</td></tr>
       <tr><td class="prop">Eligible Nodes Per Slot</td><td class="val">~10 (scales with network size)</td></tr>
+      <tr><td class="prop">Confirmation Depth</td><td class="val">6 slots (~30 seconds)</td></tr>
       <tr><td class="prop">Transaction Fee (Era 1)</td><td class="val green">Free</td></tr>
       <tr><td class="prop">Transaction Fee (Era 2)</td><td class="val">0.0005 TMPL</td></tr>
       <tr><td class="prop">Pre-mine</td><td class="val green">None</td></tr>
@@ -1167,7 +1168,7 @@
         <div class="docs-h2">Installation</div>
         <p class="docs-p">TIMPAL runs on Mac, Linux, and Windows. You need Python 3.8 or newer.</p>
         <div class="docs-code"><span class="comment"># Step 1 — Install the quantum cryptography library</span>
-pip3 install dilithium-py
+pip3 install dilithium-py cryptography
 
 <span class="comment"># Step 2 — Download the protocol</span>
 curl -O https://raw.githubusercontent.com/EvokiTimpal/timpal/main/timpal.py
@@ -1212,7 +1213,7 @@ python3 timpal.py send &lt;address&gt; &lt;amount&gt;</div>
         <p class="docs-p">Your wallet is stored in one file on your computer:</p>
         <div class="docs-code">~/.timpal_wallet.json</div>
         <div class="docs-callout">⚠️ Back this file up immediately. It contains your private key. If you delete it, your TMPL is gone forever. Copy it to a USB drive or encrypted storage.</div>
-        <p class="docs-p">To restore your wallet on a new machine: install Python, install dilithium-py, copy <span class="inline-code">~/.timpal_wallet.json</span> to the new machine, and run the node. Your balance returns immediately.</p>
+        <p class="docs-p">To restore your wallet on a new machine: install Python, install dilithium-py and cryptography, copy <span class="inline-code">~/.timpal_wallet.json</span> to the new machine, and run the node. Your balance returns immediately.</p>
       </div>
 
       <div class="docs-section" id="doc-how">

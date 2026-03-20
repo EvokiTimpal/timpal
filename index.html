@@ -968,8 +968,9 @@
         </div>
         <div class="feature">
           <div class="feature-icon">⚡</div>
-          <div class="feature-title">Instant Finality</div>
-          <div class="feature-desc">No blocks. No waiting. Transactions confirm the moment they reach the network.</div>
+          <!-- CHANGED: Instant Finality → Fast Finality, description updated -->
+          <div class="feature-title">Fast Finality</div>
+          <div class="feature-desc">Blocks confirmed after 6 slots (~30 seconds). No mining, no proof-of-work. Transactions settle quickly and irreversibly.</div>
         </div>
         <div class="feature">
           <div class="feature-icon">🎲</div>
@@ -984,7 +985,8 @@
         <div class="feature">
           <div class="feature-icon">📒</div>
           <div class="feature-title">Distributed Ledger</div>
-          <div class="feature-desc">Every node holds the complete ledger. No single point of failure. No central server that can be shut down.</div>
+          <!-- CHANGED: description updated to mention chain linkage -->
+          <div class="feature-desc">Every node holds the complete chain. Each block is cryptographically linked to the previous one — a single, tamper-evident history. No central server that can be shut down.</div>
         </div>
         <div class="feature">
           <div class="feature-icon">🌐</div>
@@ -1189,6 +1191,8 @@ python3 timpal.py</div>
         <table class="docs-table">
           <tr><th>Command</th><th>What it does</th></tr>
           <tr><td>balance</td><td>Show your TMPL balance and full wallet address</td></tr>
+          <!-- ADDED: chain command -->
+          <tr><td>chain</td><td>Chain height, tip hash, and recent confirmed blocks</td></tr>
           <tr><td>peers</td><td>List online nodes currently connected to you</td></tr>
           <tr><td>send</td><td>Send TMPL interactively (select peer from list)</td></tr>
           <tr><td>history</td><td>Your last rewards and transactions</td></tr>
@@ -1213,8 +1217,9 @@ python3 timpal.py send &lt;address&gt; &lt;amount&gt;</div>
 
       <div class="docs-section" id="doc-how">
         <div class="docs-h2">How it Works</div>
-        <p class="docs-p">TIMPAL is a distributed ledger protocol. Every node holds a complete copy of all transactions and rewards. There are no blocks, no miners, and no proof-of-work.</p>
-        <p class="docs-p">When you send TMPL, your node signs the transaction with your private key and broadcasts it to all connected peers. Every peer verifies your balance and signature before accepting it. The transaction confirms in under a second.</p>
+        <!-- CHANGED: updated to describe chain-anchored ledger, removed "no blocks" claim -->
+        <p class="docs-p">TIMPAL is a chain-anchored distributed ledger protocol. Every node holds a complete copy of all transactions and blocks. There is no proof-of-work and no mining. Each reward is a block carrying a cryptographic link to the previous one, anchoring the entire history to a single deterministic chain.</p>
+        <p class="docs-p">When you send TMPL, your node signs the transaction with your private key and broadcasts it to all connected peers. Every peer verifies your balance and signature before accepting it. The transaction confirms within seconds.</p>
         <p class="docs-p">Double-spend prevention works by checking your full balance history before accepting any transaction. The first transaction seen by the network wins.</p>
       </div>
 
@@ -1242,8 +1247,9 @@ winner = min(verified_nodes, key=lambda n: abs(ticket_int - target_int))</div>
 
       <div class="docs-section" id="doc-ledger">
         <div class="docs-h2">Ledger</div>
-        <p class="docs-p">The ledger is an append-only record of every transaction and reward ever. Your local copy is stored at <span class="inline-code">~/.timpal_ledger.json</span>.</p>
-        <p class="docs-p">When two nodes that were disconnected reconnect, their ledgers merge automatically. Conflict resolution is deterministic: for rewards, the first valid reward received for a slot is final — all honest nodes independently compute the same winner, so the first arrival is always correct. For transactions, the first one seen with a valid balance wins.</p>
+        <p class="docs-p">The ledger is a chain of blocks — one per winning slot — stored locally at <span class="inline-code">~/.timpal_ledger.json</span>. Each block carries a cryptographic link to the previous one, forming a single tamper-evident history.</p>
+        <!-- CHANGED: replaced first-writer-wins description with reorg / fork choice description -->
+        <p class="docs-p">When two nodes that were disconnected reconnect, their chains are compared and the longer valid chain wins — Nakamoto-style fork resolution without proof-of-work. On equal length, the chain with the lower tip hash wins, a deterministic rule that produces identical results on every node regardless of which chain arrived first. Blocks confirmed at least 6 slots deep (~30 seconds) are final. After any chain reorganization, transactions that are no longer funded by surviving block rewards are automatically removed.</p>
         <p class="docs-p">After every merge, the total minted supply is recalculated from scratch — never trusted from incremental additions. This prevents floating point drift at any scale.</p>
       </div>
 
@@ -1267,6 +1273,8 @@ winner = min(verified_nodes, key=lambda n: abs(ticket_int - target_int))</div>
           <tr><td>Round Interval</td><td>Every 5 seconds</td></tr>
           <tr><td>Distribution Period</td><td>37.5 years</td></tr>
           <tr><td>Eligible Nodes Per Slot</td><td>~10 (scales with network size)</td></tr>
+          <!-- ADDED: Confirmation Depth row -->
+          <tr><td>Confirmation Depth</td><td>6 slots (~30 seconds)</td></tr>
           <tr><td>Transaction Fee (Era 1)</td><td>Free</td></tr>
           <tr><td>Transaction Fee (Era 2)</td><td>0.0005 TMPL</td></tr>
           <tr><td>Pre-mine</td><td>None</td></tr>

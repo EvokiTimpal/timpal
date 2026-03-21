@@ -204,7 +204,7 @@ Every node periodically pushes its ledger data to the explorer API at timpal.org
 | Reward Per Round (Era 1) | 1.0575 TMPL |
 | Round Interval | Every 5 seconds |
 | Distribution Period | 37.5 years |
-| Eligible Nodes Per Slot | ~10 (scales with network size) |
+| Eligible Nodes Per Slot | ~10 (fixed target, regardless of network size) |
 | Transaction Fee (Era 1) | 0.0005 TMPL → slot winner |
 | Transaction Fee (Era 2) | 0.0005 TMPL → slot winner |
 | Checkpoint Interval | Every 1,000 slots (~83 minutes) |

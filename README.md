@@ -64,7 +64,7 @@ Your node starts, creates a quantum-resistant wallet, prompts you to set a passw
 | Reward per round | 1.0575 TMPL |
 | Round interval | 5 seconds |
 | Distribution period | 37.5 years |
-| Eligible nodes per slot | ~10 (scales automatically with network size) |
+| Eligible nodes per slot | ~10 (fixed target, regardless of network size) |
 | Confirmation depth | 6 slots (~30 seconds) |
 | Checkpoint interval | Every 1,000 slots (~83 minutes) |
 | Transaction fee | 0.0005 TMPL → slot winner (all eras) |

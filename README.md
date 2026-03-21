@@ -46,6 +46,7 @@ Your node starts, creates a quantum-resistant wallet, prompts you to set a passw
 - **Quantum-resistant cryptography** — Dilithium3, NIST 2024 post-quantum standard.
 - **Encrypted wallet** — Private key encrypted with AES-256-GCM and a password you set. Never stored in plaintext.
 - **~30-second finality** — Blocks confirmed after 6 slots. Transactions are final and irreversible once confirmed.
+- **Checkpoints every ~83 minutes** — Every 1,000 slots (~83 min), all nodes independently create a checkpoint. Prunes raw history while preserving all balances. Keeps the ledger lightweight forever.
 - **Eligibility-gated VRF lottery** — Every 5 seconds, one node wins 1.0575 TMPL. Only ~10 nodes are randomly eligible per slot regardless of how large the network grows, keeping participation fair and efficient at any scale. The winner is selected by a commit-reveal scheme — provably fair, no node has a permanent advantage.
 - **Collective target** — The winning ticket is the one closest to a target that cannot be known until all reveals are in. No node can predict or cherry-pick the outcome.
 - **Fork resolution** — Longest valid chain wins. Equal-length forks resolve deterministically by comparing tip hashes. All nodes converge to the same chain regardless of arrival order.
@@ -65,9 +66,8 @@ Your node starts, creates a quantum-resistant wallet, prompts you to set a passw
 | Distribution period | 37.5 years |
 | Eligible nodes per slot | ~10 (scales automatically with network size) |
 | Confirmation depth | 6 slots (~30 seconds) |
-| Transaction fee | Free (first 37.5 years) |
-| Transaction fee (after 37.5 years) | 0.0005 TMPL |
-| Fee recipient | All nodes that submitted a VRF commit for the slot (split equally) |
+| Checkpoint interval | Every 1,000 slots (~83 minutes) |
+| Transaction fee | 0.0005 TMPL → slot winner (all eras) |
 | Pre-mine | None |
 | Insider allocation | None |
 

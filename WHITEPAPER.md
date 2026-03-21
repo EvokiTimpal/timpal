@@ -2,7 +2,7 @@
 
 A Quantum-Resistant Peer-to-Peer Payment Protocol
 
-March 2026 — v3.0
+March 2026 — v3.1
 
 ---
 
@@ -10,13 +10,13 @@ March 2026 — v3.0
 
 TIMPAL is a peer-to-peer payment protocol designed to function without banks, payment processors, or centralized infrastructure. It uses quantum-resistant Dilithium3 cryptography, a chain-anchored distributed ledger, an eligibility-gated commit-reveal VRF lottery, and a two-era economic model to create a fair, decentralized monetary system with a fixed supply of 250 million TMPL distributed over 37.5 years.
 
-The protocol enforces one node per physical device, preventing Sybil attacks and ensuring that participation in the reward system remains fair regardless of computational resources. Transactions are free and confirm within seconds. No pre-mine. No insider allocation. No central authority.
+The protocol enforces one node per physical device, preventing Sybil attacks and ensuring that participation in the reward system remains fair regardless of computational resources. Every transaction costs 0.0005 TMPL, paid to the slot winner, from genesis. No pre-mine. No insider allocation. No central authority.
 
 ---
 
 ## 1. The Problem
 
-The global financial system excludes billions of people. A person in Manila, Nairobi, or Caracas with a smartphone has no reliable access to the basic tools of financial participation: the ability to send value to another person instantly, for free, without asking permission.
+The global financial system excludes billions of people. A person in Manila, Nairobi, or Caracas with a smartphone has no reliable access to the basic tools of financial participation: the ability to send value to another person instantly, without asking permission.
 
 Existing solutions fail in predictable ways:
 
@@ -31,7 +31,7 @@ TIMPAL is built to work when everything else stops working.
 
 ## 2. The Solution
 
-TIMPAL provides a simple protocol: run the software, earn rewards, send TMPL to anyone on the network instantly and for free. No registration. No bank account. No hardware beyond the device you already own.
+TIMPAL provides a simple protocol: run the software, earn rewards, send TMPL to anyone on the network instantly. No registration. No bank account. No hardware beyond the device you already own.
 
 The protocol runs on Mac, Windows, and Linux computers running Python 3.8 or newer.
 
@@ -55,7 +55,7 @@ The chain gives the protocol global ordering and partition recovery. When two no
 
 Blocks at least six slots deep are considered confirmed (~30 seconds). This is the protocol's finality depth — a transaction buried under six blocks cannot be reversed under normal network conditions.
 
-Double-spend prevention is enforced by checking the sender's balance against the full chain before accepting any transaction. Every two weeks the network automatically creates a checkpoint — a cryptographically verified snapshot of all balances — and prunes the raw history before it. Nodes only need to store data since the last checkpoint, keeping the ledger lightweight forever.
+Double-spend prevention is enforced by checking the sender's balance against the full chain before accepting any transaction. Every ~83 minutes the network automatically creates a checkpoint — a cryptographically verified snapshot of all balances — and prunes the raw history before it. Nodes only need to store data since the last checkpoint, keeping the ledger lightweight forever.
 
 ### 3.2 Quantum-Resistant Cryptography
 
@@ -155,9 +155,9 @@ Each device is limited to 60 transactions per minute. This prevents spam and flo
 
 ### 3.10 Ledger Checkpoint System
 
-Without checkpointing, the ledger would grow to approximately 118GB over 37.5 years, making it impractical for nodes in regions with limited storage or bandwidth.
+Without checkpointing, the ledger would grow impractically large over 37.5 years, making it difficult for nodes in regions with limited storage or bandwidth.
 
-Every 241,920 slots (approximately two weeks), every node independently creates a checkpoint. The checkpoint records the balance of every address at that moment, the total supply minted, the SHA-256 hash of the chain tip at the time of pruning, and cryptographic hashes of all pruned rewards and transactions. The chain tip hash is stored so that blocks produced after the checkpoint can be correctly linked — a block's `prev_hash` must match the stored tip even though the block it references has been pruned.
+Every 1,000 slots (approximately 83 minutes), every node independently creates a checkpoint. The checkpoint records the balance of every address at that moment, the total supply minted, the SHA-256 hash of the chain tip at the time of pruning, and cryptographic hashes of all pruned rewards and transactions. The chain tip hash is stored so that blocks produced after the checkpoint can be correctly linked — a block's `prev_hash` must match the stored tip even though the block it references has been pruned.
 
 A 120-slot buffer (10 minutes) is applied before pruning, giving late-arriving data time to propagate across the network before being permanently removed. Checkpoints are gossiped to peers automatically. A new node joining the network receives the latest checkpoint first, then only the blocks since that checkpoint — never the full history.
 
@@ -181,7 +181,7 @@ Every node periodically pushes its ledger data to the explorer API at timpal.org
 
 **Era 1 — Distribution (Years 0 to 37.5)**
 
-- All transactions are free
+- Every transaction costs 0.0005 TMPL, paid to the slot winner
 - Nodes earn through the eligibility-gated VRF lottery: 1.0575 TMPL every 5 seconds
 - Total of 250,000,000 TMPL minted over 37.5 years
 - No pre-mine, no insider allocation, no founder rewards
@@ -190,7 +190,7 @@ Every node periodically pushes its ledger data to the explorer API at timpal.org
 
 - No new TMPL can ever be created — supply is fixed at 250,000,000
 - Every transaction carries a fee of 0.0005 TMPL
-- The fee for each 5-second slot is collected and split equally among all nodes that submitted a VRF commit for that slot — nodes that were provably online and participating at that moment. Routing all fees to a single winner would create a centralizing force. Splitting among all active participants keeps the reward structure flat and fair regardless of network size. This mechanism uses the existing commit registry infrastructure with zero additional overhead.
+- The fee for each 5-second slot goes to the slot winner — the node that won the VRF lottery for that slot and built the block. This is consistent across both eras: the slot winner takes all fees for that slot.
 - The protocol is self-sustaining forever with no inflation
 
 ---
@@ -205,9 +205,9 @@ Every node periodically pushes its ledger data to the explorer API at timpal.org
 | Round Interval | Every 5 seconds |
 | Distribution Period | 37.5 years |
 | Eligible Nodes Per Slot | ~10 (scales with network size) |
-| Transaction Fee (Era 1) | Free |
-| Transaction Fee (Era 2) | 0.0005 TMPL |
-| Fee Recipient | All nodes that submitted a VRF commit for the slot (split equally) |
+| Transaction Fee (Era 1) | 0.0005 TMPL → slot winner |
+| Transaction Fee (Era 2) | 0.0005 TMPL → slot winner |
+| Checkpoint Interval | Every 1,000 slots (~83 minutes) |
 | Pre-mine | None |
 | Insider Allocation | None |
 | Confirmation Depth | 6 slots (~30 seconds) |
@@ -249,7 +249,7 @@ The collective target is the SHA256 of all tickets sorted and joined. It cannot 
 
 ### 6.6 Chain Integrity
 
-Every block's `prev_hash` must equal the SHA-256 of the previous block's canonical serialization. Canonical serialization uses `json.dumps(block, sort_keys=True, separators=(",",":"))` — deterministic across all nodes regardless of platform or Python version. Integer timestamps are used throughout to eliminate floating-point precision divergence.
+Every block's `prev_hash` must equal the SHA-256 of the previous block's canonical serialization. Canonical serialization uses `json.dumps(block, sort_keys=True, separators=(",",":"))` — deterministic across all nodes regardless of platform or Python version. Integer arithmetic is used throughout to eliminate floating-point precision divergence.
 
 Any block with an incorrect `prev_hash` is rejected. An attacker cannot insert or reorder blocks without recomputing every subsequent hash in the chain, which requires forging all VRF proofs — computationally infeasible.
 
@@ -277,14 +277,6 @@ It cannot:
 
 Community-operated bootstrap servers reduce the impact of any single server failing or misbehaving. The more servers, the more resilient the network.
 
-### 6.10 Era 2 Fee Distribution
-
-In Era 2, fee distribution is designed to resist centralization. Routing all transaction fees to the slot winner would mean one node captures all fee income every 5 seconds — a structural advantage for well-connected or high-uptime nodes that compounds over time.
-
-Instead, fees collected in each slot are split equally among all nodes that submitted a VRF commit for that slot. A VRF commit is cryptographic proof that a node was online and participating — it cannot be faked or submitted retroactively. The commit registry already exists for the lottery and requires no additional infrastructure.
-
-The result: fee income scales with uptime, not luck. Any node running continuously earns a consistent share of network fees proportional to its participation, with no single node able to dominate.
-
 ---
 
 ## 7. Decentralization
@@ -299,9 +291,9 @@ Community bootstrap servers, community tools, and community applications are all
 
 ## 8. Conclusion
 
-TIMPAL provides what the global financial system has failed to provide: a way for any person, anywhere, to hold and send value — instantly, for free, without asking permission.
+TIMPAL provides what the global financial system has failed to provide: a way for any person, anywhere, to hold and send value — without asking permission.
 
-The eligibility-gated lottery ensures the reward system remains fair and efficient whether the network has 10 nodes or 10 million. The collective target prevents any node from predicting or manipulating the outcome. The reveal obligation closes the selective-reveal attack. The chain spine anchors all rewards to a single, deterministic history. Nakamoto-style fork resolution with deterministic tie-breaking guarantees global convergence under any network partition. The two-era model ensures the network is self-sustaining forever — first through the lottery, then through transaction fees.
+The eligibility-gated lottery ensures the reward system remains fair and efficient whether the network has 10 nodes or 10 million. The collective target prevents any node from predicting or manipulating the outcome. The reveal obligation closes the selective-reveal attack. The chain spine anchors all rewards to a single, deterministic history. Nakamoto-style fork resolution with deterministic tie-breaking guarantees global convergence under any network partition. The two-era model ensures the network is self-sustaining forever — first through the lottery and fees, then through fees alone.
 
 ---
 

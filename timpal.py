@@ -14,7 +14,7 @@ v3.1 changes over v3.0:
     Deterministic across all nodes — no runtime variation possible.
 
   CHANGE 3 — Transaction fees (Option B: fees go to slot winner)
-    MIN_TX_FEE = 0 at genesis. Fee infrastructure in place; raise when spam appears.
+    MIN_TX_FEE = 50_000 (0.0005 TMPL) from genesis — applies in all eras.
     Sender pays amount + fee. Winner of the slot collects all pending tx fees
     for that slot in addition to REWARD_PER_ROUND.
     Fees are redistribution — they do NOT increase total_minted.
@@ -1474,7 +1474,7 @@ class Network:
 
             elif msg_type == "FEE_REWARDS":
                 # v3.1 Change 3: Option B — accept fee rewards in any era.
-                # At genesis MIN_TX_FEE=0 so this never fires; infrastructure ready.
+                # MIN_TX_FEE = 50_000 from genesis; fires whenever transactions exist in the slot.
                 ts  = msg.get("time_slot")
                 frs = msg.get("fee_rewards", [])[:10]
                 if not frs or ts is None:
@@ -1961,8 +1961,8 @@ class Node:
 
         Called from _claim_reward() after the block is accepted.
         Fees do NOT increase total_minted; they are redistribution.
-        At genesis MIN_TX_FEE=0 so slot_fees will always be 0 — this is a no-op
-        until MIN_TX_FEE is raised via protocol upgrade.
+        MIN_TX_FEE = 50_000 (0.0005 TMPL) from genesis — fees collected from
+        the first transaction. At low transaction volume this will be small.
         """
         with self.ledger._lock:
             slot_fees = sum(

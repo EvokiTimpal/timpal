@@ -96,6 +96,7 @@ SYNC_RATE_WINDOW    = 30   # seconds between SYNC_REQUESTs per IP
 # ── v3.0 chain constants ───────────────────────────────────────────────────────
 CONFIRMATION_DEPTH = 6      # blocks deep for finality (~30s at 5s slots)
 MAX_SLOT_GAP       = 20     # max allowed slot gap between consecutive chain blocks
+MAX_FUTURE_SLOTS   = 5      # max slots ahead of wall-clock a block can be
 GENESIS_PREV_HASH  = "0" * 64  # prev_hash of the very first block ever
 
 # ── Orphan pool limits (v3.1) ──────────────────────────────────────────────────
@@ -467,7 +468,11 @@ class Ledger:
             return False
 
         # 6. Slot gap check
-        if self.chain and tip_slot >= 0 and slot - tip_slot > MAX_SLOT_GAP:
+        current_slot = get_current_slot()
+        if slot > current_slot + MAX_FUTURE_SLOTS:
+            return False
+        syncing = current_slot - tip_slot > MAX_SLOT_GAP
+        if not syncing and tip_slot >= 0 and slot - tip_slot > MAX_SLOT_GAP:
             return False
 
         # 7. Supply cap (integer comparison — no floating point)
@@ -581,7 +586,11 @@ class Ledger:
                 slot = block.get("slot", -1)
                 if slot <= tip_slot:
                     continue
-                if self.chain and tip_slot >= 0 and slot - tip_slot > MAX_SLOT_GAP:
+                current_slot = get_current_slot()
+                if slot > current_slot + MAX_FUTURE_SLOTS:
+                    continue
+                syncing = current_slot - tip_slot > MAX_SLOT_GAP
+                if not syncing and tip_slot >= 0 and slot - tip_slot > MAX_SLOT_GAP:
                     continue
                 if self.total_minted + block.get("amount", 0) > TOTAL_SUPPLY:
                     continue
@@ -2160,8 +2169,7 @@ class Node:
 
         if time_slot <= tip_slot:
             return
-        if self.ledger.chain and tip_slot >= 0 and time_slot - tip_slot > MAX_SLOT_GAP:
-            return
+        # MAX_SLOT_GAP not checked here — self-production must never be blocked by local lag
 
         reward_id = f"reward:{time_slot}"
         block = {

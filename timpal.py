@@ -467,7 +467,7 @@ class Ledger:
             return False
 
         # 6. Slot gap check
-        if self.checkpoints and tip_slot >= 0 and slot - tip_slot > MAX_SLOT_GAP:
+        if self.chain and tip_slot >= 0 and slot - tip_slot > MAX_SLOT_GAP:
             return False
 
         # 7. Supply cap (integer comparison — no floating point)
@@ -581,7 +581,7 @@ class Ledger:
                 slot = block.get("slot", -1)
                 if slot <= tip_slot:
                     continue
-                if self.checkpoints and tip_slot >= 0 and slot - tip_slot > MAX_SLOT_GAP:
+                if self.chain and tip_slot >= 0 and slot - tip_slot > MAX_SLOT_GAP:
                     continue
                 if self.total_minted + block.get("amount", 0) > TOTAL_SUPPLY:
                     continue
@@ -2160,7 +2160,7 @@ class Node:
 
         if time_slot <= tip_slot:
             return
-        if self.ledger.checkpoints and tip_slot >= 0 and time_slot - tip_slot > MAX_SLOT_GAP:
+        if self.ledger.chain and tip_slot >= 0 and time_slot - tip_slot > MAX_SLOT_GAP:
             return
 
         reward_id = f"reward:{time_slot}"

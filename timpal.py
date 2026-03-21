@@ -926,7 +926,11 @@ class Ledger:
                 "timestamp":         int(time.time())
             }
 
-            self.chain        = c_keep
+            if c_keep:
+                self.chain = c_keep
+            else:
+                # Keep the tip block so new blocks can link to it
+                self.chain = [c_prune[-1]] if c_prune else []
             self.transactions = t_keep
             # FIX B: prune fee_rewards — safe because balances now include them
             self.fee_rewards  = fr_keep

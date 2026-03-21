@@ -1722,8 +1722,7 @@ class Network:
                     if their_tip_hash == tip_hash:
                         missing_blocks = []
                     else:
-                        missing_blocks = [b for b in self.ledger.chain
-                                          if b.get("slot", -1) > their_tip_slot][:5000]
+                        missing_blocks = list(self.ledger.chain)[:5000]
 
                     we_need_from_slot = their_tip_slot if their_tip_slot > tip_slot else None
 

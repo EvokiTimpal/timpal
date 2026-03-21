@@ -88,6 +88,7 @@ GENESIS_PREV_HASH  = "0" * 64  # prev_hash of the very first block ever
 # ── Orphan pool limits (v3.1) ──────────────────────────────────────────────────
 ORPHAN_POOL_MAX    = 100            # max blocks in orphan pool
 ORPHAN_TTL_SLOTS   = MAX_SLOT_GAP * 2  # orphans older than this are dropped
+MAX_REORG_DEPTH    = 100            # max slots deep a reorg can anchor (soft finality)
 
 
 def _check_genesis_time():
@@ -563,6 +564,30 @@ class Ledger:
                 self.save()
             return changed
 
+    @staticmethod
+    def _chain_weight(blocks: list) -> int:
+        """Compute chain weight using integer arithmetic only.
+
+        Each block contributes +1. Slot gaps > 1 subtract (gap - 1) per missing
+        slot, penalising sparse chains without introducing floats.
+        Result is clamped to 0 — weight is never negative.
+
+        This replaces pure block-count comparison in fork choice, eliminating
+        the sparse-chain attack: a 6-block chain spanning slots 1→1000 loses
+        to a 10-block dense chain spanning slots 1→10.
+        """
+        weight   = 0
+        prev_slot = None
+        for b in blocks:
+            slot = b.get("slot", 0)
+            if prev_slot is not None:
+                gap = slot - prev_slot
+                if gap > 1:
+                    weight -= (gap - 1)   # integer penalty — no floats ever
+            weight   += 1
+            prev_slot = slot
+        return max(weight, 0)
+
     def _attempt_reorg(self, valid_blocks: list) -> bool:
         """Try to replace current chain tail with a longer (or tie-broken) alternative.
 
@@ -607,7 +632,7 @@ class Ledger:
         if fork_anchor_chain_idx == -1 and self.checkpoints:
             return False
 
-        fork_blocks    = valid_blocks[fork_start_in_input:]
+        fork_blocks     = valid_blocks[fork_start_in_input:]
         our_tail_length = len(self.chain) - (fork_anchor_chain_idx + 1)
 
         if fork_anchor_chain_idx == -1:
@@ -617,6 +642,15 @@ class Ledger:
             anchor_block = self.chain[fork_anchor_chain_idx]
             anchor_hash  = compute_block_hash(anchor_block)
             anchor_slot  = anchor_block.get("slot", -1)
+
+        # Soft finality: reject reorgs that anchor too far behind our tip.
+        # Prevents long-range reorg attacks and deep history rewrites.
+        # Does NOT block partition recovery — MAX_REORG_DEPTH (100 slots = ~8 min)
+        # is well above any realistic honest fork length.
+        if self.chain:
+            tip_slot = self.chain[-1].get("slot", 0)
+            if tip_slot - anchor_slot > MAX_REORG_DEPTH:
+                return False
 
         # Validate fork blocks sequentially.
         # FIX #3: MAX_SLOT_GAP intentionally NOT checked during reorg.
@@ -651,12 +685,24 @@ class Ledger:
         if not validated:
             return False
 
-        alt_length = len(validated)
-
-        if alt_length < our_tail_length:
+        # Reorg depth limit: cap how many blocks we can replace in one reorg.
+        # Prevents CPU collapse from reorg storms at scale.
+        if len(validated) > MAX_REORG_DEPTH:
             return False
 
-        if alt_length == our_tail_length:
+        # Fork choice: chain weight beats block count.
+        # Weight = blocks - gap penalties (integer only — no floats ever).
+        # A dense 10-block chain always beats a sparse 11-block chain with
+        # large slot gaps, closing the sparse-chain attack vector.
+        our_tail  = self.chain[fork_anchor_chain_idx + 1:]
+        alt_weight = Ledger._chain_weight(validated)
+        our_weight = Ledger._chain_weight(our_tail)
+
+        if alt_weight < our_weight:
+            return False
+
+        if alt_weight == our_weight:
+            # Tie-break: lower tip hash wins. Deterministic, order-independent.
             our_tip = compute_block_hash(self.chain[-1]) if self.chain else GENESIS_PREV_HASH
             alt_tip = compute_block_hash(validated[-1])
             if alt_tip >= our_tip:

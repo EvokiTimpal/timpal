@@ -24,6 +24,19 @@ v3.1 changes over v3.0:
     (keyed by prev_hash) instead of being silently dropped.
     After any successful add_block, the pool is drained recursively.
     Max 100 orphans; TTL = MAX_SLOT_GAP * 2 slots.
+
+Post-audit fixes (v3.1.1):
+  FIX A — Wallet.sign typo corrected in class body (self.wallet → self).
+           Monkey-patch removed.
+  FIX B — create_checkpoint now includes fee_rewards in checkpoint balance
+           computation and prunes self.fee_rewards, eliminating the silent
+           never-prune invariant that would have caused unbounded memory growth.
+  FIX C — create_checkpoint validates checkpoint_slot % CHECKPOINT_INTERVAL == 0.
+  FIX D — apply_checkpoint prunes self.fee_rewards and verifies fee_rewards_hash
+           when present (backward-compatible with old checkpoints that lack it).
+  FIX E — _bootstrap_submit_commit fires done event on first COMMIT_ACK rather
+           than waiting for all servers, preventing commit-window exhaustion when
+           a second bootstrap server with variable latency is added post-launch.
 """
 
 import socket
@@ -222,7 +235,13 @@ class Ledger:
         return get_current_slot() - block_slot >= CONFIRMATION_DEPTH
 
     def get_balance(self, device_id: str) -> int:
-        """Return balance in units (int). Divide by UNIT for TMPL display."""
+        """Return balance in units (int). Divide by UNIT for TMPL display.
+
+        Invariant: checkpoint.balances already includes all fee_rewards that
+        were pruned (slots < checkpoint.prune_before). self.fee_rewards only
+        holds entries with time_slot >= prune_before. Together they cover the
+        full history with no gaps and no double-counting.
+        """
         with self._lock:
             balance = 0
             if self.checkpoints:
@@ -822,16 +841,29 @@ class Ledger:
 
         v3.1: all balances stored as int (units).
         v3.1 Change 2: checkpoint_slot must be a multiple of CHECKPOINT_INTERVAL.
+
+        FIX B/C: checkpoint_slot is validated as a multiple of CHECKPOINT_INTERVAL.
+        fee_rewards before prune_before are included in checkpoint balances and
+        then pruned from self.fee_rewards. This eliminates the silent never-prune
+        invariant and prevents unbounded memory/disk growth over the 37.5-year
+        Era 1 distribution period.
         """
+        # FIX C: enforce that checkpoint slot is on a protocol boundary
+        if checkpoint_slot % CHECKPOINT_INTERVAL != 0:
+            return False
+
         prune_before = checkpoint_slot - CHECKPOINT_BUFFER
         with self._lock:
             if any(c["slot"] == checkpoint_slot for c in self.checkpoints):
                 return False
 
-            c_prune = [b for b in self.chain if b.get("slot", prune_before) < prune_before]
-            c_keep  = [b for b in self.chain if b.get("slot", prune_before) >= prune_before]
-            t_prune = [t for t in self.transactions if (t.get("slot") or 0) < prune_before]
-            t_keep  = [t for t in self.transactions if (t.get("slot") or 0) >= prune_before]
+            c_prune  = [b  for b  in self.chain        if b.get("slot",      prune_before) < prune_before]
+            c_keep   = [b  for b  in self.chain        if b.get("slot",      prune_before) >= prune_before]
+            t_prune  = [t  for t  in self.transactions if (t.get("slot") or 0) < prune_before]
+            t_keep   = [t  for t  in self.transactions if (t.get("slot") or 0) >= prune_before]
+            # FIX B: split fee_rewards at the same boundary
+            fr_prune = [fr for fr in self.fee_rewards  if fr.get("time_slot", 0) < prune_before]
+            fr_keep  = [fr for fr in self.fee_rewards  if fr.get("time_slot", 0) >= prune_before]
 
             prev_bal = dict(self.checkpoints[-1]["balances"]) if self.checkpoints else {}
             addrs = set(prev_bal.keys())
@@ -843,6 +875,10 @@ class Ledger:
                 rid = t.get("recipient_id", "")
                 if sid: addrs.add(sid)
                 if rid: addrs.add(rid)
+            # FIX B: include fee_reward winners in address set
+            for fr in fr_prune:
+                wid = fr.get("winner_id", "")
+                if wid: addrs.add(wid)
 
             # All balances as int
             balances = {}
@@ -855,6 +891,9 @@ class Ledger:
                         bal -= t.get("fee", 0)
                 for b in c_prune:
                     if b.get("winner_id") == addr: bal += b.get("amount", 0)
+                # FIX B: bake pruned fee_rewards into checkpoint balances
+                for fr in fr_prune:
+                    if fr.get("winner_id") == addr: bal += fr.get("amount", 0)
                 balances[addr] = bal
 
             prev_spent   = list(self.checkpoints[-1].get("spent_tx_ids", [])) if self.checkpoints else []
@@ -872,27 +911,37 @@ class Ledger:
                 chain_tip_slot = -1
 
             cp = {
-                "slot":           checkpoint_slot,
-                "prune_before":   prune_before,
-                "balances":       balances,
-                "total_minted":   self.total_minted,
-                "kept_minted":    kept_minted,
-                "chain_hash":     Ledger._compute_hash(sorted(c_prune, key=lambda b: b.get("slot", 0))),
-                "txs_hash":       Ledger._compute_hash(sorted(t_prune, key=lambda t: t.get("timestamp", 0))),
-                "spent_tx_ids":   spent_tx_ids,
-                "chain_tip_hash": chain_tip_hash,
-                "chain_tip_slot": chain_tip_slot,
-                "timestamp":      int(time.time())
+                "slot":              checkpoint_slot,
+                "prune_before":      prune_before,
+                "balances":          balances,
+                "total_minted":      self.total_minted,
+                "kept_minted":       kept_minted,
+                "chain_hash":        Ledger._compute_hash(sorted(c_prune,  key=lambda b:  b.get("slot", 0))),
+                "txs_hash":          Ledger._compute_hash(sorted(t_prune,  key=lambda t:  t.get("timestamp", 0))),
+                # FIX B: record hash of pruned fee_rewards for apply_checkpoint verification
+                "fee_rewards_hash":  Ledger._compute_hash(sorted(fr_prune, key=lambda fr: fr.get("time_slot", 0))),
+                "spent_tx_ids":      spent_tx_ids,
+                "chain_tip_hash":    chain_tip_hash,
+                "chain_tip_slot":    chain_tip_slot,
+                "timestamp":         int(time.time())
             }
 
             self.chain        = c_keep
             self.transactions = t_keep
+            # FIX B: prune fee_rewards — safe because balances now include them
+            self.fee_rewards  = fr_keep
             self.checkpoints.append(cp)
             self._spent_tx_ids_set = set(spent_tx_ids)
             self.save()
             return True
 
     def apply_checkpoint(self, checkpoint: dict) -> bool:
+        """Apply a checkpoint received from a peer.
+
+        FIX D: prunes self.fee_rewards at the checkpoint boundary, and
+        verifies fee_rewards_hash when present (backward-compatible: old
+        checkpoints without this field skip the verification step).
+        """
         with self._lock:
             if self.checkpoints:
                 if checkpoint.get("slot", 0) <= self.checkpoints[-1]["slot"]:
@@ -908,8 +957,16 @@ class Ledger:
             if t_verify:
                 if Ledger._compute_hash(sorted(t_verify, key=lambda t: t.get("timestamp", 0))) != checkpoint.get("txs_hash", ""):
                     return False
-            self.chain        = [b for b in self.chain if b.get("slot", prune_before) >= prune_before]
-            self.transactions = [t for t in self.transactions if (t.get("slot") or 0) >= prune_before]
+            # FIX D: verify fee_rewards_hash when both sides have data for it
+            # (conditional so old checkpoints without the field still apply cleanly)
+            fr_verify = [fr for fr in self.fee_rewards if fr.get("time_slot", 0) < prune_before]
+            if fr_verify and checkpoint.get("fee_rewards_hash"):
+                if Ledger._compute_hash(sorted(fr_verify, key=lambda fr: fr.get("time_slot", 0))) != checkpoint.get("fee_rewards_hash", ""):
+                    return False
+            self.chain        = [b  for b  in self.chain        if b.get("slot",      prune_before) >= prune_before]
+            self.transactions = [t  for t  in self.transactions if (t.get("slot") or 0) >= prune_before]
+            # FIX D: prune fee_rewards at the same boundary
+            self.fee_rewards  = [fr for fr in self.fee_rewards  if fr.get("time_slot", 0) >= prune_before]
             self.checkpoints.append(checkpoint)
             self._spent_tx_ids_set = set(checkpoint.get("spent_tx_ids", []))
             self.total_minted = checkpoint.get("total_minted", 0)
@@ -984,7 +1041,8 @@ class Wallet:
         return self.public_key.hex()
 
     def sign(self, message: bytes) -> str:
-        return Dilithium3.sign(self.wallet.private_key, message).hex()
+        # FIX A: was self.wallet.private_key (NameError); corrected to self.private_key
+        return Dilithium3.sign(self.private_key, message).hex()
 
     @staticmethod
     def verify_signature(public_key_hex: str, message: bytes, signature_hex: str) -> bool:
@@ -992,12 +1050,6 @@ class Wallet:
             return Dilithium3.verify(bytes.fromhex(public_key_hex), message, bytes.fromhex(signature_hex))
         except Exception:
             return False
-
-
-# Fix typo in Wallet.sign (references self.wallet instead of self)
-def _wallet_sign(self, message: bytes) -> str:
-    return Dilithium3.sign(self.private_key, message).hex()
-Wallet.sign = _wallet_sign
 
 
 # ── Transaction ────────────────────────────────────────────────────────────────
@@ -1893,6 +1945,15 @@ class Node:
             threading.Thread(target=_send, args=(host, port), daemon=True).start()
 
     def _bootstrap_submit_commit(self, msg: dict) -> str:
+        """Submit commit to all bootstrap servers.
+
+        FIX E: done event fires on the FIRST COMMIT_ACK received rather than
+        waiting for all servers to respond. With multiple bootstrap servers at
+        different latencies, waiting for all could eat into the 2-second commit
+        window and cause missed commits. A single ACK is sufficient — if any
+        server accepted the commit, the lottery can proceed.
+        COMMIT_REJECTED still requires all results (or timeout) to be certain.
+        """
         results   = []
         lock      = threading.Lock()
         done      = threading.Event()
@@ -1919,6 +1980,11 @@ class Node:
                     self.network._network_size = ns
                 with lock:
                     results.append(data.get("type", "ERROR"))
+                    # FIX E: unblock as soon as we have a definitive answer.
+                    # COMMIT_ACK from any server → proceed immediately.
+                    # COMMIT_REJECTED → wait for all results to be sure.
+                    if data.get("type") == "COMMIT_ACK":
+                        done.set()
             except Exception:
                 with lock:
                     results.append("ERROR")
@@ -1926,7 +1992,7 @@ class Node:
                 with lock:
                     remaining[0] -= 1
                     if remaining[0] <= 0:
-                        done.set()
+                        done.set()   # all servers responded (or errored)
 
         if not servers:
             return "COMMIT_ACK"

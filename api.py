@@ -5,6 +5,8 @@ v3.1 changes:
     API converts to TMPL (float) at the display boundary by dividing by UNIT.
     All JSON responses carry TMPL values — index.html requires no changes.
   - total_minted comparison updated for integer arithmetic.
+  - FIX: chain_tip_hash now correctly stores the SHA-256 hash of the tip block
+    itself, not its prev_hash field.
 
 v3.0 changes (unchanged):
   - Nodes push "blocks" (chain blocks) instead of flat "rewards" list
@@ -59,6 +61,16 @@ _stats_cache_lock = threading.Lock()
 _post_rate      = {}
 _post_rate_lock = threading.Lock()
 POST_RATE_LIMIT = 5
+
+
+def _compute_block_hash(block: dict) -> str:
+    """SHA-256 of canonical block serialization — must match timpal.py exactly.
+    Uses sort_keys=True and no spaces, identical to canonical_block() in timpal.py.
+    Used to record the actual chain tip hash (not the tip's prev_hash field).
+    """
+    return hashlib.sha256(
+        json.dumps(block, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def _to_tmpl(units) -> float:
@@ -422,13 +434,16 @@ class Handler(BaseHTTPRequestHandler):
                 if incoming_minted > _ledger["total_minted"]:
                     _ledger["total_minted"] = incoming_minted
 
-                # Update chain height and tip from incoming data
+                # Update chain height and tip from incoming data.
+                # FIX: chain_tip_hash is the SHA-256 of the tip block itself,
+                # NOT the tip block's prev_hash field. Use _compute_block_hash()
+                # which matches canonical_block() in timpal.py exactly.
                 block_rewards = [b for b in _ledger["blocks"] if b.get("type") == "block_reward"]
                 if block_rewards:
                     tip_block = max(block_rewards, key=lambda b: b.get("slot", -1))
                     _ledger["chain_height"]   = len(block_rewards)
                     _ledger["chain_tip_slot"] = tip_block.get("slot", -1)
-                    _ledger["chain_tip_hash"] = tip_block.get("prev_hash", "0" * 64)
+                    _ledger["chain_tip_hash"] = _compute_block_hash(tip_block)
 
                 blocks_snap   = list(_ledger["blocks"])
                 txs_snap      = list(_ledger["transactions"])
@@ -459,5 +474,6 @@ if __name__ == "__main__":
     print("TIMPAL API v3.1 running on port 7781")
     print("Push authentication: Dilithium3 signature (no shared secret)")
     print("v3.1: UNIT=10^8 integer migration; amounts divided by UNIT at display boundary")
+    print("FIX: chain_tip_hash now correctly hashes the tip block (not its prev_hash)")
     server = ThreadingHTTPServer(("0.0.0.0", 7781), Handler)
     server.serve_forever()

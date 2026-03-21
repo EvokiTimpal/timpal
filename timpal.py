@@ -297,20 +297,25 @@ class Ledger:
 
     # ── Internal orphan pool helpers ───────────────────────────────────────────
 
-    def _store_orphan_locked(self, block: dict):
-        """Store block in orphan pool keyed by prev_hash. Assumes self._lock held."""
+    def _store_orphan_locked(self, block: dict) -> bool:
+        """Store block in orphan pool keyed by prev_hash. Assumes self._lock held.
+
+        Returns True if the orphan extends a known chain position — meaning its
+        prev_hash matches a block already in our chain or the checkpoint tip.
+        Callers use this to decide whether to trigger _attempt_reorg().
+        """
         current_slot = get_current_slot()
         block_slot   = block.get("slot", 0)
         # Drop blocks that are too stale to ever be useful
         if current_slot - block_slot > ORPHAN_TTL_SLOTS:
-            return
+            return False
         prev = block.get("prev_hash", "")
         bh   = compute_block_hash(block)
         if prev not in self._orphan_pool:
             self._orphan_pool[prev] = []
         # Dedup
         if any(compute_block_hash(b) == bh for b in self._orphan_pool[prev]):
-            return
+            return False
         self._orphan_pool[prev].append(block)
         # Enforce max pool size by evicting oldest block
         total = sum(len(v) for v in self._orphan_pool.values())
@@ -326,6 +331,14 @@ class Ledger:
                 self._orphan_pool[oldest_prev].pop(0)
                 if not self._orphan_pool[oldest_prev]:
                     del self._orphan_pool[oldest_prev]
+
+        # Guard: only signal reorg-worthy if prev_hash connects to our known chain
+        # or checkpoint tip. Random/unrelated orphans do not trigger a reorg attempt.
+        known_hashes = {compute_block_hash(b) for b in self.chain}
+        if self.checkpoints:
+            known_hashes.add(self.checkpoints[-1].get("chain_tip_hash", ""))
+        known_hashes.add(GENESIS_PREV_HASH)
+        return prev in known_hashes
 
     def _prune_stale_orphans_locked(self):
         """Remove orphans beyond their TTL. Assumes self._lock held."""
@@ -420,7 +433,14 @@ class Ledger:
         # 4. Chain linkage (v3.1: orphan pool on failure)
         tip_hash, tip_slot = self._get_tip()
         if block.get("prev_hash") != tip_hash:
-            self._store_orphan_locked(block)
+            extends_known = self._store_orphan_locked(block)
+            if extends_known:
+                # Orphan connects to a known chain position — evidence of a
+                # competing fork. Attempt reorg immediately rather than waiting
+                # for the next merge(). Guard prevents wasted work on random orphans.
+                candidates = list(self._orphan_pool.get(block.get("prev_hash", ""), []))
+                if candidates:
+                    self._attempt_reorg(candidates)
             return False
 
         # 5. Slot must be strictly greater than tip slot
@@ -589,12 +609,15 @@ class Ledger:
         return max(weight, 0)
 
     def _attempt_reorg(self, valid_blocks: list) -> bool:
-        """Try to replace current chain tail with a longer (or tie-broken) alternative.
+        """Try to replace current chain tail with a longer (or heavier) alternative.
 
-        Called from merge() while self._lock is already held.
+        Called from merge() while self._lock is already held, and also from
+        _add_block_locked() when an orphan connects to a known chain position.
 
         FIX #2: Reorgs that would anchor before the checkpoint boundary are rejected.
         FIX #3: MAX_SLOT_GAP is NOT applied during reorg validation (historical chains).
+        REORG HARDENING: chain weight (not length), soft finality, depth limit.
+        OBSERVABILITY: structured logs on every rejection and acceptance.
         """
         if not valid_blocks:
             return False
@@ -632,8 +655,7 @@ class Ledger:
         if fork_anchor_chain_idx == -1 and self.checkpoints:
             return False
 
-        fork_blocks     = valid_blocks[fork_start_in_input:]
-        our_tail_length = len(self.chain) - (fork_anchor_chain_idx + 1)
+        fork_blocks = valid_blocks[fork_start_in_input:]
 
         if fork_anchor_chain_idx == -1:
             anchor_hash = checkpoint_tip_hash
@@ -645,18 +667,22 @@ class Ledger:
 
         # Soft finality: reject reorgs that anchor too far behind our tip.
         # Prevents long-range reorg attacks and deep history rewrites.
-        # Does NOT block partition recovery — MAX_REORG_DEPTH (100 slots = ~8 min)
+        # Does NOT block partition recovery — MAX_REORG_DEPTH (100 slots ~8 min)
         # is well above any realistic honest fork length.
         if self.chain:
-            tip_slot = self.chain[-1].get("slot", 0)
-            if tip_slot - anchor_slot > MAX_REORG_DEPTH:
+            tip_slot_now = self.chain[-1].get("slot", 0)
+            if tip_slot_now - anchor_slot > MAX_REORG_DEPTH:
+                print(f"\n  [reorg_rejected] reason=soft_finality"
+                      f" anchor_slot={anchor_slot} tip_slot={tip_slot_now}"
+                      f" depth={tip_slot_now - anchor_slot} limit={MAX_REORG_DEPTH}\n  > ",
+                      end="", flush=True)
                 return False
 
         # Validate fork blocks sequentially.
         # FIX #3: MAX_SLOT_GAP intentionally NOT checked during reorg.
-        validated  = []
-        prev_hash  = anchor_hash
-        prev_slot  = anchor_slot
+        validated = []
+        prev_hash = anchor_hash
+        prev_slot = anchor_slot
 
         for block in fork_blocks:
             pub  = block.get("vrf_public_key", "")
@@ -688,17 +714,24 @@ class Ledger:
         # Reorg depth limit: cap how many blocks we can replace in one reorg.
         # Prevents CPU collapse from reorg storms at scale.
         if len(validated) > MAX_REORG_DEPTH:
+            print(f"\n  [reorg_rejected] reason=depth_limit"
+                  f" alt_blocks={len(validated)} limit={MAX_REORG_DEPTH}\n  > ",
+                  end="", flush=True)
             return False
 
         # Fork choice: chain weight beats block count.
         # Weight = blocks - gap penalties (integer only — no floats ever).
         # A dense 10-block chain always beats a sparse 11-block chain with
         # large slot gaps, closing the sparse-chain attack vector.
-        our_tail  = self.chain[fork_anchor_chain_idx + 1:]
+        our_tail   = self.chain[fork_anchor_chain_idx + 1:]
         alt_weight = Ledger._chain_weight(validated)
         our_weight = Ledger._chain_weight(our_tail)
 
         if alt_weight < our_weight:
+            print(f"\n  [reorg_rejected] reason=insufficient_weight"
+                  f" alt_weight={alt_weight} our_weight={our_weight}"
+                  f" alt_blocks={len(validated)} anchor_slot={anchor_slot}\n  > ",
+                  end="", flush=True)
             return False
 
         if alt_weight == our_weight:
@@ -706,6 +739,9 @@ class Ledger:
             our_tip = compute_block_hash(self.chain[-1]) if self.chain else GENESIS_PREV_HASH
             alt_tip = compute_block_hash(validated[-1])
             if alt_tip >= our_tip:
+                print(f"\n  [reorg_rejected] reason=tiebreak_hash_lost"
+                      f" alt_weight={alt_weight} our_weight={our_weight}\n  > ",
+                      end="", flush=True)
                 return False
 
         # Supply cap check on the reconstructed chain (integer arithmetic)
@@ -726,9 +762,15 @@ class Ledger:
         self.recalculate_totals()
         self._prune_invalid_transactions()
 
-        tip_slot = validated[-1].get("slot", "?")
-        print(f"\n  [reorg] Switched to longer chain at slot {tip_slot} "
-              f"(depth {alt_length} vs {our_tail_length})\n  > ", end="", flush=True)
+        tip_slot   = validated[-1].get("slot", "?")
+        fork_depth = (tip_slot - anchor_slot) if isinstance(tip_slot, int) else "?"
+        print(f"\n  [reorg] switched chain"
+              f" | anchor_slot={anchor_slot}"
+              f" | tip_slot={tip_slot}"
+              f" | fork_depth={fork_depth}"
+              f" | alt_weight={alt_weight}"
+              f" | old_weight={our_weight}"
+              f" | alt_blocks={len(validated)}\n  > ", end="", flush=True)
         return True
 
     def _prune_invalid_transactions(self):
@@ -1563,6 +1605,12 @@ class Network:
                 if gid:
                     self.on_block(block)
                     threading.Thread(target=self.broadcast, args=(msg, None), daemon=True).start()
+                    # Fix #4: if this block doesn't extend our tip, it's a competing
+                    # fork — trigger immediate sync rather than waiting up to 120s.
+                    with self.ledger._lock:
+                        tip_hash, _ = self.ledger._get_tip()
+                    if block.get("prev_hash") != tip_hash:
+                        threading.Thread(target=self._sync_ledger, daemon=True).start()
 
             elif msg_type == "SYNC_PUSH":
                 with self._peers_lock:
@@ -2077,6 +2125,10 @@ class Node:
         })
 
         self.network.broadcast({"type": "BLOCK", "block": block})
+
+        # Fix #4: immediately sync after producing a block so peers that built
+        # a competing fork converge to our chain as fast as possible.
+        threading.Thread(target=self.network._sync_ledger, daemon=True).start()
 
         # v3.1 Change 3: collect fees for this slot and award to winner
         self._collect_slot_fees(time_slot, winner["winner_id"])

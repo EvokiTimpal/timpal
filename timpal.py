@@ -1458,7 +1458,8 @@ class Network:
                             can_verify = bool(
                                 [b for b in self.ledger.chain if b.get("slot", prune_before) < prune_before] or
                                 [t for t in self.ledger.transactions if (t.get("slot") or 0) < prune_before])
-                        if can_verify:
+                        ledger_empty = not self.ledger.chain and not self.ledger.checkpoints
+                        if ledger_empty or can_verify:
                             self.ledger.apply_checkpoint(cp)
                         elif self._confirm_checkpoint_with_peers(cp, exclude_ip=peer["ip"]):
                             self.ledger.apply_checkpoint(cp)
@@ -1700,7 +1701,8 @@ class Network:
                             can_verify = bool(
                                 [b for b in self.ledger.chain if b.get("slot", pb) < pb] or
                                 [t for t in self.ledger.transactions if (t.get("slot") or 0) < pb])
-                        if can_verify:
+                        ledger_empty = not self.ledger.chain and not self.ledger.checkpoints
+                        if ledger_empty or can_verify:
                             applied = self.ledger.apply_checkpoint(cp)
                         elif self._confirm_checkpoint_with_peers(cp, exclude_ip=sender_ip):
                             applied = self.ledger.apply_checkpoint(cp)

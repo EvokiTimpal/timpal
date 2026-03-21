@@ -688,7 +688,7 @@ class Ledger:
         # Prevents long-range reorg attacks and deep history rewrites.
         # Does NOT block partition recovery — MAX_REORG_DEPTH (100 slots ~8 min)
         # is well above any realistic honest fork length.
-        if self.chain:
+        if self.chain and self.checkpoints:
             tip_slot_now = self.chain[-1].get("slot", 0)
             if tip_slot_now - anchor_slot > MAX_REORG_DEPTH:
                 print(f"\n  [reorg_rejected] reason=soft_finality"
@@ -732,7 +732,7 @@ class Ledger:
 
         # Reorg depth limit: cap how many blocks we can replace in one reorg.
         # Prevents CPU collapse from reorg storms at scale.
-        if len(validated) > MAX_REORG_DEPTH:
+        if self.checkpoints and len(validated) > MAX_REORG_DEPTH:
             print(f"\n  [reorg_rejected] reason=depth_limit"
                   f" alt_blocks={len(validated)} limit={MAX_REORG_DEPTH}\n  > ",
                   end="", flush=True)

@@ -2157,7 +2157,7 @@ class Node:
 
         if time_slot <= tip_slot:
             return
-        if time_slot - tip_slot > MAX_SLOT_GAP:
+        if tip_slot >= 0 and time_slot - tip_slot > MAX_SLOT_GAP:
             return
 
         reward_id = f"reward:{time_slot}"

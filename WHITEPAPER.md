@@ -51,7 +51,7 @@ No configuration. No account creation. No KYC.
 
 TIMPAL uses a chain-anchored distributed ledger. Every node holds a complete copy. There is no proof-of-work and no mining. Each five-second time slot produces exactly one block — the reward won by the VRF lottery winner for that slot. Every block carries a `prev_hash` field: the SHA-256 hash of the previous block's canonical serialization. This links every block to a single unambiguous history.
 
-The chain gives the protocol global ordering and partition recovery. When two nodes that were disconnected reconnect, their chains are compared. The longest valid chain wins. On equal length, the chain with the lower tip hash wins — a deterministic rule that produces identical outcomes on every node regardless of which chain arrived first.
+The chain gives the protocol global ordering and partition recovery. When two nodes that were disconnected reconnect, their chains are compared. The heavier chain wins — weight is computed as the number of blocks minus a penalty for slot gaps, so a dense chain always beats a sparse one of equal or greater block count. On equal weight, the chain with the lower tip hash wins — a deterministic rule that produces identical outcomes on every node regardless of which chain arrived first.
 
 Blocks at least six slots deep are considered confirmed (~30 seconds). This is the protocol's finality depth — a transaction buried under six blocks cannot be reversed under normal network conditions.
 
@@ -132,7 +132,7 @@ An OS-level file lock prevents more than one node running per device. Any second
 
 ### 3.8 Fork Choice and Chain Convergence
 
-v3.0 implements full Nakamoto-style fork resolution without proof-of-work.
+v3.1 implements full fork resolution using chain weight — not block count.
 
 **Normal extension.** When a node receives a new block, it validates the VRF proof, checks that `prev_hash` matches the current chain tip, and appends the block. This is the common case.
 
@@ -141,9 +141,15 @@ v3.0 implements full Nakamoto-style fork resolution without proof-of-work.
 1. Build a hash-to-index map of the current chain.
 2. Find the block in the incoming set whose `prev_hash` connects to the local chain or checkpoint tip.
 3. Walk forward from that fork point, validating every block in the incoming set sequentially (VRF proof, chain linkage, slot ordering, supply cap).
-4. Compare the length of the incoming tail to the local tail from the fork point.
+4. Compare the **weight** of the incoming tail to the local tail from the fork point.
 
-**Fork choice rule.** The longer chain wins. On equal length, the chain whose tip hash is numerically lower wins. This tie-breaking rule is deterministic and order-independent — every node in the network arrives at the same decision regardless of which chain it saw first.
+**Fork choice rule.** The heavier chain wins. Weight is computed as the number of blocks minus a penalty for slot gaps greater than 1 — a dense chain always beats a sparse chain, closing the sparse-chain attack vector. On equal weight, the chain whose tip hash is numerically lower wins. This tie-breaking rule is deterministic and order-independent — every node in the network arrives at the same decision regardless of which chain it saw first.
+
+```
+weight = blocks - sum(gap - 1 for each gap > 1 between consecutive slots)
+```
+
+**Soft finality and depth limit.** Reorgs that would anchor more than 100 slots behind the current tip are rejected outright — this prevents long-range reorg attacks while allowing honest partition recovery. A reorg replacing more than 100 blocks in a single operation is also rejected to prevent CPU exhaustion at scale.
 
 **Post-reorg state cleanup.** After switching chains, the protocol recomputes `total_minted` from the new chain and removes any transactions that are no longer funded by surviving block rewards. This prevents phantom balances.
 
@@ -157,7 +163,7 @@ Each device is limited to 60 transactions per minute. This prevents spam and flo
 
 Without checkpointing, the ledger would grow impractically large over 37.5 years, making it difficult for nodes in regions with limited storage or bandwidth.
 
-Every 1,000 slots (approximately 83 minutes), every node independently creates a checkpoint. The checkpoint records the balance of every address at that moment, the total supply minted, the SHA-256 hash of the chain tip at the time of pruning, and cryptographic hashes of all pruned rewards and transactions. The chain tip hash is stored so that blocks produced after the checkpoint can be correctly linked — a block's `prev_hash` must match the stored tip even though the block it references has been pruned.
+Every 1,000 slots (approximately 83 minutes), every node independently creates a checkpoint. The checkpoint records the balance of every address at that moment — including all fee rewards earned up to that point — the total supply minted, the SHA-256 hash of the chain tip at the time of pruning, and cryptographic hashes of all pruned rewards, transactions, and fee rewards. The chain tip hash is stored so that blocks produced after the checkpoint can be correctly linked — a block's `prev_hash` must match the stored tip even though the block it references has been pruned.
 
 A 120-slot buffer (10 minutes) is applied before pruning, giving late-arriving data time to propagate across the network before being permanently removed. Checkpoints are gossiped to peers automatically. A new node joining the network receives the latest checkpoint first, then only the blocks since that checkpoint — never the full history.
 
@@ -255,7 +261,7 @@ Any block with an incorrect `prev_hash` is rejected. An attacker cannot insert o
 
 ### 6.7 Fork Attack Resistance
 
-A fork attack requires building a chain longer than the honest chain. Since there is no proof-of-work, the relevant resource is time: an attacker can produce at most one block per slot per eligible device. The honest network collectively produces blocks at a faster rate than any single attacker with a realistic number of devices. The longest-chain rule ensures the honest chain always wins.
+A fork attack requires building a heavier chain than the honest chain. Since there is no proof-of-work, the relevant resource is time: an attacker can produce at most one block per slot per eligible device. The honest network collectively produces blocks at a faster rate than any single attacker with a realistic number of devices. The chain weight rule ensures the honest chain always wins — sparse chains built by isolated attackers are penalised by gap deductions.
 
 ### 6.8 Wallet Security
 
@@ -263,7 +269,7 @@ Private keys are encrypted at rest with AES-256-GCM. The encryption key is deriv
 
 ### 6.9 Bootstrap Server Trust Model
 
-The bootstrap server is a relay. It records commits and reveals but cannot verify Dilithium3 signatures — that is done on every node independently. In v3.0, the bootstrap server also relays chain tip information. A compromised or malicious bootstrap server can:
+The bootstrap server is a relay. It records commits and reveals but cannot verify Dilithium3 signatures — that is done on every node independently. In v3.1, the bootstrap server also relays chain tip information. A compromised or malicious bootstrap server can:
 
 - Refuse to record commits (causing nodes to skip slots)
 - Selectively withhold reveals (causing incorrect winner selection for nodes that query only that server)
@@ -293,7 +299,7 @@ Community bootstrap servers, community tools, and community applications are all
 
 TIMPAL provides what the global financial system has failed to provide: a way for any person, anywhere, to hold and send value — without asking permission.
 
-The eligibility-gated lottery ensures the reward system remains fair and efficient whether the network has 10 nodes or 10 million. The collective target prevents any node from predicting or manipulating the outcome. The reveal obligation closes the selective-reveal attack. The chain spine anchors all rewards to a single, deterministic history. Nakamoto-style fork resolution with deterministic tie-breaking guarantees global convergence under any network partition. The two-era model ensures the network is self-sustaining forever — first through the lottery and fees, then through fees alone.
+The eligibility-gated lottery ensures the reward system remains fair and efficient whether the network has 10 nodes or 10 million. The collective target prevents any node from predicting or manipulating the outcome. The reveal obligation closes the selective-reveal attack. The chain spine anchors all rewards to a single, deterministic history. Chain-weight fork resolution with deterministic tie-breaking guarantees global convergence under any network partition. The two-era model ensures the network is self-sustaining forever — first through the lottery and fees, then through fees alone.
 
 ---
 

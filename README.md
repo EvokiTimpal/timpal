@@ -33,7 +33,7 @@ Your node starts, creates a quantum-resistant wallet, prompts you to set a passw
 | `balance` | Your current TMPL balance |
 | `chain` | Chain height, tip hash, and recent confirmed blocks |
 | `peers` | Online nodes connected to you |
-| `send` | Send TMPL to a peer |
+| `send` | Send TMPL to an address |
 | `history` | Your transaction and reward history |
 | `network` | Global network statistics |
 | `quit` | Shut down your node |
@@ -49,7 +49,7 @@ Your node starts, creates a quantum-resistant wallet, prompts you to set a passw
 - **Checkpoints every ~83 minutes** — Every 1,000 slots (~83 min), all nodes independently create a checkpoint. Prunes raw history while preserving all balances. Keeps the ledger lightweight forever.
 - **Eligibility-gated VRF lottery** — Every 5 seconds, one node wins 1.0575 TMPL. Only ~10 nodes are randomly eligible per slot regardless of how large the network grows, keeping participation fair and efficient at any scale. The winner is selected by a commit-reveal scheme — provably fair, no node has a permanent advantage.
 - **Collective target** — The winning ticket is the one closest to a target that cannot be known until all reveals are in. No node can predict or cherry-pick the outcome.
-- **Fork resolution** — Longest valid chain wins. Equal-length forks resolve deterministically by comparing tip hashes. All nodes converge to the same chain regardless of arrival order.
+- **Fork resolution** — Heaviest valid chain wins. Weight is block count minus slot-gap penalties, so dense chains always beat sparse ones. Equal-weight forks resolve deterministically by comparing tip hashes. All nodes converge to the same chain regardless of arrival order.
 - **One node per device** — Fairness enforced by the protocol.
 - **250 million TMPL total supply** — Over 37.5 years. No pre-mine. No insider allocation.
 
@@ -121,7 +121,7 @@ While your node is running in one terminal, open a second terminal to send:
 # Check your balance and full address
 python3 timpal.py balance
 
-# Send TMPL to another node
+# Send TMPL to another address
 python3 timpal.py send <recipient_address> <amount>
 ```
 

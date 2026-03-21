@@ -7,7 +7,7 @@ PORT        = 7777
 VERSION     = "3.1"
 MIN_VERSION = "3.1"
 
-GENESIS_TIME = 0   # ← REPLACE with the same number as in timpal.py
+GENESIS_TIME = 1774123200   # ← REPLACE with the same number as in timpal.py
 
 REWARD_INTERVAL=5.0; TARGET_PARTICIPANTS=10; BAN_DURATION=10
 REVEAL_MISS_THRESHOLD=2; NETWORK_SIZE_SAMPLES=10

@@ -65,7 +65,7 @@ except ImportError:
 
 VERSION             = "3.1"
 MIN_VERSION         = "3.1"
-GENESIS_TIME        = 0        # ← SET BEFORE LAUNCH — same value in bootstrap.py
+GENESIS_TIME        = 1774123200        # ← SET BEFORE LAUNCH — same value in bootstrap.py
 ERA2_SLOT           = 236_406_620
 TARGET_PARTICIPANTS = 10       # Target eligible nodes per slot
 

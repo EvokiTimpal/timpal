@@ -883,7 +883,11 @@ class Ledger:
                 "timestamp":         int(time.time())
             }
 
-            self.chain = c_keep  # may be [] — _get_tip() falls back to checkpoint.chain_tip_hash
+            # c_keep may be empty — that's fine. _get_tip() falls back to
+            # checkpoint.chain_tip_hash so new blocks can still link correctly.
+            # Keeping c_prune[-1] here double-counts it in get_balance() since
+            # it is already baked into checkpoint.balances.
+            self.chain = c_keep
             self.transactions = t_keep
             self.fee_rewards  = fr_keep
             self.checkpoints.append(cp)
@@ -1313,14 +1317,10 @@ class Network:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(10.0)
                 sock.connect((peer["ip"], peer["port"]))
-                with self.ledger._lock:
-                    ch = len(self.ledger.chain)
-                    th, ts = self.ledger._get_tip()
-                    cs = self.ledger.checkpoints[-1]["slot"] if self.ledger.checkpoints else 0
                 sock.sendall(json.dumps({
                     "type": "SYNC_REQUEST",
-                    "chain_height": ch, "chain_tip_hash": th,
-                    "chain_tip_slot": ts, "known_tx_ids": [], "checkpoint_slot": cs
+                    "chain_height": 0, "chain_tip_hash": GENESIS_PREV_HASH,
+                    "chain_tip_slot": -1, "known_tx_ids": [], "checkpoint_slot": 0
                 }).encode())
                 sock.shutdown(socket.SHUT_WR)
                 data = b""
@@ -1704,7 +1704,7 @@ class Network:
                     "type":              "SYNC_RESPONSE",
                     "blocks":            missing_blocks,
                     "txs":               missing_t,
-                    "fee_rewards":       list(self.ledger.fee_rewards)[:2000],
+                    "fee_rewards":       list(self.ledger.fee_rewards),
                     "chain_height":      len(self.ledger.chain),
                     "we_need_from_slot": we_need_from_slot,
                     "we_need_tx_ids":    list(their_tx_ids - our_tx_ids),
@@ -1755,6 +1755,11 @@ class Node:
                                self._on_transaction_received, self._on_block_received)
         self.network._node_ref = self
         self._sending         = False
+        # M1 FIX: _my_tickets protected by its own lock.
+        # Eliminates RuntimeError from concurrent read-in-lottery /
+        # delete-in-cleanup without lock.
+        self._my_tickets      = {}
+        self._my_tickets_lock = threading.Lock()
         self._commits         = {}
         self._lottery_lock    = threading.Lock()
 
@@ -1887,7 +1892,7 @@ class Node:
                 sig    = Dilithium3.sign(self.wallet.private_key, seed.encode())
                 ticket = hashlib.sha256(sig).hexdigest()
                 return ticket, sig.hex(), seed
-            except Exception:
+            except (IndexError, Exception):
                 continue
         raise RuntimeError("VRF ticket generation failed after 5 retries")
 
@@ -2217,6 +2222,10 @@ class Node:
         with self._lottery_lock:
             for s in [s for s in self._commits if s < time_slot - 10]:
                 del self._commits[s]
+        # M1 FIX: hold _my_tickets_lock while iterating and deleting
+        with self._my_tickets_lock:
+            for s in [s for s in self._my_tickets if s < time_slot - 10]:
+                del self._my_tickets[s]
         cutoff = time_slot - 100
         with self.network._seen_lock:
             def _stale(sid):
@@ -2265,6 +2274,9 @@ class Node:
                     continue
 
                 ticket, sig_hex, seed = self._vrf_ticket(time_slot)
+                # M1 FIX: write under lock
+                with self._my_tickets_lock:
+                    self._my_tickets[time_slot] = (ticket, sig_hex, seed)
                 commit = self._make_commit(time_slot, ticket)
 
                 result = self._bootstrap_submit_commit({
@@ -2308,8 +2320,6 @@ class Node:
                 if already_won:
                     self._cleanup_slot(time_slot); continue
 
-                # collective_target from bootstrap is intentionally discarded (M7 fix):
-                # nodes compute the target locally from verified reveals only.
                 all_reveals, _ = self._bootstrap_query_reveals(time_slot)
                 all_reveals[self.wallet.device_id] = {
                     "ticket": ticket, "sig": sig_hex,
@@ -2468,7 +2478,7 @@ class Node:
                 payload_data["signature"] = self.wallet.sign(payload_bytes)
                 req = urllib.request.Request(
                     "https://timpal.org/api",
-                    data    = json.dumps(payload_data, sort_keys=True, separators=(',', ':')).encode(),
+                    data    = json.dumps(payload_data).encode(),
                     headers = {"Content-Type": "application/json"},
                     method  = "POST"
                 )
@@ -2558,6 +2568,11 @@ class Node:
                                 break
                         if our_tip is None and self.ledger.checkpoints:
                             our_tip = self.ledger.checkpoints[-1].get("chain_tip_hash")
+                        # Fresh start: no blocks before boundary and no checkpoints.
+                        # The correct tip is GENESIS_PREV_HASH — same value every
+                        # node on a fresh chain will submit to bootstrap.
+                        if our_tip is None:
+                            our_tip = GENESIS_PREV_HASH
 
                     majority_hash, count, peer_id = self._bootstrap_query_checkpoint_tip(next_cp)
 
@@ -2580,6 +2595,8 @@ class Node:
                                     break
                             if our_tip is None and self.ledger.checkpoints:
                                 our_tip = self.ledger.checkpoints[-1].get("chain_tip_hash")
+                            if our_tip is None:
+                                our_tip = GENESIS_PREV_HASH
                         if our_tip != majority_hash:
                             print(f"\n  [checkpoint] Still diverged after sync — "
                                   f"skipping slot {next_cp}, retry next cycle.\n  > ",

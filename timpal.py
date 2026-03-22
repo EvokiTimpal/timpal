@@ -883,10 +883,7 @@ class Ledger:
                 "timestamp":         int(time.time())
             }
 
-            if c_keep:
-                self.chain = c_keep
-            else:
-                self.chain = [c_prune[-1]] if c_prune else []
+            self.chain = c_keep  # may be [] — _get_tip() falls back to checkpoint.chain_tip_hash
             self.transactions = t_keep
             self.fee_rewards  = fr_keep
             self.checkpoints.append(cp)

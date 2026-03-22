@@ -1373,13 +1373,22 @@ class Network:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(30.0)
                 sock.connect((peer["ip"], peer["port"]))
+                # Send last 150 block hashes so the responder can find the
+                # common ancestor and send only the diverging blocks.
+                # 150 covers CHECKPOINT_BUFFER (120) plus a safe margin.
+                # At any network scale this is always ~10KB regardless of chain length.
+                with self.ledger._lock:
+                    recent_hashes = [compute_block_hash(b)
+                                     for b in self.ledger.chain[-150:]]
+
                 sock.sendall(json.dumps({
-                    "type":            "SYNC_REQUEST",
-                    "chain_height":    chain_height,
-                    "chain_tip_hash":  tip_hash,
-                    "chain_tip_slot":  tip_slot,
-                    "known_tx_ids":    known_tx_ids,
-                    "checkpoint_slot": checkpoint_slot
+                    "type":               "SYNC_REQUEST",
+                    "chain_height":       chain_height,
+                    "chain_tip_hash":     tip_hash,
+                    "chain_tip_slot":     tip_slot,
+                    "known_tx_ids":       known_tx_ids,
+                    "checkpoint_slot":    checkpoint_slot,
+                    "chain_recent_hashes": recent_hashes,
                 }).encode())
                 sock.shutdown(socket.SHUT_WR)
                 data = b""
@@ -1675,10 +1684,11 @@ class Network:
                         return
                     self._sync_rate[sender_ip] = now
 
-                their_tip_hash = msg.get("chain_tip_hash", GENESIS_PREV_HASH)
-                their_tip_slot = msg.get("chain_tip_slot", -1)
-                their_tx_ids   = set(msg.get("known_tx_ids", [])[:10000])
-                their_cp       = msg.get("checkpoint_slot", 0)
+                their_tip_hash    = msg.get("chain_tip_hash", GENESIS_PREV_HASH)
+                their_tip_slot    = msg.get("chain_tip_slot", -1)
+                their_tx_ids      = set(msg.get("known_tx_ids", [])[:10000])
+                their_cp          = msg.get("checkpoint_slot", 0)
+                their_recent      = set(msg.get("chain_recent_hashes", []))
 
                 with self.ledger._lock:
                     tip_hash, tip_slot = self.ledger._get_tip()
@@ -1690,13 +1700,34 @@ class Network:
                         if latest["slot"] > their_cp:
                             our_cp = latest
 
-                    # M3 FIX: send only blocks after the peer's tip slot,
-                    # not the entire chain on any hash mismatch.
                     if their_tip_hash == tip_hash:
+                        # Already in sync
                         missing_blocks = []
+                    elif their_recent:
+                        # Common-ancestor sync: walk our chain backwards to find
+                        # the last block the peer also has, then send from there.
+                        # Forks are always within CHECKPOINT_BUFFER (120 slots) so
+                        # the common ancestor is always within the last 150 hashes.
+                        # This is O(chain length) to build the set once, then
+                        # O(150) lookups — same cost at 2 nodes or 2 million.
+                        our_hashes = {compute_block_hash(b): i
+                                      for i, b in enumerate(self.ledger.chain)}
+                        fork_idx = None
+                        for b in reversed(self.ledger.chain):
+                            bh = compute_block_hash(b)
+                            if bh in their_recent:
+                                fork_idx = our_hashes[bh]
+                                break
+                        if fork_idx is not None:
+                            # Send only blocks after the common ancestor
+                            missing_blocks = self.ledger.chain[fork_idx + 1:][:5000]
+                        else:
+                            # No common ancestor found — peer is too far behind
+                            # or on a completely different chain. Send full chain.
+                            missing_blocks = list(self.ledger.chain)[:5000]
                     else:
-                        missing_blocks = [b for b in self.ledger.chain
-                                          if b.get("slot", -1) > their_tip_slot][:5000]
+                        # Old client without chain_recent_hashes — send full chain
+                        missing_blocks = list(self.ledger.chain)[:5000]
 
                     we_need_from_slot = their_tip_slot if their_tip_slot > tip_slot else None
 

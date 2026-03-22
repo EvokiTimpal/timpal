@@ -1700,7 +1700,7 @@ class Network:
                     "type":              "SYNC_RESPONSE",
                     "blocks":            missing_blocks,
                     "txs":               missing_t,
-                    "fee_rewards":       list(self.ledger.fee_rewards),
+                    "fee_rewards":       list(self.ledger.fee_rewards)[:2000],
                     "chain_height":      len(self.ledger.chain),
                     "we_need_from_slot": we_need_from_slot,
                     "we_need_tx_ids":    list(their_tx_ids - our_tx_ids),
@@ -1751,11 +1751,6 @@ class Node:
                                self._on_transaction_received, self._on_block_received)
         self.network._node_ref = self
         self._sending         = False
-        # M1 FIX: _my_tickets protected by its own lock.
-        # Eliminates RuntimeError from concurrent read-in-lottery /
-        # delete-in-cleanup without lock.
-        self._my_tickets      = {}
-        self._my_tickets_lock = threading.Lock()
         self._commits         = {}
         self._lottery_lock    = threading.Lock()
 
@@ -1888,7 +1883,7 @@ class Node:
                 sig    = Dilithium3.sign(self.wallet.private_key, seed.encode())
                 ticket = hashlib.sha256(sig).hexdigest()
                 return ticket, sig.hex(), seed
-            except (IndexError, Exception):
+            except Exception:
                 continue
         raise RuntimeError("VRF ticket generation failed after 5 retries")
 
@@ -2218,10 +2213,6 @@ class Node:
         with self._lottery_lock:
             for s in [s for s in self._commits if s < time_slot - 10]:
                 del self._commits[s]
-        # M1 FIX: hold _my_tickets_lock while iterating and deleting
-        with self._my_tickets_lock:
-            for s in [s for s in self._my_tickets if s < time_slot - 10]:
-                del self._my_tickets[s]
         cutoff = time_slot - 100
         with self.network._seen_lock:
             def _stale(sid):
@@ -2270,9 +2261,6 @@ class Node:
                     continue
 
                 ticket, sig_hex, seed = self._vrf_ticket(time_slot)
-                # M1 FIX: write under lock
-                with self._my_tickets_lock:
-                    self._my_tickets[time_slot] = (ticket, sig_hex, seed)
                 commit = self._make_commit(time_slot, ticket)
 
                 result = self._bootstrap_submit_commit({
@@ -2316,6 +2304,8 @@ class Node:
                 if already_won:
                     self._cleanup_slot(time_slot); continue
 
+                # collective_target from bootstrap is intentionally discarded (M7 fix):
+                # nodes compute the target locally from verified reveals only.
                 all_reveals, _ = self._bootstrap_query_reveals(time_slot)
                 all_reveals[self.wallet.device_id] = {
                     "ticket": ticket, "sig": sig_hex,

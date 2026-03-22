@@ -66,7 +66,7 @@ except ImportError:
 VERSION             = "3.1"
 MIN_VERSION         = "3.1"
 GENESIS_TIME        = 1774123200        # ← SET BEFORE LAUNCH — same value in bootstrap.py
-ERA2_SLOT           = 236_406_620
+ERA2_ROUND          = 236_406_620  # total VRF rounds (blocks produced) before Era 2
 TARGET_PARTICIPANTS = 10       # Target eligible nodes per slot
 
 BOOTSTRAP_SERVERS    = [("bootstrap.timpal.org", 7777)]
@@ -119,8 +119,19 @@ def get_current_slot() -> int:
     return int((time.time() - GENESIS_TIME) / REWARD_INTERVAL)
 
 
-def is_era2() -> bool:
-    return get_current_slot() >= ERA2_SLOT
+def is_era2(ledger=None) -> bool:
+    """Era 2 begins when total blocks produced reaches ERA2_ROUND.
+
+    Uses total_minted // REWARD_PER_ROUND as a proxy for blocks produced —
+    exact because every block mints exactly REWARD_PER_ROUND units.
+    Unparticipated slots are never counted, so all 250M TMPL are guaranteed
+    to be distributed before Era 2 begins. When no ledger is passed (e.g.
+    during startup) returns False so the lottery always starts in Era 1.
+    """
+    if ledger is None:
+        return False
+    blocks_produced = ledger.total_minted // REWARD_PER_ROUND
+    return blocks_produced >= ERA2_ROUND
 
 
 def get_current_fee() -> int:
@@ -2286,7 +2297,7 @@ class Node:
                 next_slot_time = GENESIS_TIME + (int(elapsed / REWARD_INTERVAL) + 1) * REWARD_INTERVAL
                 time.sleep(max(0.05, next_slot_time - time.time()))
 
-                if is_era2():
+                if is_era2(self.ledger):
                     continue
 
                 time_slot  = get_current_slot()

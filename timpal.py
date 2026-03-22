@@ -2584,12 +2584,38 @@ class Node:
 
                 if current_slot >= next_cp + CHECKPOINT_BUFFER:
                     # M6 FIX: don't checkpoint if we have no chain data at all.
-                    # A node that just started has no block at or before next_cp,
-                    # so its "tip" would be GENESIS_PREV_HASH — wrong.
-                    # Wait until we have at least one synced block before checkpointing.
                     if not self.ledger.chain and not self.ledger.checkpoints:
                         time.sleep(30)
                         continue
+
+                    # STALE SLOT FIX: a fresh node that started after next_cp
+                    # has no blocks at that boundary. Bootstrap may have stale votes
+                    # from a previous network run — we can never win that comparison.
+                    # Advance next_cp forward to the first boundary where we actually
+                    # have chain data, then proceed normally from there.
+                    # This only fires when we have no checkpoints yet (truly fresh).
+                    if not self.ledger.checkpoints:
+                        with self.ledger._lock:
+                            has_data = any(
+                                b.get("slot", 0) <= next_cp
+                                for b in self.ledger.chain
+                            )
+                        if not has_data:
+                            # Find the earliest boundary we have data for
+                            with self.ledger._lock:
+                                earliest_slot = min(
+                                    (b.get("slot", 0) for b in self.ledger.chain),
+                                    default=None
+                                )
+                            if earliest_slot is None:
+                                time.sleep(30)
+                                continue
+                            # Jump next_cp to the boundary covering our earliest block
+                            next_cp = ((earliest_slot // CHECKPOINT_INTERVAL) + 1) * CHECKPOINT_INTERVAL
+                            # If we haven't passed the buffer for that slot yet, wait
+                            if current_slot < next_cp + CHECKPOINT_BUFFER:
+                                time.sleep(30)
+                                continue
 
                     with self.ledger._lock:
                         our_tip = None

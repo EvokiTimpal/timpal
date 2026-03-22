@@ -2,7 +2,7 @@
 
 A Quantum-Resistant Peer-to-Peer Payment Protocol
 
-March 2026 — v3.1
+March 2026 — v3.2
 
 ---
 
@@ -132,7 +132,7 @@ An OS-level file lock prevents more than one node running per device. Any second
 
 ### 3.8 Fork Choice and Chain Convergence
 
-v3.1 implements full fork resolution using chain weight — not block count.
+v3.1 implements full fork resolution using chain weight — not block count. This carries forward unchanged in v3.2.
 
 **Normal extension.** When a node receives a new block, it validates the VRF proof, checks that `prev_hash` matches the current chain tip, and appends the block. This is the common case.
 
@@ -269,10 +269,10 @@ Private keys are encrypted at rest with AES-256-GCM. The encryption key is deriv
 
 ### 6.9 Bootstrap Server Trust Model
 
-The bootstrap server is a relay. It records commits and reveals but cannot verify Dilithium3 signatures — that is done on every node independently. In v3.1, the bootstrap server also relays chain tip information. A compromised or malicious bootstrap server can:
+The bootstrap server is a relay. It records commits and reveals but cannot verify Dilithium3 signatures — that is done on every node independently. In v3.2, the bootstrap server also relays chain tip information. A compromised or malicious bootstrap server can:
 
 - Refuse to record commits (causing nodes to skip slots)
-- Selectively withhold reveals (causing incorrect winner selection for nodes that query only that server)
+- Selectively withhold reveals (reducing the number of verified participants a node sees — but since v3.2 nodes compute the collective target locally from verified reveals only, the server cannot inject false reveals or pre-compute a manipulated target)
 - Report a false or stale chain tip
 
 It cannot:

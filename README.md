@@ -1,5 +1,5 @@
 # TIMPAL — Quantum-Resistant Money Without Masters
-Quantum-resistant. Worldwide. Instant. Free.
+v3.2 — Quantum-resistant. Worldwide. Instant. Free.
 
 TIMPAL is a peer-to-peer payment protocol. No banks. No servers. No company. No control. Just people sending value directly to each other.
 

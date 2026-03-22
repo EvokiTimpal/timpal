@@ -2486,30 +2486,129 @@ class Node:
                 pass
             time.sleep(5)
 
+    def _bootstrap_query_checkpoint_tip(self, cp_slot: int) -> tuple:
+        """Query bootstrap servers for the network majority chain tip at cp_slot.
+        Returns (majority_hash, count, peer_id) or (None, 0, None) on failure.
+        One small TCP call per checkpoint boundary (~83 min) — O(1) on bootstrap side.
+        Scales to millions of nodes with zero fan-out.
+        """
+        result  = [None, 0, None]
+        done    = threading.Event()
+        servers = list(self.network._bootstrap_servers)
+        remaining = [len(servers)]
+        lock    = threading.Lock()
+        def _query(host, port):
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(5.0)
+                sock.connect((host, port))
+                sock.sendall(json.dumps({"type": "GET_CHECKPOINT_TIP", "cp_slot": cp_slot}).encode())
+                sock.shutdown(socket.SHUT_WR)
+                resp = b""
+                while True:
+                    chunk = sock.recv(4096)
+                    if not chunk: break
+                    resp += chunk
+                    if len(resp) > 65536: break
+                sock.close()
+                data = json.loads(resp.decode())
+                if data.get("type") == "CHECKPOINT_TIP_RESPONSE":
+                    mh  = data.get("majority_hash")
+                    ct  = data.get("count", 0)
+                    pid = data.get("peer_id")
+                    with lock:
+                        if mh and ct > result[1]:
+                            result[0] = mh; result[1] = ct; result[2] = pid
+            except Exception:
+                pass
+            finally:
+                with lock:
+                    remaining[0] -= 1
+                    if remaining[0] <= 0:
+                        done.set()
+        if not servers:
+            return None, 0, None
+        for host, port in servers:
+            threading.Thread(target=_query, args=(host, port), daemon=True).start()
+        done.wait(timeout=6.0)
+        return result[0], result[1], result[2]
+
     def _checkpoint_loop(self):
         """v3.1 Change 2: checkpoint interval is CHECKPOINT_INTERVAL = 1000.
-        Any node that has processed slot N where N % CHECKPOINT_INTERVAL == 0
-        must create a checkpoint at that slot. Deterministic across all nodes.
+
+        P1 fix: checkpoint is now a consensus event, not a unilateral one.
+        Before creating a checkpoint the node queries the bootstrap server for
+        the network majority chain_tip_hash at the checkpoint slot boundary.
+        If our tip matches the majority we checkpoint immediately.
+        If not we are on a minority fork — trigger a targeted sync, wait for
+        convergence, then re-check. If still diverged after the wait we skip
+        this cycle and retry 30 seconds later. Skipping is always safe;
+        checkpointing the wrong tip is not.
+
+        Scales to millions of nodes: each node makes exactly one small TCP
+        call to bootstrap per checkpoint (~83 min). Bootstrap does an O(1)
+        dict lookup. Zero peer fan-out at any network size.
         """
         while self.network._running:
             try:
                 current_slot = get_current_slot()
                 if self.ledger.checkpoints:
                     last_cp_slot = self.ledger.checkpoints[-1]["slot"]
-                    # Next checkpoint is the next multiple of CHECKPOINT_INTERVAL after last
                     next_cp = last_cp_slot + CHECKPOINT_INTERVAL
                 else:
-                    # Before any checkpoint: next is the most recent slot multiple
                     boundary = (current_slot // CHECKPOINT_INTERVAL) * CHECKPOINT_INTERVAL
                     next_cp  = boundary if boundary > 0 else CHECKPOINT_INTERVAL
 
-                # Only create checkpoint after the buffer has passed
                 if current_slot >= next_cp + CHECKPOINT_BUFFER:
+                    # --- P1 fix: consensus check before checkpointing ---
+                    # Get our tip hash at next_cp from our own chain.
+                    with self.ledger._lock:
+                        our_tip = None
+                        for b in reversed(self.ledger.chain):
+                            if b.get("slot", 0) <= next_cp:
+                                our_tip = compute_block_hash(b)
+                                break
+                        if our_tip is None and self.ledger.checkpoints:
+                            our_tip = self.ledger.checkpoints[-1].get("chain_tip_hash")
+
+                    # Query bootstrap for what the network majority reported.
+                    majority_hash, count, peer_id = self._bootstrap_query_checkpoint_tip(next_cp)
+
+                    if majority_hash is not None and our_tip != majority_hash:
+                        # We are on a minority fork. Sync toward the majority.
+                        print(f"\n  [checkpoint] Minority fork at slot {next_cp} "
+                              f"— our tip {str(our_tip)[:16]}... "
+                              f"majority {majority_hash[:16]}... "
+                              f"(count={count}). Syncing...\n  > ", end="", flush=True)
+                        sync_done = threading.Event()
+                        def _sync_and_signal():
+                            self.network._sync_ledger()
+                            sync_done.set()
+                        threading.Thread(target=_sync_and_signal, daemon=True).start()
+                        sync_done.wait(timeout=30.0)
+                        # Re-check our tip after sync.
+                        with self.ledger._lock:
+                            our_tip = None
+                            for b in reversed(self.ledger.chain):
+                                if b.get("slot", 0) <= next_cp:
+                                    our_tip = compute_block_hash(b)
+                                    break
+                            if our_tip is None and self.ledger.checkpoints:
+                                our_tip = self.ledger.checkpoints[-1].get("chain_tip_hash")
+                        if our_tip != majority_hash:
+                            print(f"\n  [checkpoint] Still diverged after sync — "
+                                  f"skipping slot {next_cp}, retry next cycle.\n  > ",
+                                  end="", flush=True)
+                            time.sleep(30)
+                            continue
+
+                    # Either majority agrees, bootstrap has no data yet
+                    # (isolated node), or we converged after sync.
                     if self.ledger.create_checkpoint(next_cp):
                         print(f"\n  ╔══════════════════════════════════════╗")
                         print(f"  ║       CHECKPOINT CREATED             ║")
                         print(f"  ╠══════════════════════════════════════╣")
-                        print(f"  ║  Slot : {next_cp}")
+                        print(f"  ║  Slot : {next_cp:<8} Votes: {count}")
                         print(f"  ╚══════════════════════════════════════╝\n  > ", end="", flush=True)
                         if self.ledger.checkpoints:
                             latest = self.ledger.checkpoints[-1]

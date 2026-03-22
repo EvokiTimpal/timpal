@@ -576,6 +576,20 @@ class Ledger:
                         self.transactions.append(tx)
                         changed = True
 
+            # Fee rewards merge — accept any we don't already have
+            for fr in other.get("fee_rewards", []):
+                rid = fr.get("reward_id", "")
+                if not rid:
+                    continue
+                if not isinstance(fr.get("amount"), int) or fr["amount"] <= 0:
+                    continue
+                wid = fr.get("winner_id", "")
+                if not (len(wid) == 64 and all(c in "0123456789abcdef" for c in wid)):
+                    continue
+                if not any(r.get("reward_id") == rid for r in self.fee_rewards):
+                    self.fee_rewards.append(fr)
+                    changed = True
+
             # Chain extension — process each block in slot order
             for block in valid_blocks:
                 tip_hash, tip_slot = self._get_tip()
@@ -1642,12 +1656,17 @@ class Network:
                 if not frs:
                     return
                 with self.ledger._lock:
-                    actual_fees = sum(
+                    total_tx_fees = sum(
                         t.get("fee", 0) for t in self.ledger.transactions
-                        if t.get("slot") == ts and isinstance(t.get("fee"), int)
+                        if isinstance(t.get("fee"), int) and t.get("fee", 0) > 0
                     )
+                    total_awarded = sum(
+                        fr.get("amount", 0) for fr in self.ledger.fee_rewards
+                        if isinstance(fr.get("amount"), int)
+                    )
+                    pending_fees = total_tx_fees - total_awarded
                 claimed = sum(fr.get("amount", 0) for fr in frs)
-                if claimed > actual_fees:
+                if claimed > max(pending_fees, 0):
                     return
                 for fr in frs:
                     self.ledger.add_fee_reward(ts, fr["winner_id"], fr["amount"])
@@ -1745,6 +1764,7 @@ class Network:
                     "type":              "SYNC_RESPONSE",
                     "blocks":            missing_blocks,
                     "txs":               missing_t,
+                    "fee_rewards":       list(self.ledger.fee_rewards),
                     "chain_height":      len(self.ledger.chain),
                     "we_need_from_slot": we_need_from_slot,
                     "we_need_tx_ids":    list(their_tx_ids - our_tx_ids),
@@ -2136,19 +2156,24 @@ class Node:
                 "sig": w["sig"], "seed": w["seed"], "public_key": w["public_key"]}
 
     def _collect_slot_fees(self, time_slot: int, winner_id: str):
-        """v3.1 Change 3 (Option B): collect all pending tx fees for slot → winner.
+        """v3.1 Change 3 (Option B): collect all pending tx fees → winner.
 
-        Called from _claim_reward() after the block is accepted.
-        Fees do NOT increase total_minted; they are redistribution.
-        MIN_TX_FEE = 50_000 (0.0005 TMPL) from genesis — fees collected from
-        the first transaction. At low transaction volume this will be small.
+        P3 fix: removed broken slot-match. tx.slot is stamped at send time on
+        the sender's node; by the time the tx propagates and a block is won the
+        slot has advanced so the match always returned 0. Instead we collect all
+        fees from transactions that have not yet been awarded (no fee_reward
+        entry exists for their tx_id). Fees do NOT increase total_minted.
         """
         with self.ledger._lock:
-            slot_fees = sum(
-                t.get("fee", 0)
-                for t in self.ledger.transactions
-                if t.get("slot") == time_slot and isinstance(t.get("fee"), int)
+            total_tx_fees = sum(
+                t.get("fee", 0) for t in self.ledger.transactions
+                if isinstance(t.get("fee"), int) and t.get("fee", 0) > 0
             )
+            total_awarded = sum(
+                fr.get("amount", 0) for fr in self.ledger.fee_rewards
+                if isinstance(fr.get("amount"), int)
+            )
+            slot_fees = total_tx_fees - total_awarded
         if slot_fees <= 0:
             return
         if self.ledger.add_fee_reward(time_slot, winner_id, slot_fees):

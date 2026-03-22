@@ -1313,10 +1313,14 @@ class Network:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(10.0)
                 sock.connect((peer["ip"], peer["port"]))
+                with self.ledger._lock:
+                    ch = len(self.ledger.chain)
+                    th, ts = self.ledger._get_tip()
+                    cs = self.ledger.checkpoints[-1]["slot"] if self.ledger.checkpoints else 0
                 sock.sendall(json.dumps({
                     "type": "SYNC_REQUEST",
-                    "chain_height": 0, "chain_tip_hash": GENESIS_PREV_HASH,
-                    "chain_tip_slot": -1, "known_tx_ids": [], "checkpoint_slot": 0
+                    "chain_height": ch, "chain_tip_hash": th,
+                    "chain_tip_slot": ts, "known_tx_ids": [], "checkpoint_slot": cs
                 }).encode())
                 sock.shutdown(socket.SHUT_WR)
                 data = b""
@@ -2464,7 +2468,7 @@ class Node:
                 payload_data["signature"] = self.wallet.sign(payload_bytes)
                 req = urllib.request.Request(
                     "https://timpal.org/api",
-                    data    = json.dumps(payload_data).encode(),
+                    data    = json.dumps(payload_data, sort_keys=True, separators=(',', ':')).encode(),
                     headers = {"Content-Type": "application/json"},
                     method  = "POST"
                 )

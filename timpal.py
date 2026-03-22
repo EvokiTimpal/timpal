@@ -1918,10 +1918,15 @@ class Node:
                   f"+{block.get('amount', 0) / UNIT:.4f} TMPL\n  > ", end="", flush=True)
 
     def _vrf_ticket(self, time_slot: int) -> tuple:
-        seed   = str(time_slot)
-        sig    = Dilithium3.sign(self.wallet.private_key, seed.encode())
-        ticket = hashlib.sha256(sig).hexdigest()
-        return ticket, sig.hex(), seed
+        seed = str(time_slot)
+        for _ in range(5):
+            try:
+                sig    = Dilithium3.sign(self.wallet.private_key, seed.encode())
+                ticket = hashlib.sha256(sig).hexdigest()
+                return ticket, sig.hex(), seed
+            except (IndexError, Exception):
+                continue
+        raise RuntimeError("VRF ticket generation failed after 5 retries")
 
     @staticmethod
     def _verify_ticket(public_key_hex: str, seed: str, sig_hex: str, ticket: str) -> bool:
@@ -2250,96 +2255,101 @@ class Node:
     def _reward_lottery(self):
         time.sleep(45)
         while self.network._running:
-            now            = time.time()
-            elapsed        = now - GENESIS_TIME
-            next_slot_time = GENESIS_TIME + (int(elapsed / REWARD_INTERVAL) + 1) * REWARD_INTERVAL
-            time.sleep(max(0.05, next_slot_time - time.time()))
+            try:
+                now            = time.time()
+                elapsed        = now - GENESIS_TIME
+                next_slot_time = GENESIS_TIME + (int(elapsed / REWARD_INTERVAL) + 1) * REWARD_INTERVAL
+                time.sleep(max(0.05, next_slot_time - time.time()))
 
-            if is_era2():
-                continue
+                if is_era2():
+                    continue
 
-            time_slot  = get_current_slot()
-            if time_slot < 0:
-                continue
-            slot_start = GENESIS_TIME + time_slot * REWARD_INTERVAL
+                time_slot  = get_current_slot()
+                if time_slot < 0:
+                    continue
+                slot_start = GENESIS_TIME + time_slot * REWARD_INTERVAL
 
-            with self.ledger._lock:
-                already_won = any(b.get("slot") == time_slot for b in self.ledger.chain)
-            if already_won:
+                with self.ledger._lock:
+                    already_won = any(b.get("slot") == time_slot for b in self.ledger.chain)
+                if already_won:
+                    self._cleanup_slot(time_slot)
+                    continue
+
+                if not self._is_eligible_this_slot(time_slot, self.network._network_size):
+                    continue
+
+                ticket, sig_hex, seed = self._vrf_ticket(time_slot)
+                self._my_tickets[time_slot] = (ticket, sig_hex, seed)
+                commit = self._make_commit(time_slot, ticket)
+
+                result = self._bootstrap_submit_commit({
+                    "type": "SUBMIT_COMMIT", "device_id": self.wallet.device_id,
+                    "slot": time_slot, "commit": commit
+                })
+
+                if result == "COMMIT_REJECTED":
+                    print(f"\n  [slot {time_slot}] Commit rejected (ban active). Skipping.\n  > ",
+                          end="", flush=True)
+                    self._cleanup_slot(time_slot)
+                    continue
+
+                with self._lottery_lock:
+                    self._commits.setdefault(time_slot, {})[self.wallet.device_id] = commit
+
+                remaining = slot_start + 2.0 - time.time()
+                if remaining > 0:
+                    time.sleep(remaining)
+                with self.ledger._lock:
+                    already_won = any(b.get("slot") == time_slot for b in self.ledger.chain)
+                if already_won:
+                    self._cleanup_slot(time_slot); continue
+
+                commits_merged = self._bootstrap_query_commits(time_slot)
+                with self._lottery_lock:
+                    for did, c in commits_merged.items():
+                        self._commits.setdefault(time_slot, {}).setdefault(did, c)
+
+                self._bootstrap_submit({
+                    "type": "SUBMIT_REVEAL", "device_id": self.wallet.device_id,
+                    "slot": time_slot, "ticket": ticket, "sig": sig_hex,
+                    "seed": seed, "public_key": self.wallet.public_key.hex()
+                })
+
+                remaining = slot_start + 4.0 - time.time()
+                if remaining > 0:
+                    time.sleep(remaining)
+                with self.ledger._lock:
+                    already_won = any(b.get("slot") == time_slot for b in self.ledger.chain)
+                if already_won:
+                    self._cleanup_slot(time_slot); continue
+
+                all_reveals, _ = self._bootstrap_query_reveals(time_slot)
+
+                all_reveals[self.wallet.device_id] = {
+                    "ticket": ticket, "sig": sig_hex,
+                    "seed": seed, "public_key": self.wallet.public_key.hex()
+                }
+
+                remaining = slot_start + 4.5 - time.time()
+                if remaining > 0:
+                    time.sleep(remaining)
+                with self.ledger._lock:
+                    already_won = any(b.get("slot") == time_slot for b in self.ledger.chain)
+                if already_won:
+                    self._cleanup_slot(time_slot); continue
+
+                with self._lottery_lock:
+                    active_nodes = list(self._commits.get(time_slot, {}).keys())
+
+                winner = self._pick_winner(time_slot, all_reveals)
+                if winner:
+                    self._claim_reward(winner, time_slot, active_nodes)
                 self._cleanup_slot(time_slot)
+
+            except Exception as e:
+                print(f"\n  [lottery] Error: {e} — retrying next slot\n  > ", end="", flush=True)
+                time.sleep(REWARD_INTERVAL)
                 continue
-
-            if not self._is_eligible_this_slot(time_slot, self.network._network_size):
-                continue
-
-            ticket, sig_hex, seed = self._vrf_ticket(time_slot)
-            self._my_tickets[time_slot] = (ticket, sig_hex, seed)
-            commit = self._make_commit(time_slot, ticket)
-
-            result = self._bootstrap_submit_commit({
-                "type": "SUBMIT_COMMIT", "device_id": self.wallet.device_id,
-                "slot": time_slot, "commit": commit
-            })
-
-            if result == "COMMIT_REJECTED":
-                print(f"\n  [slot {time_slot}] Commit rejected (ban active). Skipping.\n  > ",
-                      end="", flush=True)
-                self._cleanup_slot(time_slot)
-                continue
-
-            with self._lottery_lock:
-                self._commits.setdefault(time_slot, {})[self.wallet.device_id] = commit
-
-            remaining = slot_start + 2.0 - time.time()
-            if remaining > 0:
-                time.sleep(remaining)
-            with self.ledger._lock:
-                already_won = any(b.get("slot") == time_slot for b in self.ledger.chain)
-            if already_won:
-                self._cleanup_slot(time_slot); continue
-
-            commits_merged = self._bootstrap_query_commits(time_slot)
-            with self._lottery_lock:
-                for did, c in commits_merged.items():
-                    self._commits.setdefault(time_slot, {}).setdefault(did, c)
-
-            self._bootstrap_submit({
-                "type": "SUBMIT_REVEAL", "device_id": self.wallet.device_id,
-                "slot": time_slot, "ticket": ticket, "sig": sig_hex,
-                "seed": seed, "public_key": self.wallet.public_key.hex()
-            })
-
-            remaining = slot_start + 4.0 - time.time()
-            if remaining > 0:
-                time.sleep(remaining)
-            with self.ledger._lock:
-                already_won = any(b.get("slot") == time_slot for b in self.ledger.chain)
-            if already_won:
-                self._cleanup_slot(time_slot); continue
-
-            all_reveals, _ = self._bootstrap_query_reveals(time_slot)
-
-            all_reveals[self.wallet.device_id] = {
-                "ticket": ticket, "sig": sig_hex,
-                "seed": seed, "public_key": self.wallet.public_key.hex()
-            }
-
-            remaining = slot_start + 4.5 - time.time()
-            if remaining > 0:
-                time.sleep(remaining)
-            with self.ledger._lock:
-                already_won = any(b.get("slot") == time_slot for b in self.ledger.chain)
-            if already_won:
-                self._cleanup_slot(time_slot); continue
-
-            with self._lottery_lock:
-                active_nodes = list(self._commits.get(time_slot, {}).keys())
-
-            winner = self._pick_winner(time_slot, all_reveals)
-            if winner:
-                self._claim_reward(winner, time_slot, active_nodes)
-            self._cleanup_slot(time_slot)
-
     def send(self, peer_id: str, amount_tmpl) -> bool:
         """Send TMPL to peer_id.
 

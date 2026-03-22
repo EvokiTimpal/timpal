@@ -1,4 +1,7 @@
-"""TIMPAL API v3.1 — serves live ledger data for timpal.org explorer.
+"""TIMPAL API v3.2 — serves live ledger data for timpal.org explorer.
+
+v3.2 changes:
+  - Version bump. No functional changes. Protocol compatibility with timpal.py v3.2.
 
 v3.1 changes:
   - UNIT = 100_000_000 added. All amounts from nodes are now int (units).
@@ -471,9 +474,9 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     threading.Thread(target=_clean_post_rate, daemon=True).start()
-    print("TIMPAL API v3.1 running on port 7781")
+    print("TIMPAL API v3.2 running on port 7781")
     print("Push authentication: Dilithium3 signature (no shared secret)")
-    print("v3.1: UNIT=10^8 integer migration; amounts divided by UNIT at display boundary")
+    print("v3.2: version bump; v3.1: UNIT=10^8 integer migration; amounts divided by UNIT at display boundary")
     print("FIX: chain_tip_hash now correctly hashes the tip block (not its prev_hash)")
     server = ThreadingHTTPServer(("0.0.0.0", 7781), Handler)
     server.serve_forever()

@@ -1,42 +1,55 @@
 #!/usr/bin/env python3
 """
-TIMPAL Protocol v3.1 — Quantum-Resistant Money Without Masters
+TIMPAL Protocol v3.2 — Quantum-Resistant Money Without Masters
 
-v3.1 changes over v3.0:
-  CHANGE 1 — Integer migration
-    All balances, amounts, and fees stored as int (units, where 1 TMPL = 10^8 units).
-    Eliminates IEEE-754 divergence across ARM/x86/different Python builds.
-    UNIT = 100_000_000; divide by UNIT only at UI display boundary.
+v3.2 — Full rewrite. All known bugs fixed by design, not by patch.
 
-  CHANGE 2 — Hardcoded checkpoint interval
-    CHECKPOINT_INTERVAL = 1000 is now a protocol constant.
-    Any node that has processed slot N where N % 1000 == 0 must create a checkpoint.
-    Deterministic across all nodes — no runtime variation possible.
+Bug fixes over v3.1
+────────────────────────────────────────────────────────────────────
+  C1  _claim_reward now submits the hash of the last chain block at or
+      before the checkpoint boundary as the tip_hash to SUBMIT_TIP,
+      so every node on the same chain reports the same hash and
+      bootstrap majority voting resolves correctly.
 
-  CHANGE 3 — Transaction fees (Option B: fees go to slot winner)
-    MIN_TX_FEE = 50_000 (0.0005 TMPL) from genesis — applies in all eras.
-    Sender pays amount + fee. Winner of the slot collects all pending tx fees
-    for that slot in addition to REWARD_PER_ROUND.
-    Fees are redistribution — they do NOT increase total_minted.
+  C2  _sync_ledger now includes fee_rewards in the delta dict passed
+      to ledger.merge(), so nodes that missed live FEE_REWARDS
+      broadcasts recover them on the next sync.
 
-  CHANGE 4 — Orphan pool
-    Blocks that arrive before their parent are stored in _orphan_pool
-    (keyed by prev_hash) instead of being silently dropped.
-    After any successful add_block, the pool is drained recursively.
-    Max 100 orphans; TTL = MAX_SLOT_GAP * 2 slots.
+  C3  merge() skips incoming fee_rewards whose time_slot < prune_before.
+      Entries before the boundary are already baked into checkpoint
+      balances — re-accepting them caused double-counting.
 
-Post-audit fixes (v3.1.1):
-  FIX A — Wallet.sign typo corrected in class body (self.wallet → self).
-           Monkey-patch removed.
-  FIX B — create_checkpoint now includes fee_rewards in checkpoint balance
-           computation and prunes self.fee_rewards, eliminating the silent
-           never-prune invariant that would have caused unbounded memory growth.
-  FIX C — create_checkpoint validates checkpoint_slot % CHECKPOINT_INTERVAL == 0.
-  FIX D — apply_checkpoint prunes self.fee_rewards and verifies fee_rewards_hash
-           when present (backward-compatible with old checkpoints that lack it).
-  FIX E — _bootstrap_submit_commit fires done event on first COMMIT_ACK rather
-           than waiting for all servers, preventing commit-window exhaustion when
-           a second bootstrap server with variable latency is added post-launch.
+  M1  _my_tickets dict is now protected by _my_tickets_lock across all
+      three access sites (_reward_lottery write, _cleanup_slot delete,
+      _reward_lottery read). Eliminates RuntimeError on iteration.
+
+  M3  SYNC_REQUEST handler now sends only blocks with slot > their tip
+      slot instead of always sending the full chain. Saves bandwidth
+      when the peer is only a few blocks behind.
+
+  M6  _checkpoint_loop skips checkpoint creation when the chain is
+      empty and there are no prior checkpoints. Prevents a fresh node
+      from writing an invalid GENESIS_PREV_HASH tip into its checkpoint.
+
+  M7  _pick_winner computes the collective target hash from the verified
+      dict only, not all_reveals. Unverified reveals can no longer shift
+      the target to steer who wins.
+
+  M10 SYNC_PUSH payload now includes fee_rewards, and the SYNC_PUSH
+      handler passes them into ledger.merge(). Nodes on the push path
+      now receive fee_rewards just like nodes on the pull path.
+
+Previously fixed (carried forward from v3.1)
+────────────────────────────────────────────────────────────────────
+  P1  Checkpoint consensus via bootstrap majority tip oracle
+  P2  Dilithium3 retry loop (IndexError) + outer guard on lottery thread
+  P3  Fee distribution: pending = total_tx_fees - total_awarded
+  P4  ERA2 block-based (total_minted // REWARD_PER_ROUND), not slot-based
+  FIX-A  Wallet.sign uses self.private_key (not self.wallet.private_key)
+  FIX-B  create_checkpoint bakes fee_rewards into balances and prunes them
+  FIX-C  create_checkpoint validates slot % CHECKPOINT_INTERVAL == 0
+  FIX-D  apply_checkpoint prunes fee_rewards and verifies fee_rewards_hash
+  FIX-E  _bootstrap_submit_commit fires done on first COMMIT_ACK
 """
 
 import socket
@@ -63,11 +76,11 @@ except ImportError:
     print("\n  [!] cryptography not installed. Run: pip3 install dilithium-py cryptography\n")
     exit(1)
 
-VERSION             = "3.1"
+VERSION             = "3.2"
 MIN_VERSION         = "3.1"
 GENESIS_TIME        = 1774123200        # ← SET BEFORE LAUNCH — same value in bootstrap.py
-ERA2_ROUND          = 236_406_620  # total VRF rounds (blocks produced) before Era 2
-TARGET_PARTICIPANTS = 10       # Target eligible nodes per slot
+ERA2_ROUND          = 236_406_620       # total VRF rounds (blocks produced) before Era 2
+TARGET_PARTICIPANTS = 10                # target eligible nodes per slot
 
 BOOTSTRAP_SERVERS    = [("bootstrap.timpal.org", 7777)]
 BOOTSTRAP_HOST       = "bootstrap.timpal.org"
@@ -86,7 +99,7 @@ REWARD_PER_ROUND    = 105_750_000            # 1.0575 TMPL in units
 REWARD_INTERVAL     = 5.0
 MIN_TX_FEE          = 50_000                 # 0.0005 TMPL in units — applies from genesis
 TX_FEE_ERA2         = 50_000                 # same value; kept for clarity
-CHECKPOINT_INTERVAL = 1000                   # Slots between checkpoints (immutable post-genesis)
+CHECKPOINT_INTERVAL = 1000                   # slots between checkpoints (immutable post-genesis)
 CHECKPOINT_BUFFER   = 120
 MAX_PEERS           = 125
 BROADCAST_FANOUT    = 8
@@ -100,9 +113,9 @@ MAX_FUTURE_SLOTS   = 5      # max slots ahead of wall-clock a block can be
 GENESIS_PREV_HASH  = "0" * 64  # prev_hash of the very first block ever
 
 # ── Orphan pool limits (v3.1) ──────────────────────────────────────────────────
-ORPHAN_POOL_MAX    = 100            # max blocks in orphan pool
-ORPHAN_TTL_SLOTS   = MAX_SLOT_GAP * 2  # orphans older than this are dropped
-MAX_REORG_DEPTH    = 100            # max slots deep a reorg can anchor (soft finality)
+ORPHAN_POOL_MAX    = 100
+ORPHAN_TTL_SLOTS   = MAX_SLOT_GAP * 2
+MAX_REORG_DEPTH    = 100
 
 
 def _check_genesis_time():
@@ -125,8 +138,8 @@ def is_era2(ledger=None) -> bool:
     Uses total_minted // REWARD_PER_ROUND as a proxy for blocks produced —
     exact because every block mints exactly REWARD_PER_ROUND units.
     Unparticipated slots are never counted, so all 250M TMPL are guaranteed
-    to be distributed before Era 2 begins. When no ledger is passed (e.g.
-    during startup) returns False so the lottery always starts in Era 1.
+    to be distributed before Era 2 begins. When no ledger is passed returns
+    False so the lottery always starts in Era 1.
     """
     if ledger is None:
         return False
@@ -172,9 +185,8 @@ def find_free_port(start=7779):
 
 def canonical_block(block: dict) -> bytes:
     """Deterministic serialization for block hashing.
-    Uses sort_keys=True to guarantee identical output across all nodes
-    regardless of Python dict insertion order.
-    THIS IS THE SINGLE MOST CRITICAL FUNCTION IN v3.0.
+    Uses sort_keys=True to guarantee identical output across all nodes.
+    THIS IS THE SINGLE MOST CRITICAL FUNCTION IN THE PROTOCOL.
     Any deviation in serialization causes permanent, silent chain splits."""
     return json.dumps(block, sort_keys=True, separators=(",", ":")).encode()
 
@@ -189,15 +201,12 @@ def compute_block_hash(block: dict) -> str:
 class Ledger:
     def __init__(self):
         self.transactions    = []
-        self.chain           = []    # ordered list of block_reward dicts — the chain spine
-        self.fee_rewards     = []    # fee_rewards — separate from chain (redistribution only)
-        self.total_minted    = 0     # int: units minted so far (block rewards only, not fees)
+        self.chain           = []
+        self.fee_rewards     = []
+        self.total_minted    = 0
         self.checkpoints     = []
         self._lock           = threading.RLock()
-        # O(1) duplicate detection for pruned tx_ids
         self._spent_tx_ids_set: set = set()
-        # v3.1 Change 4 — orphan pool
-        # Maps prev_hash → [block, ...] for blocks whose parent isn't known yet.
         self._orphan_pool: dict = {}
         self._load()
 
@@ -243,15 +252,14 @@ class Ledger:
             return GENESIS_PREV_HASH, -1
 
     def is_confirmed(self, block_slot: int) -> bool:
-        """True if block is at least CONFIRMATION_DEPTH slots deep."""
         return get_current_slot() - block_slot >= CONFIRMATION_DEPTH
 
     def get_balance(self, device_id: str) -> int:
         """Return balance in units (int). Divide by UNIT for TMPL display.
 
-        Invariant: checkpoint.balances already includes all fee_rewards that
-        were pruned (slots < checkpoint.prune_before). self.fee_rewards only
-        holds entries with time_slot >= prune_before. Together they cover the
+        Invariant: checkpoint.balances already includes all fee_rewards
+        with time_slot < checkpoint.prune_before.  self.fee_rewards only
+        holds entries with time_slot >= prune_before.  Together they cover
         full history with no gaps and no double-counting.
         """
         with self._lock:
@@ -281,14 +289,12 @@ class Ledger:
         return self.get_balance(device_id) >= amount
 
     def add_transaction(self, tx_dict: dict) -> bool:
-        # v3.1: amount and fee must be int
         amount = tx_dict.get("amount", 0)
         if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
             return False
         fee = tx_dict.get("fee", 0)
         if not isinstance(fee, int) or isinstance(fee, bool) or fee < 0:
             return False
-        # v3.1 Change 3: enforce MIN_TX_FEE
         if fee < MIN_TX_FEE:
             return False
         try:
@@ -329,30 +335,22 @@ class Ledger:
     # ── Internal orphan pool helpers ───────────────────────────────────────────
 
     def _store_orphan_locked(self, block: dict) -> bool:
-        """Store block in orphan pool keyed by prev_hash. Assumes self._lock held.
-
-        Returns True if the orphan extends a known chain position — meaning its
-        prev_hash matches a block already in our chain or the checkpoint tip.
-        Callers use this to decide whether to trigger _attempt_reorg().
-        """
+        """Store block in orphan pool keyed by prev_hash. Assumes self._lock held."""
         current_slot = get_current_slot()
         block_slot   = block.get("slot", 0)
-        # Drop blocks that are too stale to ever be useful
         if current_slot - block_slot > ORPHAN_TTL_SLOTS:
             return False
         prev = block.get("prev_hash", "")
         bh   = compute_block_hash(block)
         if prev not in self._orphan_pool:
             self._orphan_pool[prev] = []
-        # Dedup
         if any(compute_block_hash(b) == bh for b in self._orphan_pool[prev]):
             return False
         self._orphan_pool[prev].append(block)
-        # Enforce max pool size by evicting oldest block
         total = sum(len(v) for v in self._orphan_pool.values())
         if total > ORPHAN_POOL_MAX:
-            oldest_prev  = None
-            oldest_slot  = get_current_slot() + 1
+            oldest_prev = None
+            oldest_slot = get_current_slot() + 1
             for ph, blocks in list(self._orphan_pool.items()):
                 for b in blocks:
                     if b.get("slot", 0) < oldest_slot:
@@ -362,9 +360,6 @@ class Ledger:
                 self._orphan_pool[oldest_prev].pop(0)
                 if not self._orphan_pool[oldest_prev]:
                     del self._orphan_pool[oldest_prev]
-
-        # Guard: only signal reorg-worthy if prev_hash connects to our known chain
-        # or checkpoint tip. Random/unrelated orphans do not trigger a reorg attempt.
         known_hashes = {compute_block_hash(b) for b in self.chain}
         if self.checkpoints:
             known_hashes.add(self.checkpoints[-1].get("chain_tip_hash", ""))
@@ -372,7 +367,6 @@ class Ledger:
         return prev in known_hashes
 
     def _prune_stale_orphans_locked(self):
-        """Remove orphans beyond their TTL. Assumes self._lock held."""
         cutoff = get_current_slot() - ORPHAN_TTL_SLOTS
         for ph in list(self._orphan_pool.keys()):
             self._orphan_pool[ph] = [
@@ -382,12 +376,6 @@ class Ledger:
                 del self._orphan_pool[ph]
 
     def _drain_orphan_pool_locked(self):
-        """Attach orphans to chain after tip changes. Assumes self._lock held.
-
-        Algorithm: while any orphan's prev_hash == current tip_hash, attempt to
-        add it. A successful add changes the tip, so loop until no progress.
-        Orphans that fail all non-timing checks are discarded (bad VRF, etc.).
-        """
         self._prune_stale_orphans_locked()
         found = True
         while found:
@@ -395,7 +383,6 @@ class Ledger:
             tip_hash, _ = self._get_tip()
             if tip_hash not in self._orphan_pool:
                 break
-            # Take all candidates for current tip; process in slot order
             candidates = sorted(
                 self._orphan_pool.pop(tip_hash),
                 key=lambda b: b.get("slot", 0)
@@ -403,20 +390,11 @@ class Ledger:
             for orphan in candidates:
                 if self._add_block_locked(orphan):
                     found = True
-                    # Tip changed — remaining candidates (competing forks) are
-                    # dropped. The honest chain converges via _attempt_reorg.
                     break
-            # Blocks that failed non-timing validation are intentionally dropped
 
     # ── add_block (public + internal) ─────────────────────────────────────────
 
     def add_block(self, block: dict) -> bool:
-        """Add a new block to the chain.
-
-        If prev_hash doesn't match tip, stores block in orphan pool for later
-        attachment rather than silently dropping it (v3.1 Change 4).
-        After any successful add, drains orphan pool recursively.
-        """
         with self._lock:
             added = self._add_block_locked(block)
             if added:
@@ -424,19 +402,7 @@ class Ledger:
             return added
 
     def _add_block_locked(self, block: dict) -> bool:
-        """add_block logic; caller must hold self._lock.
-
-        Validates in order:
-        1. All four VRF fields present and proof correct (inflation protection)
-        2. Slot is valid and not already in chain (no duplicate slots)
-        3. winner_id is a valid 64-char hex device_id
-        4. prev_hash links to current chain tip (chain integrity)
-        5. Slot is strictly greater than tip slot (forward-only)
-        6. Slot gap does not exceed MAX_SLOT_GAP (no wild jumps)
-        7. Supply cap not exceeded
-
-        If check 4 fails, stores block as orphan instead of returning False bare.
-        """
+        """add_block logic; caller must hold self._lock."""
         # 1. VRF proof
         pub  = block.get("vrf_public_key", "")
         seed = block.get("vrf_seed", "")
@@ -447,7 +413,7 @@ class Ledger:
         if not Node._verify_ticket(pub, seed, sig, tick):
             return False
 
-        # 2. Slot must be a valid epoch slot
+        # 2. Slot validity
         slot = block.get("slot")
         if not _is_valid_epoch_slot(slot):
             return False
@@ -457,28 +423,25 @@ class Ledger:
         if not (len(winner_id) == 64 and all(c in "0123456789abcdef" for c in winner_id)):
             return False
 
-        # 2 continued: slot must not already exist in chain
+        # 4. No duplicate slots
         if any(b.get("slot") == slot for b in self.chain):
             return False
 
-        # 4. Chain linkage (v3.1: orphan pool on failure)
+        # 5. Chain linkage — orphan pool on failure
         tip_hash, tip_slot = self._get_tip()
         if block.get("prev_hash") != tip_hash:
             extends_known = self._store_orphan_locked(block)
             if extends_known:
-                # Orphan connects to a known chain position — evidence of a
-                # competing fork. Attempt reorg immediately rather than waiting
-                # for the next merge(). Guard prevents wasted work on random orphans.
                 candidates = list(self._orphan_pool.get(block.get("prev_hash", ""), []))
                 if candidates:
                     self._attempt_reorg(candidates)
             return False
 
-        # 5. Slot must be strictly greater than tip slot
+        # 6. Slot must be strictly greater than tip slot
         if slot <= tip_slot:
             return False
 
-        # 6. Slot gap check
+        # 7. Slot gap check
         current_slot = get_current_slot()
         if slot > current_slot + MAX_FUTURE_SLOTS:
             return False
@@ -486,7 +449,7 @@ class Ledger:
         if not syncing and tip_slot >= 0 and slot - tip_slot > MAX_SLOT_GAP:
             return False
 
-        # 7. Supply cap (integer comparison — no floating point)
+        # 8. Supply cap
         if self.total_minted + block.get("amount", 0) > TOTAL_SUPPLY:
             return False
 
@@ -496,7 +459,6 @@ class Ledger:
         return True
 
     def recalculate_totals(self):
-        """Rebuild total_minted from checkpoint + current chain (int arithmetic)."""
         if self.checkpoints:
             cp          = self.checkpoints[-1]
             pruned_base = cp["total_minted"] - cp.get("kept_minted", 0)
@@ -522,18 +484,13 @@ class Ledger:
         }
 
     def merge(self, other: dict) -> bool:
-        """Merge incoming chain blocks and transactions.
+        """Merge incoming chain blocks, transactions, and fee_rewards.
 
-        Chain merge strategy (v3.0/v3.1):
-        - Validate VRF proofs on all incoming blocks
-        - Sort by slot, then try to extend our current chain tip one block at a time
-        - A block is accepted only if its prev_hash matches our current tip exactly
-        - Unconnected blocks are stored in orphan pool (v3.1 Change 4)
-        - If normal extension fails (fork detected), attempt reorg via _attempt_reorg()
-        - After chain changes, drain orphan pool
-        - Transactions: unchanged from v2.2
+        C3 FIX: fee_rewards with time_slot < prune_before are skipped.
+        Entries before the boundary are already baked into checkpoint
+        balances — re-accepting them causes double-counting.
         """
-        # --- Validate VRF proofs on all incoming blocks ---
+        # Validate VRF proofs on all incoming blocks
         valid_blocks = []
         for b in other.get("blocks", []):
             if not b.get("reward_id", ""):
@@ -557,10 +514,9 @@ class Ledger:
                 continue
             valid_blocks.append(b)
 
-        # Sort by slot — must process in order so each prev_hash check is valid
         valid_blocks.sort(key=lambda b: b.get("slot", 0))
 
-        # --- Validate incoming transactions ---
+        # Validate incoming transactions
         verified_txs = []
         for tx in other.get("transactions", []):
             try:
@@ -572,6 +528,11 @@ class Ledger:
 
         with self._lock:
             changed = False
+
+            # C3 FIX: determine prune_before from latest checkpoint.
+            # Any fee_reward with time_slot < prune_before is already
+            # accounted for in checkpoint.balances — skip it.
+            prune_before = self.checkpoints[-1].get("prune_before", 0) if self.checkpoints else 0
 
             # Transactions
             for tx in verified_txs:
@@ -587,8 +548,12 @@ class Ledger:
                         self.transactions.append(tx)
                         changed = True
 
-            # Fee rewards merge — accept any we don't already have
+            # Fee rewards merge
+            # C3 FIX: skip entries before the checkpoint prune boundary.
             for fr in other.get("fee_rewards", []):
+                # C3 FIX: reject stale entries already baked into checkpoint
+                if fr.get("time_slot", 0) < prune_before:
+                    continue
                 rid = fr.get("reward_id", "")
                 if not rid:
                     continue
@@ -601,10 +566,9 @@ class Ledger:
                     self.fee_rewards.append(fr)
                     changed = True
 
-            # Chain extension — process each block in slot order
+            # Chain extension
             for block in valid_blocks:
                 tip_hash, tip_slot = self._get_tip()
-
                 if block.get("prev_hash") != tip_hash:
                     self._store_orphan_locked(block)
                     continue
@@ -619,21 +583,15 @@ class Ledger:
                     continue
                 if self.total_minted + block.get("amount", 0) > TOTAL_SUPPLY:
                     continue
-
                 self.chain.append(block)
                 self.total_minted += block.get("amount", 0)
                 changed = True
 
-            # Reorg check: valid_blocks that didn't connect to tip may represent
-            # a longer competing chain.
             if self._attempt_reorg(valid_blocks):
                 changed = True
 
-            # v3.1 Change 4: drain orphan pool after any chain change
             if changed:
                 self._drain_orphan_pool_locked()
-
-            if changed:
                 self.save()
             return changed
 
@@ -644,33 +602,25 @@ class Ledger:
         Each block contributes +1. Slot gaps > 1 subtract (gap - 1) per missing
         slot, penalising sparse chains without introducing floats.
         Result is clamped to 0 — weight is never negative.
-
-        This replaces pure block-count comparison in fork choice, eliminating
-        the sparse-chain attack: a 6-block chain spanning slots 1→1000 loses
-        to a 10-block dense chain spanning slots 1→10.
         """
-        weight   = 0
+        weight    = 0
         prev_slot = None
         for b in blocks:
             slot = b.get("slot", 0)
             if prev_slot is not None:
                 gap = slot - prev_slot
                 if gap > 1:
-                    weight -= (gap - 1)   # integer penalty — no floats ever
+                    weight -= (gap - 1)
             weight   += 1
             prev_slot = slot
         return max(weight, 0)
 
     def _attempt_reorg(self, valid_blocks: list) -> bool:
-        """Try to replace current chain tail with a longer (or heavier) alternative.
+        """Try to replace current chain tail with a longer/heavier alternative.
 
-        Called from merge() while self._lock is already held, and also from
-        _add_block_locked() when an orphan connects to a known chain position.
-
-        FIX #2: Reorgs that would anchor before the checkpoint boundary are rejected.
-        FIX #3: MAX_SLOT_GAP is NOT applied during reorg validation (historical chains).
-        REORG HARDENING: chain weight (not length), soft finality, depth limit.
-        OBSERVABILITY: structured logs on every rejection and acceptance.
+        Called from merge() while self._lock is already held.
+        Reorgs before checkpoint boundary, and reorgs exceeding MAX_REORG_DEPTH,
+        are always rejected.
         """
         if not valid_blocks:
             return False
@@ -704,7 +654,7 @@ class Ledger:
         if fork_start_in_input is None:
             return False
 
-        # FIX #2: Never reorg before the checkpoint boundary.
+        # Never reorg before the checkpoint boundary
         if fork_anchor_chain_idx == -1 and self.checkpoints:
             return False
 
@@ -718,10 +668,7 @@ class Ledger:
             anchor_hash  = compute_block_hash(anchor_block)
             anchor_slot  = anchor_block.get("slot", -1)
 
-        # Soft finality: reject reorgs that anchor too far behind our tip.
-        # Prevents long-range reorg attacks and deep history rewrites.
-        # Does NOT block partition recovery — MAX_REORG_DEPTH (100 slots ~8 min)
-        # is well above any realistic honest fork length.
+        # Soft finality: reject reorgs that anchor too far behind our tip
         if self.chain and self.checkpoints:
             tip_slot_now = self.chain[-1].get("slot", 0)
             if tip_slot_now - anchor_slot > MAX_REORG_DEPTH:
@@ -731,8 +678,8 @@ class Ledger:
                       end="", flush=True)
                 return False
 
-        # Validate fork blocks sequentially.
-        # FIX #3: MAX_SLOT_GAP intentionally NOT checked during reorg.
+        # Validate fork blocks sequentially
+        # NOTE: MAX_SLOT_GAP intentionally NOT checked during reorg (historical chains)
         validated = []
         prev_hash = anchor_hash
         prev_slot = anchor_slot
@@ -756,7 +703,6 @@ class Ledger:
                 break
             if slot <= prev_slot:
                 break
-            # NOTE: MAX_SLOT_GAP check deliberately omitted here (FIX #3)
             validated.append(block)
             prev_hash = compute_block_hash(block)
             prev_slot = slot
@@ -764,18 +710,12 @@ class Ledger:
         if not validated:
             return False
 
-        # Reorg depth limit: cap how many blocks we can replace in one reorg.
-        # Prevents CPU collapse from reorg storms at scale.
         if self.checkpoints and len(validated) > MAX_REORG_DEPTH:
             print(f"\n  [reorg_rejected] reason=depth_limit"
                   f" alt_blocks={len(validated)} limit={MAX_REORG_DEPTH}\n  > ",
                   end="", flush=True)
             return False
 
-        # Fork choice: chain weight beats block count.
-        # Weight = blocks - gap penalties (integer only — no floats ever).
-        # A dense 10-block chain always beats a sparse 11-block chain with
-        # large slot gaps, closing the sparse-chain attack vector.
         our_tail   = self.chain[fork_anchor_chain_idx + 1:]
         alt_weight = Ledger._chain_weight(validated)
         our_weight = Ledger._chain_weight(our_tail)
@@ -788,7 +728,6 @@ class Ledger:
             return False
 
         if alt_weight == our_weight:
-            # Tie-break: lower tip hash wins. Deterministic, order-independent.
             our_tip = compute_block_hash(self.chain[-1]) if self.chain else GENESIS_PREV_HASH
             alt_tip = compute_block_hash(validated[-1])
             if alt_tip >= our_tip:
@@ -797,7 +736,7 @@ class Ledger:
                       end="", flush=True)
                 return False
 
-        # Supply cap check on the reconstructed chain (integer arithmetic)
+        # Supply cap check on reconstructed chain
         keep_count = fork_anchor_chain_idx + 1
         if self.checkpoints:
             cp          = self.checkpoints[-1]
@@ -810,7 +749,7 @@ class Ledger:
         if alt_minted > TOTAL_SUPPLY:
             return False
 
-        # ── Perform the reorg ──────────────────────────────────────────────────
+        # Perform the reorg
         self.chain = self.chain[:keep_count] + validated
         self.recalculate_totals()
         self._prune_invalid_transactions()
@@ -828,10 +767,7 @@ class Ledger:
 
     def _prune_invalid_transactions(self):
         """Remove transactions whose sender can no longer afford them.
-
-        Called after every reorg while self._lock is already held.
-        All arithmetic is integer (units) — no rounding needed.
-        """
+        Called after every reorg while self._lock is already held."""
         def _chain_balance(device_id: str) -> int:
             bal = 0
             if self.checkpoints:
@@ -846,12 +782,10 @@ class Ledger:
 
         valid_txs = []
         running   = {}
-
         for tx in self.transactions:
             sid  = tx.get("sender_id", "")
             rid  = tx.get("recipient_id", "")
             cost = tx.get("amount", 0) + tx.get("fee", 0)
-
             sender_balance = _chain_balance(sid) + running.get(sid, 0)
             if sender_balance >= cost:
                 valid_txs.append(tx)
@@ -873,16 +807,10 @@ class Ledger:
     def create_checkpoint(self, checkpoint_slot: int) -> bool:
         """Create checkpoint at checkpoint_slot.
 
-        v3.1: all balances stored as int (units).
-        v3.1 Change 2: checkpoint_slot must be a multiple of CHECKPOINT_INTERVAL.
-
-        FIX B/C: checkpoint_slot is validated as a multiple of CHECKPOINT_INTERVAL.
-        fee_rewards before prune_before are included in checkpoint balances and
-        then pruned from self.fee_rewards. This eliminates the silent never-prune
-        invariant and prevents unbounded memory/disk growth over the 37.5-year
-        Era 1 distribution period.
+        FIX-C: checkpoint_slot must be a multiple of CHECKPOINT_INTERVAL.
+        FIX-B: fee_rewards before prune_before are baked into checkpoint
+               balances and then pruned from self.fee_rewards.
         """
-        # FIX C: enforce that checkpoint slot is on a protocol boundary
         if checkpoint_slot % CHECKPOINT_INTERVAL != 0:
             return False
 
@@ -895,7 +823,6 @@ class Ledger:
             c_keep   = [b  for b  in self.chain        if b.get("slot",      prune_before) >= prune_before]
             t_prune  = [t  for t  in self.transactions if (t.get("slot") or 0) < prune_before]
             t_keep   = [t  for t  in self.transactions if (t.get("slot") or 0) >= prune_before]
-            # FIX B: split fee_rewards at the same boundary
             fr_prune = [fr for fr in self.fee_rewards  if fr.get("time_slot", 0) < prune_before]
             fr_keep  = [fr for fr in self.fee_rewards  if fr.get("time_slot", 0) >= prune_before]
 
@@ -909,12 +836,10 @@ class Ledger:
                 rid = t.get("recipient_id", "")
                 if sid: addrs.add(sid)
                 if rid: addrs.add(rid)
-            # FIX B: include fee_reward winners in address set
             for fr in fr_prune:
                 wid = fr.get("winner_id", "")
                 if wid: addrs.add(wid)
 
-            # All balances as int
             balances = {}
             for addr in addrs:
                 bal = prev_bal.get(addr, 0)
@@ -925,7 +850,6 @@ class Ledger:
                         bal -= t.get("fee", 0)
                 for b in c_prune:
                     if b.get("winner_id") == addr: bal += b.get("amount", 0)
-                # FIX B: bake pruned fee_rewards into checkpoint balances
                 for fr in fr_prune:
                     if fr.get("winner_id") == addr: bal += fr.get("amount", 0)
                 balances[addr] = bal
@@ -952,7 +876,6 @@ class Ledger:
                 "kept_minted":       kept_minted,
                 "chain_hash":        Ledger._compute_hash(sorted(c_prune,  key=lambda b:  b.get("slot", 0))),
                 "txs_hash":          Ledger._compute_hash(sorted(t_prune,  key=lambda t:  t.get("timestamp", 0))),
-                # FIX B: record hash of pruned fee_rewards for apply_checkpoint verification
                 "fee_rewards_hash":  Ledger._compute_hash(sorted(fr_prune, key=lambda fr: fr.get("time_slot", 0))),
                 "spent_tx_ids":      spent_tx_ids,
                 "chain_tip_hash":    chain_tip_hash,
@@ -963,10 +886,8 @@ class Ledger:
             if c_keep:
                 self.chain = c_keep
             else:
-                # Keep the tip block so new blocks can link to it
                 self.chain = [c_prune[-1]] if c_prune else []
             self.transactions = t_keep
-            # FIX B: prune fee_rewards — safe because balances now include them
             self.fee_rewards  = fr_keep
             self.checkpoints.append(cp)
             self._spent_tx_ids_set = set(spent_tx_ids)
@@ -975,10 +896,7 @@ class Ledger:
 
     def apply_checkpoint(self, checkpoint: dict) -> bool:
         """Apply a checkpoint received from a peer.
-
-        FIX D: prunes self.fee_rewards at the checkpoint boundary, and
-        verifies fee_rewards_hash when present (backward-compatible: old
-        checkpoints without this field skip the verification step).
+        FIX-D: prunes self.fee_rewards and verifies fee_rewards_hash.
         """
         with self._lock:
             if self.checkpoints:
@@ -995,15 +913,12 @@ class Ledger:
             if t_verify:
                 if Ledger._compute_hash(sorted(t_verify, key=lambda t: t.get("timestamp", 0))) != checkpoint.get("txs_hash", ""):
                     return False
-            # FIX D: verify fee_rewards_hash when both sides have data for it
-            # (conditional so old checkpoints without the field still apply cleanly)
             fr_verify = [fr for fr in self.fee_rewards if fr.get("time_slot", 0) < prune_before]
             if fr_verify and checkpoint.get("fee_rewards_hash"):
                 if Ledger._compute_hash(sorted(fr_verify, key=lambda fr: fr.get("time_slot", 0))) != checkpoint.get("fee_rewards_hash", ""):
                     return False
             self.chain        = [b  for b  in self.chain        if b.get("slot",      prune_before) >= prune_before]
             self.transactions = [t  for t  in self.transactions if (t.get("slot") or 0) >= prune_before]
-            # FIX D: prune fee_rewards at the same boundary
             self.fee_rewards  = [fr for fr in self.fee_rewards  if fr.get("time_slot", 0) >= prune_before]
             self.checkpoints.append(checkpoint)
             self._spent_tx_ids_set = set(checkpoint.get("spent_tx_ids", []))
@@ -1079,7 +994,7 @@ class Wallet:
         return self.public_key.hex()
 
     def sign(self, message: bytes) -> str:
-        # FIX A: was self.wallet.private_key (NameError); corrected to self.private_key
+        # FIX-A: was self.wallet.private_key (NameError); corrected to self.private_key
         return Dilithium3.sign(self.private_key, message).hex()
 
     @staticmethod
@@ -1095,22 +1010,17 @@ class Wallet:
 class Transaction:
     def __init__(self, sender_id, recipient_id, sender_pubkey,
                  amount: int, timestamp=None, tx_id=None, fee: int = 0, slot=None):
-        """
-        amount: int, in units (1 TMPL = UNIT units)
-        fee:    int, in units
-        """
         self.tx_id         = tx_id or str(uuid.uuid4())
         self.sender_id     = sender_id
         self.recipient_id  = recipient_id
         self.sender_pubkey = sender_pubkey
-        self.amount        = amount   # int (units)
-        self.fee           = fee      # int (units)
+        self.amount        = amount
+        self.fee           = fee
         self.slot          = slot
         self.timestamp     = timestamp or time.time()
         self.signature     = None
 
     def _payload(self) -> bytes:
-        """Deterministic payload for signing. Amounts formatted as integers."""
         return (f"{self.tx_id}:{self.sender_id}:{self.recipient_id}:"
                 f"{self.amount}:{self.fee}:{self.timestamp:.6f}:"
                 f"{self.slot if self.slot is not None else 0}").encode()
@@ -1138,7 +1048,6 @@ class Transaction:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Transaction":
-        # v3.1: amount and fee must be int
         amount = d["amount"]
         if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
             raise ValueError(f"invalid amount (must be int > 0): {amount!r}")
@@ -1440,6 +1349,12 @@ class Network:
         return confirmed.is_set()
 
     def _sync_ledger(self):
+        """Pull missing blocks, txs, and fee_rewards from up to 3 peers.
+
+        C2 FIX: fee_rewards from SYNC_RESPONSE are now passed into
+        ledger.merge() so nodes that missed live FEE_REWARDS broadcasts
+        recover them on the next sync.
+        """
         time.sleep(1)
         peers = self.get_online_peers()
         if not peers:
@@ -1489,11 +1404,14 @@ class Network:
                         elif self._confirm_checkpoint_with_peers(cp, exclude_ip=peer["ip"]):
                             self.ledger.apply_checkpoint(cp)
 
+                    # C2 FIX: include fee_rewards in the merge delta so nodes
+                    # that missed live FEE_REWARDS broadcasts recover them here.
                     delta = {
                         "blocks":       msg.get("blocks", []),
-                        "transactions": msg.get("txs", [])
+                        "transactions": msg.get("txs", []),
+                        "fee_rewards":  msg.get("fee_rewards", []),
                     }
-                    if delta["blocks"] or delta["transactions"]:
+                    if delta["blocks"] or delta["transactions"] or delta["fee_rewards"]:
                         known_before = set(t.get("tx_id") for t in self.ledger.transactions)
                         merged = self.ledger.merge(delta)
                         if merged:
@@ -1521,14 +1439,22 @@ class Network:
                             push_b = [b for b in self.ledger.chain
                                       if b.get("slot", -1) > (we_need_from_slot if we_need_from_slot is not None else -1)]
                             push_t = [t for t in self.ledger.transactions if t.get("tx_id") in we_need_tx_ids]
-                        if push_b or push_t:
+                            # M10 FIX: include fee_rewards in SYNC_PUSH payload,
+                            # filtered to entries after what the peer already has.
+                            push_fr = [fr for fr in self.ledger.fee_rewards
+                                       if fr.get("time_slot", -1) > (we_need_from_slot if we_need_from_slot is not None else -1)]
+                        if push_b or push_t or push_fr:
                             try:
                                 s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                                 s2.settimeout(30.0)
                                 s2.connect((peer["ip"], peer["port"]))
-                                s2.sendall(json.dumps({"type": "SYNC_PUSH",
-                                                       "blocks": push_b,
-                                                       "txs": push_t}).encode())
+                                # M10 FIX: fee_rewards included in push payload
+                                s2.sendall(json.dumps({
+                                    "type":        "SYNC_PUSH",
+                                    "blocks":      push_b,
+                                    "txs":         push_t,
+                                    "fee_rewards": push_fr,
+                                }).encode())
                                 s2.shutdown(socket.SHUT_WR)
                                 s2.close()
                             except Exception:
@@ -1622,7 +1548,7 @@ class Network:
                 pid = msg.get("device_id")
                 if _ver(msg.get("version", "0.0")) < _ver(MIN_VERSION):
                     conn.sendall(json.dumps({"type": "VERSION_REJECTED",
-                                             "reason": f"Update from https://github.com/EvokiTimpal/timpal"}).encode())
+                                             "reason": "Update from https://github.com/EvokiTimpal/timpal"}).encode())
                     return
                 if pid and pid != self.wallet.device_id:
                     with self._peers_lock:
@@ -1652,8 +1578,6 @@ class Network:
                 threading.Thread(target=self.broadcast, args=(msg, None), daemon=True).start()
 
             elif msg_type == "FEE_REWARDS":
-                # v3.1 Change 3: Option B — accept fee rewards in any era.
-                # MIN_TX_FEE = 50_000 from genesis; fires whenever transactions exist in the slot.
                 ts  = msg.get("time_slot")
                 frs = msg.get("fee_rewards", [])[:10]
                 if not frs or ts is None:
@@ -1701,8 +1625,6 @@ class Network:
                 if gid:
                     self.on_block(block)
                     threading.Thread(target=self.broadcast, args=(msg, None), daemon=True).start()
-                    # Fix #4: if this block doesn't extend our tip, it's a competing
-                    # fork — trigger immediate sync rather than waiting up to 120s.
                     with self.ledger._lock:
                         tip_hash, _ = self.ledger._get_tip()
                     if block.get("prev_hash") != tip_hash:
@@ -1713,8 +1635,12 @@ class Network:
                     known_ips = {p["ip"] for p in self.peers.values()}
                 if sender_ip not in known_ips:
                     return
-                self.ledger.merge({"blocks":       msg.get("blocks", [])[:5000],
-                                   "transactions": msg.get("txs",    [])[:2000]})
+                # M10 FIX: include fee_rewards in SYNC_PUSH merge
+                self.ledger.merge({
+                    "blocks":       msg.get("blocks", [])[:5000],
+                    "transactions": msg.get("txs",    [])[:2000],
+                    "fee_rewards":  msg.get("fee_rewards", []),
+                })
 
             elif msg_type == "CHECKPOINT":
                 cp = msg.get("checkpoint", {})
@@ -1748,7 +1674,6 @@ class Network:
                         return
                     self._sync_rate[sender_ip] = now
 
-                their_height   = msg.get("chain_height", 0)
                 their_tip_hash = msg.get("chain_tip_hash", GENESIS_PREV_HASH)
                 their_tip_slot = msg.get("chain_tip_slot", -1)
                 their_tx_ids   = set(msg.get("known_tx_ids", [])[:10000])
@@ -1764,10 +1689,13 @@ class Network:
                         if latest["slot"] > their_cp:
                             our_cp = latest
 
+                    # M3 FIX: send only blocks after the peer's tip slot,
+                    # not the entire chain on any hash mismatch.
                     if their_tip_hash == tip_hash:
                         missing_blocks = []
                     else:
-                        missing_blocks = list(self.ledger.chain)[:5000]
+                        missing_blocks = [b for b in self.ledger.chain
+                                          if b.get("slot", -1) > their_tip_slot][:5000]
 
                     we_need_from_slot = their_tip_slot if their_tip_slot > tip_slot else None
 
@@ -1825,10 +1753,14 @@ class Node:
         self.network = Network(self.wallet, self.ledger,
                                self._on_transaction_received, self._on_block_received)
         self.network._node_ref = self
-        self._sending      = False
-        self._my_tickets   = {}
-        self._commits      = {}
-        self._lottery_lock = threading.Lock()
+        self._sending         = False
+        # M1 FIX: _my_tickets protected by its own lock.
+        # Eliminates RuntimeError from concurrent read-in-lottery /
+        # delete-in-cleanup without lock.
+        self._my_tickets      = {}
+        self._my_tickets_lock = threading.Lock()
+        self._commits         = {}
+        self._lottery_lock    = threading.Lock()
 
     def _acquire_lock(self):
         import sys
@@ -1852,14 +1784,16 @@ class Node:
                 with open(WALLET_FILE, "r") as f:
                     wd = json.load(f)
                 if _ver(wd.get("version", "0.0")) < _ver(VERSION):
-                    print("\n  " + "═"*52)
-                    print("  TIMPAL v3.1 — ACTION REQUIRED")
-                    print("  " + "═"*52)
-                    print(f"  Wallet version {wd.get('version','?')} is too old.")
-                    print(f"  Delete old wallet and ledger, then restart:")
-                    print(f"  rm ~/.timpal_wallet.json ~/.timpal_ledger.json")
-                    print("  " + "═"*52 + "\n")
-                    exit(1)
+                    # v3.1 wallets load fine — only block versions < 3.1
+                    if _ver(wd.get("version", "0.0")) < _ver(MIN_VERSION):
+                        print("\n  " + "═"*52)
+                        print("  TIMPAL v3.2 — ACTION REQUIRED")
+                        print("  " + "═"*52)
+                        print(f"  Wallet version {wd.get('version','?')} is too old.")
+                        print(f"  Delete old wallet and ledger, then restart:")
+                        print(f"  rm ~/.timpal_wallet.json ~/.timpal_ledger.json")
+                        print("  " + "═"*52 + "\n")
+                        exit(1)
             except Exception:
                 pass
             with open(WALLET_FILE, "r") as f:
@@ -1949,6 +1883,8 @@ class Node:
                   f"+{block.get('amount', 0) / UNIT:.4f} TMPL\n  > ", end="", flush=True)
 
     def _vrf_ticket(self, time_slot: int) -> tuple:
+        """Generate VRF ticket for time_slot.
+        P2 FIX: retries up to 5 times on IndexError from Dilithium3.sign."""
         seed = str(time_slot)
         for _ in range(5):
             try:
@@ -1996,14 +1932,7 @@ class Node:
 
     def _bootstrap_submit_commit(self, msg: dict) -> str:
         """Submit commit to all bootstrap servers.
-
-        FIX E: done event fires on the FIRST COMMIT_ACK received rather than
-        waiting for all servers to respond. With multiple bootstrap servers at
-        different latencies, waiting for all could eat into the 2-second commit
-        window and cause missed commits. A single ACK is sufficient — if any
-        server accepted the commit, the lottery can proceed.
-        COMMIT_REJECTED still requires all results (or timeout) to be certain.
-        """
+        FIX-E: fires done on first COMMIT_ACK received."""
         results   = []
         lock      = threading.Lock()
         done      = threading.Event()
@@ -2030,9 +1959,6 @@ class Node:
                     self.network._network_size = ns
                 with lock:
                     results.append(data.get("type", "ERROR"))
-                    # FIX E: unblock as soon as we have a definitive answer.
-                    # COMMIT_ACK from any server → proceed immediately.
-                    # COMMIT_REJECTED → wait for all results to be sure.
                     if data.get("type") == "COMMIT_ACK":
                         done.set()
             except Exception:
@@ -2042,7 +1968,7 @@ class Node:
                 with lock:
                     remaining[0] -= 1
                     if remaining[0] <= 0:
-                        done.set()   # all servers responded (or errored)
+                        done.set()
 
         if not servers:
             return "COMMIT_ACK"
@@ -2055,10 +1981,10 @@ class Node:
             return "COMMIT_ACK"
 
     def _bootstrap_query_commits(self, slot: int) -> dict:
-        results = {}
-        lock = threading.Lock()
-        done = threading.Event()
-        servers = list(self.network._bootstrap_servers)
+        results   = {}
+        lock      = threading.Lock()
+        done      = threading.Event()
+        servers   = list(self.network._bootstrap_servers)
         remaining = [len(servers)]
         def _query(host, port):
             try:
@@ -2136,6 +2062,14 @@ class Node:
         return results, bs_target[0]
 
     def _pick_winner(self, time_slot: int, all_reveals: dict):
+        """Determine the winning node for time_slot.
+
+        M7 FIX: compute the collective target from the verified dict only.
+        Previously the target was computed from all_reveals (including reveals
+        with no matching commit or failing VRF), so a malicious node could
+        submit arbitrary ticket values to shift the target and steer the winner
+        without being eligible to win itself.
+        """
         verified = {}
         with self._lottery_lock:
             known_commits = dict(self._commits.get(time_slot, {}))
@@ -2157,7 +2091,8 @@ class Node:
             verified[device_id] = r
         if not verified:
             return None
-        tickets    = sorted(r["ticket"] for r in all_reveals.values() if r.get("ticket"))
+        # M7 FIX: compute target from verified only — unverified reveals excluded
+        tickets    = sorted(verified[d]["ticket"] for d in verified)
         target     = hashlib.sha256(":".join(tickets).encode()).hexdigest()
         target_int = int(target, 16)
         winner_id  = min(verified, key=lambda d: (
@@ -2168,12 +2103,8 @@ class Node:
 
     def _collect_slot_fees(self, time_slot: int, winner_id: str):
         """v3.1 Change 3 (Option B): collect all pending tx fees → winner.
-
-        P3 fix: removed broken slot-match. tx.slot is stamped at send time on
-        the sender's node; by the time the tx propagates and a block is won the
-        slot has advanced so the match always returned 0. Instead we collect all
-        fees from transactions that have not yet been awarded (no fee_reward
-        entry exists for their tx_id). Fees do NOT increase total_minted.
+        P3 FIX: uses total_pending = total_tx_fees - total_awarded.
+        Fees do NOT increase total_minted.
         """
         with self.ledger._lock:
             total_tx_fees = sum(
@@ -2198,8 +2129,12 @@ class Node:
                                     }]})
 
     def _claim_reward(self, winner: dict, time_slot: int, active_nodes=None):
-        """v3.1: block amount is REWARD_PER_ROUND (int units). Timestamp is int.
-        After block is accepted, collect slot fees for winner (Change 3).
+        """Claim block reward for the winning node.
+
+        C1 FIX: SUBMIT_TIP now reports the hash of the last chain block at or
+        before the checkpoint boundary, not compute_block_hash(winning_block).
+        Every node on the same chain will have the same block at slot ≤ cp_boundary,
+        so bootstrap majority voting resolves to a single hash and checkpointing works.
         """
         if not Node._verify_ticket(winner["public_key"], winner["seed"],
                                    winner["sig"], winner["ticket"]):
@@ -2212,7 +2147,6 @@ class Node:
 
         if time_slot <= tip_slot:
             return
-        # MAX_SLOT_GAP not checked here — self-production must never be blocked by local lag
 
         reward_id = f"reward:{time_slot}"
         block = {
@@ -2220,8 +2154,8 @@ class Node:
             "slot":           time_slot,
             "prev_hash":      tip_hash,
             "winner_id":      winner["winner_id"],
-            "amount":         REWARD_PER_ROUND,   # int (units)
-            "timestamp":      int(time.time()),    # int, not float
+            "amount":         REWARD_PER_ROUND,
+            "timestamp":      int(time.time()),
             "vrf_ticket":     winner["ticket"],
             "vrf_seed":       winner["seed"],
             "vrf_sig":        winner["sig"],
@@ -2237,20 +2171,36 @@ class Node:
         with self.network._seen_lock:
             self.network.seen_ids.add(gid)
 
+        # C1 FIX: compute the tip hash at the checkpoint boundary.
+        # Scan backwards through the chain for the last block with
+        # slot ≤ cp_boundary and report that hash to bootstrap.
+        # All nodes on the same chain converge to the same boundary block,
+        # so the bootstrap tally accumulates votes for one hash → majority resolves.
+        cp_boundary = (time_slot // CHECKPOINT_INTERVAL) * CHECKPOINT_INTERVAL
+        tip_at_cp   = GENESIS_PREV_HASH
+        if cp_boundary > 0:
+            with self.ledger._lock:
+                for b in reversed(self.ledger.chain):
+                    if b.get("slot", 0) <= cp_boundary:
+                        tip_at_cp = compute_block_hash(b)
+                        break
+                else:
+                    # No chain block at or before boundary — fall back to
+                    # the stored checkpoint tip (handles pruned chains)
+                    if self.ledger.checkpoints:
+                        tip_at_cp = self.ledger.checkpoints[-1].get(
+                            "chain_tip_hash", GENESIS_PREV_HASH)
+
         self._bootstrap_submit({
             "type":      "SUBMIT_TIP",
             "device_id": self.wallet.device_id,
             "slot":      time_slot,
-            "tip_hash":  compute_block_hash(block)
+            "tip_hash":  tip_at_cp,
         })
 
         self.network.broadcast({"type": "BLOCK", "block": block})
-
-        # Fix #4: immediately sync after producing a block so peers that built
-        # a competing fork converge to our chain as fast as possible.
         threading.Thread(target=self.network._sync_ledger, daemon=True).start()
 
-        # v3.1 Change 3: collect fees for this slot and award to winner
         self._collect_slot_fees(time_slot, winner["winner_id"])
 
         if winner["winner_id"] == self.wallet.device_id:
@@ -2266,11 +2216,15 @@ class Node:
                   f"+{REWARD_PER_ROUND / UNIT:.4f} TMPL\n  > ", end="", flush=True)
 
     def _cleanup_slot(self, time_slot: int):
+        """Clean up per-slot state after lottery resolution.
+        M1 FIX: _my_tickets accessed under _my_tickets_lock."""
         with self._lottery_lock:
             for s in [s for s in self._commits if s < time_slot - 10]:
                 del self._commits[s]
-        for s in [s for s in self._my_tickets if s < time_slot - 10]:
-            del self._my_tickets[s]
+        # M1 FIX: hold _my_tickets_lock while iterating and deleting
+        with self._my_tickets_lock:
+            for s in [s for s in self._my_tickets if s < time_slot - 10]:
+                del self._my_tickets[s]
         cutoff = time_slot - 100
         with self.network._seen_lock:
             def _stale(sid):
@@ -2289,6 +2243,10 @@ class Node:
                 self.network._seen_tx_order = self.network._seen_tx_order[-10000:]
 
     def _reward_lottery(self):
+        """Main lottery loop. Outer try/except ensures the thread never dies silently.
+        P2 FIX: outer guard restarts on any unhandled exception.
+        M1 FIX: all _my_tickets writes done under _my_tickets_lock.
+        """
         time.sleep(45)
         while self.network._running:
             try:
@@ -2315,7 +2273,9 @@ class Node:
                     continue
 
                 ticket, sig_hex, seed = self._vrf_ticket(time_slot)
-                self._my_tickets[time_slot] = (ticket, sig_hex, seed)
+                # M1 FIX: write under lock
+                with self._my_tickets_lock:
+                    self._my_tickets[time_slot] = (ticket, sig_hex, seed)
                 commit = self._make_commit(time_slot, ticket)
 
                 result = self._bootstrap_submit_commit({
@@ -2360,7 +2320,6 @@ class Node:
                     self._cleanup_slot(time_slot); continue
 
                 all_reveals, _ = self._bootstrap_query_reveals(time_slot)
-
                 all_reveals[self.wallet.device_id] = {
                     "ticket": ticket, "sig": sig_hex,
                     "seed": seed, "public_key": self.wallet.public_key.hex()
@@ -2386,13 +2345,8 @@ class Node:
                 print(f"\n  [lottery] Error: {e} — retrying next slot\n  > ", end="", flush=True)
                 time.sleep(REWARD_INTERVAL)
                 continue
-    def send(self, peer_id: str, amount_tmpl) -> bool:
-        """Send TMPL to peer_id.
 
-        amount_tmpl: TMPL as float or int (user-facing).
-        Converted to units (int) internally. Only units are stored in transactions.
-        """
-        # Convert TMPL to integer units
+    def send(self, peer_id: str, amount_tmpl) -> bool:
         try:
             amount = int(round(float(amount_tmpl) * UNIT))
         except (TypeError, ValueError):
@@ -2409,7 +2363,7 @@ class Node:
             print("\n  Cannot send to yourself.")
             return False
         my_balance = self.ledger.get_balance(self.wallet.device_id)
-        fee        = get_current_fee()        # int (units)
+        fee        = get_current_fee()
         total_cost = amount + fee
         if total_cost > my_balance:
             print(f"\n  Insufficient balance. Have {my_balance / UNIT:.8f}, need {total_cost / UNIT:.8f}.")
@@ -2516,7 +2470,7 @@ class Node:
                     "public_key":   self.wallet.get_public_key_hex(),
                     "blocks":       blocks_push,
                     "transactions": txs,
-                    "total_minted": total_minted,   # int (units)
+                    "total_minted": total_minted,
                     "timestamp":    int(time.time())
                 }
                 payload_bytes = json.dumps(payload_data, sort_keys=True, separators=(',', ':')).encode()
@@ -2533,16 +2487,11 @@ class Node:
             time.sleep(5)
 
     def _bootstrap_query_checkpoint_tip(self, cp_slot: int) -> tuple:
-        """Query bootstrap servers for the network majority chain tip at cp_slot.
-        Returns (majority_hash, count, peer_id) or (None, 0, None) on failure.
-        One small TCP call per checkpoint boundary (~83 min) — O(1) on bootstrap side.
-        Scales to millions of nodes with zero fan-out.
-        """
-        result  = [None, 0, None]
-        done    = threading.Event()
-        servers = list(self.network._bootstrap_servers)
+        result    = [None, 0, None]
+        done      = threading.Event()
+        servers   = list(self.network._bootstrap_servers)
         remaining = [len(servers)]
-        lock    = threading.Lock()
+        lock      = threading.Lock()
         def _query(host, port):
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -2580,20 +2529,16 @@ class Node:
         return result[0], result[1], result[2]
 
     def _checkpoint_loop(self):
-        """v3.1 Change 2: checkpoint interval is CHECKPOINT_INTERVAL = 1000.
+        """Periodic checkpoint creation with bootstrap consensus.
 
-        P1 fix: checkpoint is now a consensus event, not a unilateral one.
-        Before creating a checkpoint the node queries the bootstrap server for
-        the network majority chain_tip_hash at the checkpoint slot boundary.
-        If our tip matches the majority we checkpoint immediately.
-        If not we are on a minority fork — trigger a targeted sync, wait for
-        convergence, then re-check. If still diverged after the wait we skip
-        this cycle and retry 30 seconds later. Skipping is always safe;
-        checkpointing the wrong tip is not.
+        M6 FIX: skips checkpoint when chain is empty and no prior checkpoints
+        exist. A fresh node with no blocks would record GENESIS_PREV_HASH as
+        the chain_tip_hash, which can never match any peer's checkpoint for
+        the same slot.
 
-        Scales to millions of nodes: each node makes exactly one small TCP
-        call to bootstrap per checkpoint (~83 min). Bootstrap does an O(1)
-        dict lookup. Zero peer fan-out at any network size.
+        C1 FIX is in _claim_reward — by the time we reach this loop the
+        bootstrap tally for next_cp should contain the correct boundary hashes,
+        so majority_hash comparison works reliably.
         """
         while self.network._running:
             try:
@@ -2606,8 +2551,14 @@ class Node:
                     next_cp  = boundary if boundary > 0 else CHECKPOINT_INTERVAL
 
                 if current_slot >= next_cp + CHECKPOINT_BUFFER:
-                    # --- P1 fix: consensus check before checkpointing ---
-                    # Get our tip hash at next_cp from our own chain.
+                    # M6 FIX: don't checkpoint if we have no chain data at all.
+                    # A node that just started has no block at or before next_cp,
+                    # so its "tip" would be GENESIS_PREV_HASH — wrong.
+                    # Wait until we have at least one synced block before checkpointing.
+                    if not self.ledger.chain and not self.ledger.checkpoints:
+                        time.sleep(30)
+                        continue
+
                     with self.ledger._lock:
                         our_tip = None
                         for b in reversed(self.ledger.chain):
@@ -2617,11 +2568,9 @@ class Node:
                         if our_tip is None and self.ledger.checkpoints:
                             our_tip = self.ledger.checkpoints[-1].get("chain_tip_hash")
 
-                    # Query bootstrap for what the network majority reported.
                     majority_hash, count, peer_id = self._bootstrap_query_checkpoint_tip(next_cp)
 
                     if majority_hash is not None and our_tip != majority_hash:
-                        # We are on a minority fork. Sync toward the majority.
                         print(f"\n  [checkpoint] Minority fork at slot {next_cp} "
                               f"— our tip {str(our_tip)[:16]}... "
                               f"majority {majority_hash[:16]}... "
@@ -2632,7 +2581,6 @@ class Node:
                             sync_done.set()
                         threading.Thread(target=_sync_and_signal, daemon=True).start()
                         sync_done.wait(timeout=30.0)
-                        # Re-check our tip after sync.
                         with self.ledger._lock:
                             our_tip = None
                             for b in reversed(self.ledger.chain):
@@ -2648,8 +2596,6 @@ class Node:
                             time.sleep(30)
                             continue
 
-                    # Either majority agrees, bootstrap has no data yet
-                    # (isolated node), or we converged after sync.
                     if self.ledger.create_checkpoint(next_cp):
                         print(f"\n  ╔══════════════════════════════════════╗")
                         print(f"  ║       CHECKPOINT CREATED             ║")
@@ -2668,7 +2614,7 @@ class Node:
 
     def start(self):
         print("\n" + "═"*54)
-        print("  TIMPAL v3.1 — Quantum-Resistant Money Without Masters")
+        print("  TIMPAL v3.2 — Quantum-Resistant Money Without Masters")
         print("  Quantum-Resistant | Worldwide | Instant | Chain-Anchored")
         print("═"*54)
         self.network.start()
@@ -2745,7 +2691,7 @@ class Node:
                 s     = self.ledger.get_summary()
                 peers = self.network.get_online_peers()
                 tip_hash, tip_slot = self.ledger._get_tip()
-                print(f"\n  Network Status (v3.1):")
+                print(f"\n  Network Status (v3.2):")
                 print(f"  Online peers      : {len(peers)}")
                 print(f"  Chain height      : {s['chain_height']} blocks")
                 print(f"  Chain tip slot    : {tip_slot}")

@@ -10,6 +10,7 @@ MIN_VERSION = "3.1"
 GENESIS_TIME = 1774123200   # ← REPLACE with the same number as in timpal.py
 
 REWARD_INTERVAL=5.0; TARGET_PARTICIPANTS=10; BAN_DURATION=10
+CHECKPOINT_INTERVAL=1000
 REVEAL_MISS_THRESHOLD=2; NETWORK_SIZE_SAMPLES=10
 GENESIS_PREV_HASH="0"*64
 
@@ -38,6 +39,9 @@ peers_lock=threading.Lock(); lottery_lock=threading.Lock(); rate_lock=threading.
 _peer_count_history=[]; _peer_count_history_lock=threading.Lock()
 _chain_tip_lock=threading.Lock()
 _chain_tip={"hash":GENESIS_PREV_HASH,"slot":-1,"device_id":""}
+_checkpoint_tips={}      # {cp_slot: {tip_hash: count}} — network majority tip per checkpoint
+_checkpoint_winners={}   # {cp_slot: {tip_hash: first_device_id}} — for targeted sync
+_checkpoint_tips_lock=threading.Lock()
 commit_ip_rate={}; reveal_ip_rate={}; hello_ip_rate={}; bs_ip_rate={}; tip_ip_rate={}
 bootstrap_servers={}; bootstrap_servers_lock=threading.Lock()
 COMMIT_RATE_LIMIT=3; REVEAL_RATE_LIMIT=3; HELLO_RATE_LIMIT=10
@@ -100,6 +104,11 @@ def clean_old_data():
             for ip in list(bs_ip_rate.keys()):
                 bs_ip_rate[ip]=[t for t in bs_ip_rate[ip] if now-t<3600]
                 if not bs_ip_rate[ip]: del bs_ip_rate[ip]
+        with _checkpoint_tips_lock:
+            keep=sorted(_checkpoint_tips.keys())[-5:]
+            for s in [s for s in list(_checkpoint_tips) if s not in keep]:
+                del _checkpoint_tips[s]
+                _checkpoint_winners.pop(s,None)
 
 def handle_client(conn,addr):
     try:
@@ -150,11 +159,31 @@ def handle_client(conn,addr):
                 if slot>_chain_tip["slot"]:
                     _chain_tip.update({"hash":th,"slot":slot,"device_id":did})
                     print(f"  [chain] Tip: slot {slot} by {did[:20]}...")
+            cp_slot=(slot//CHECKPOINT_INTERVAL)*CHECKPOINT_INTERVAL
+            if cp_slot>0:
+                with _checkpoint_tips_lock:
+                    _checkpoint_tips.setdefault(cp_slot,{})
+                    _checkpoint_tips[cp_slot][th]=_checkpoint_tips[cp_slot].get(th,0)+1
+                    _checkpoint_winners.setdefault(cp_slot,{})
+                    if th not in _checkpoint_winners[cp_slot]:
+                        _checkpoint_winners[cp_slot][th]=did
             conn.sendall(json.dumps({"type":"TIP_ACK","slot":slot}).encode())
 
         elif mt=="GET_CHAIN_TIP":
             with _chain_tip_lock: th=_chain_tip["hash"]; ts=_chain_tip["slot"]
             conn.sendall(json.dumps({"type":"CHAIN_TIP_RESPONSE","chain_tip_hash":th,"chain_tip_slot":ts}).encode())
+
+        elif mt=="GET_CHECKPOINT_TIP":
+            cp_slot=msg.get("cp_slot")
+            if not isinstance(cp_slot,int) or cp_slot<=0 or cp_slot%CHECKPOINT_INTERVAL!=0:
+                conn.sendall(json.dumps({"type":"ERROR","msg":"bad cp_slot"}).encode()); return
+            with _checkpoint_tips_lock:
+                tally=dict(_checkpoint_tips.get(cp_slot,{}))
+                winners=dict(_checkpoint_winners.get(cp_slot,{}))
+            if not tally:
+                conn.sendall(json.dumps({"type":"CHECKPOINT_TIP_RESPONSE","cp_slot":cp_slot,"majority_hash":None,"count":0,"peer_id":None}).encode()); return
+            majority_hash=max(tally,key=lambda h:tally[h])
+            conn.sendall(json.dumps({"type":"CHECKPOINT_TIP_RESPONSE","cp_slot":cp_slot,"majority_hash":majority_hash,"count":tally[majority_hash],"peer_id":winners.get(majority_hash)}).encode())
 
         elif mt=="SUBMIT_COMMIT":
             did=msg.get("device_id",""); slot=msg.get("slot"); commit=msg.get("commit","")

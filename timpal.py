@@ -2502,6 +2502,7 @@ class Node:
                             blocks_push.append({k: v for k, v in b.items()
                                                 if k not in ("vrf_sig", "vrf_public_key")})
                     txs          = list(self.ledger.transactions[-20:])
+                    fee_rewards  = list(self.ledger.fee_rewards[-50:])
                     total_minted = self.ledger.total_minted
                     summary      = self.ledger.get_summary()
 
@@ -2511,6 +2512,7 @@ class Node:
                     "public_key":   self.wallet.get_public_key_hex(),
                     "blocks":       blocks_push,
                     "transactions": txs,
+                    "fee_rewards":  fee_rewards,
                     "total_minted": total_minted,
                     "chain_height": summary["chain_height"],
                     "node_wins":    self._total_wins,
@@ -2881,7 +2883,9 @@ class Node:
                     my_tx      = [t for t in self.ledger.transactions
                                   if t["sender_id"] == my_id or t["recipient_id"] == my_id]
                     my_rewards = [b for b in self.ledger.chain if b.get("winner_id") == my_id]
-                if not my_tx and not my_rewards:
+                    my_fees    = [fr for fr in self.ledger.fee_rewards
+                                  if fr.get("winner_id") == my_id]
+                if not my_tx and not my_rewards and not my_fees:
                     print("\n  No transactions yet.\n")
                 else:
                     print(f"\n  Your history:")
@@ -2889,6 +2893,9 @@ class Node:
                         t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(b["timestamp"]))
                         confirmed = "✓" if self.ledger.is_confirmed(b.get("slot", 0)) else "○"
                         print(f"  {confirmed} REWARD   +{b['amount'] / UNIT:.8f} TMPL  slot {b.get('slot','?')}  [{t}]")
+                    for fr in my_fees[-5:]:
+                        t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(fr["timestamp"]))
+                        print(f"  ★ FEE      +{fr['amount'] / UNIT:.8f} TMPL  slot {fr.get('time_slot','?')}  [{t}]")
                     for tx in my_tx[-10:]:
                         t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(tx["timestamp"]))
                         if tx["sender_id"] == my_id:

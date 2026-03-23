@@ -56,29 +56,7 @@ _ledger = {
 _ledger_lock = threading.Lock()
 _last_update = 0
 _node_wins    = {}   # persisted win counts per device_id from push
-_NODE_WINS_FILE = "/root/.timpal_node_wins.json"
 
-
-def _load_node_wins():
-    """Load _node_wins from disk on startup so stats survive API restarts."""
-    global _node_wins
-    try:
-        if os.path.exists(_NODE_WINS_FILE):
-            with open(_NODE_WINS_FILE, "r") as f:
-                _node_wins = json.load(f)
-    except Exception:
-        pass
-
-
-def _save_node_wins():
-    """Atomically persist _node_wins to disk. Called whenever a value changes."""
-    try:
-        tmp = _NODE_WINS_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(_node_wins, f)
-        os.replace(tmp, _NODE_WINS_FILE)
-    except Exception:
-        pass
 
 # ── Cached computed stats ──────────────────────────────────────────────────────
 _stats_cache      = None
@@ -522,7 +500,6 @@ class Handler(BaseHTTPRequestHandler):
                 push_did    = data.get("device_id", "")
                 if push_did and isinstance(incoming_nw, int) and incoming_nw > _node_wins.get(push_did, 0):
                     _node_wins[push_did] = incoming_nw
-                    _save_node_wins()
 
                 # Update tip from the highest-slot block we have
                 block_rewards = [b for b in _ledger["blocks"] if b.get("type") == "block_reward"]
@@ -559,7 +536,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    _load_node_wins()
     threading.Thread(target=_clean_post_rate, daemon=True).start()
     print("TIMPAL API v3.2 running on port 7781")
     print("Push authentication: Dilithium3 signature (no shared secret)")

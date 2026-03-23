@@ -1675,6 +1675,9 @@ class Network:
                         else:
                             applied = False
                         if applied:
+                            cp_slot = cp.get("slot", "?")
+                            print(f"\n  [checkpoint] Applied slot {cp_slot} from peer\n  > ",
+                                  end="", flush=True)
                             self.broadcast({"type": "CHECKPOINT", "checkpoint": cp})
 
             elif msg_type == "SYNC_REQUEST":
@@ -2796,10 +2799,16 @@ class Node:
                     height = len(self.ledger.chain)
                     recent = self.ledger.chain[-5:]
                     orphan_count = sum(len(v) for v in self.ledger._orphan_pool.values())
+                    cp_count = len(self.ledger.checkpoints)
+                    last_cp  = self.ledger.checkpoints[-1] if self.ledger.checkpoints else None
                 print(f"\n  Chain State:")
-                print(f"  Height   : {height} blocks")
-                print(f"  Tip slot : {tip_slot}")
-                print(f"  Tip hash : {tip_hash[:32]}...")
+                print(f"  Height      : {height} blocks")
+                print(f"  Tip slot    : {tip_slot}")
+                print(f"  Tip hash    : {tip_hash[:32]}...")
+                if last_cp:
+                    print(f"  Checkpoints : {cp_count}  (last: slot {last_cp['slot']}, prune_before: {last_cp['prune_before']})")
+                else:
+                    print(f"  Checkpoints : 0")
                 if orphan_count:
                     print(f"  Orphans  : {orphan_count} pending")
                 if recent:

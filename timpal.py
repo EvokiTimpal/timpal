@@ -1729,7 +1729,7 @@ class Network:
                         # Old client without chain_recent_hashes — send full chain
                         missing_blocks = list(self.ledger.chain)[:5000]
 
-                    we_need_from_slot = their_tip_slot if their_tip_slot > tip_slot else None
+                    we_need_from_slot = tip_slot if their_tip_slot > tip_slot else None
 
                 conn.sendall(json.dumps({
                     "type":              "SYNC_RESPONSE",
@@ -1786,6 +1786,7 @@ class Node:
                                self._on_transaction_received, self._on_block_received)
         self.network._node_ref = self
         self._sending         = False
+        self._total_wins      = 0     # cumulative wins this process run
         # M1 FIX: _my_tickets protected by its own lock.
         # Eliminates RuntimeError from concurrent read-in-lottery /
         # delete-in-cleanup without lock.
@@ -2199,6 +2200,9 @@ class Node:
         if not self.ledger.add_block(block):
             return
 
+        if winner["winner_id"] == self.wallet.device_id:
+            self._total_wins += 1
+
         gid = reward_id + ":" + winner["winner_id"]
         with self.network._seen_lock:
             self.network.seen_ids.add(gid)
@@ -2506,6 +2510,7 @@ class Node:
                     "transactions": txs,
                     "total_minted": total_minted,
                     "chain_height": summary["chain_height"],
+                    "node_wins":    self._total_wins,
                     "timestamp":    int(time.time())
                 }
                 payload_bytes = json.dumps(payload_data, sort_keys=True, separators=(',', ':')).encode()
@@ -2652,7 +2657,7 @@ class Node:
                     # With N online peers require min(N,2) votes so one node
                     # cannot checkpoint unilaterally before the other has voted.
                     known_peers       = len(self.network.get_online_peers())
-                    min_votes         = max(1, min(known_peers, 2))
+                    min_votes         = 1 if known_peers == 0 else 2
                     max_attempts      = 10
                     consensus_reached = False
                     count             = 0

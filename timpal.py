@@ -1793,6 +1793,7 @@ class Node:
         self.network._node_ref = self
         self._sending         = False
         self._total_wins      = 0     # cumulative wins this process run
+        self._seed_node_wins()
         # M1 FIX: _my_tickets protected by its own lock.
         # Eliminates RuntimeError from concurrent read-in-lottery /
         # delete-in-cleanup without lock.
@@ -1800,6 +1801,49 @@ class Node:
         self._my_tickets_lock = threading.Lock()
         self._commits         = {}
         self._lottery_lock    = threading.Lock()
+
+    def _seed_node_wins(self):
+        """Seed ledger.node_wins from checkpoint balances + current chain.
+
+        Called once at startup. Ensures node stats on the explorer add up
+        to total VRF rounds immediately after any restart, not just from
+        the current process run.
+
+        Strategy:
+          - Checkpoint balances reflect all minted TMPL up to prune_before.
+            Dividing each address's checkpoint balance by REWARD_PER_ROUND
+            gives a lower-bound win count for that address.
+          - Current chain blocks (post-checkpoint) are counted directly.
+          - Take the max of the seeded value and any already-persisted value
+            so we never go backwards.
+        """
+        with self.ledger._lock:
+            # Count wins from current chain
+            chain_counts = {}
+            for b in self.ledger.chain:
+                wid = b.get("winner_id", "")
+                if wid:
+                    chain_counts[wid] = chain_counts.get(wid, 0) + 1
+
+            # Estimate wins from last checkpoint balances
+            cp_counts = {}
+            if self.ledger.checkpoints:
+                cp = self.ledger.checkpoints[-1]
+                for addr, bal in cp.get("balances", {}).items():
+                    if isinstance(bal, int) and bal >= REWARD_PER_ROUND:
+                        cp_counts[addr] = bal // REWARD_PER_ROUND
+
+            # Merge: take max of checkpoint estimate + chain count vs persisted
+            all_addrs = set(chain_counts) | set(cp_counts) | set(self.ledger.node_wins)
+            changed = False
+            for addr in all_addrs:
+                seeded = cp_counts.get(addr, 0) + chain_counts.get(addr, 0)
+                current = self.ledger.node_wins.get(addr, 0)
+                if seeded > current:
+                    self.ledger.node_wins[addr] = seeded
+                    changed = True
+            if changed:
+                self.ledger.save()
 
     def _acquire_lock(self):
         import sys
@@ -2521,7 +2565,7 @@ class Node:
                     "transactions": txs,
                     "fee_rewards":  fee_rewards,
                     "total_minted": total_minted,
-                    "chain_height": summary["chain_height"],
+                    "chain_height": total_minted // REWARD_PER_ROUND,
                     "node_wins":    self.ledger.node_wins.get(self.wallet.device_id, 0),
                     "timestamp":    int(time.time())
                 }

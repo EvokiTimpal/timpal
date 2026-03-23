@@ -1802,6 +1802,7 @@ class Node:
         self.network._node_ref = self
         self._sending         = False
         self._total_wins      = 0     # cumulative wins this process run
+        self._my_won_slots    = set()  # slots counted this process run (prevents double-count)
         self._seed_node_wins()
         # M1 FIX: _my_tickets protected by its own lock.
         # Eliminates RuntimeError from concurrent read-in-lottery /
@@ -2229,6 +2230,15 @@ class Node:
 
         with self.ledger._lock:
             if any(b.get("slot") == time_slot for b in self.ledger.chain):
+                # Block already in chain — may have arrived via gossip before
+                # _claim_reward ran. Count our win if not yet counted.
+                if (winner["winner_id"] == self.wallet.device_id
+                        and time_slot not in self._my_won_slots):
+                    self._my_won_slots.add(time_slot)
+                    self._total_wins += 1
+                    my_id = self.wallet.device_id
+                    self.ledger.node_wins[my_id] = self.ledger.node_wins.get(my_id, 0) + 1
+                    self.ledger.save()
                 return
             tip_hash, tip_slot = self.ledger._get_tip()
 
@@ -2255,6 +2265,7 @@ class Node:
             return
 
         if winner["winner_id"] == self.wallet.device_id:
+            self._my_won_slots.add(time_slot)
             self._total_wins += 1
             with self.ledger._lock:
                 my_id = self.wallet.device_id

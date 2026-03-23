@@ -112,7 +112,7 @@ _peer_count_history_lock = threading.Lock()
 _chain_tip      = {"hash": GENESIS_PREV_HASH, "slot": -1, "device_id": ""}
 _chain_tip_lock = threading.Lock()
 
-_checkpoint_tips    = {}   # {cp_slot: {tip_hash: count}}
+_checkpoint_tips    = {}   # {cp_slot: {device_id: tip_hash}} — LMD: latest tip per node
 _checkpoint_winners = {}   # {cp_slot: {tip_hash: first_device_id}}
 _checkpoint_tips_lock = threading.Lock()
 
@@ -305,11 +305,17 @@ def handle_client(conn, addr):
                 if slot > _chain_tip["slot"]:
                     _chain_tip.update({"hash": th, "slot": slot, "device_id": did})
                     print(f"  [chain] Tip: slot {slot} by {did[:20]}...")
-            cp_slot = (slot // CHECKPOINT_INTERVAL) * CHECKPOINT_INTERVAL
+            # Accept explicit cp_slot from client; fall back to inference for old clients.
+            cp_slot = msg.get("cp_slot")
+            if not isinstance(cp_slot, int) or cp_slot % CHECKPOINT_INTERVAL != 0:
+                cp_slot = (slot // CHECKPOINT_INTERVAL) * CHECKPOINT_INTERVAL
             if cp_slot > 0:
                 with _checkpoint_tips_lock:
-                    _checkpoint_tips.setdefault(cp_slot, {})
-                    _checkpoint_tips[cp_slot][th] = _checkpoint_tips[cp_slot].get(th, 0) + 1
+                    # LMD-style: each node holds exactly one vote per cp_slot.
+                    # Overwriting replaces any stale tip submitted on a fork
+                    # that was subsequently reorged out — stale votes can never
+                    # accumulate and permanently split the tally.
+                    _checkpoint_tips.setdefault(cp_slot, {})[did] = th
                     _checkpoint_winners.setdefault(cp_slot, {})
                     if th not in _checkpoint_winners[cp_slot]:
                         _checkpoint_winners[cp_slot][th] = did
@@ -342,9 +348,9 @@ def handle_client(conn, addr):
             if not isinstance(cp_slot, int) or cp_slot <= 0 or cp_slot % CHECKPOINT_INTERVAL != 0:
                 conn.sendall(json.dumps({"type": "ERROR", "msg": "bad cp_slot"}).encode()); return
             with _checkpoint_tips_lock:
-                tally   = dict(_checkpoint_tips.get(cp_slot, {}))
-                winners = dict(_checkpoint_winners.get(cp_slot, {}))
-            if not tally:
+                node_tips = dict(_checkpoint_tips.get(cp_slot, {}))
+                winners   = dict(_checkpoint_winners.get(cp_slot, {}))
+            if not node_tips:
                 conn.sendall(json.dumps({
                     "type":          "CHECKPOINT_TIP_RESPONSE",
                     "cp_slot":       cp_slot,
@@ -360,6 +366,12 @@ def handle_client(conn, addr):
             # After: max(tally, key=lambda h: (tally[h], h))
             #   → hash string as secondary key → same result regardless of
             #     insertion order on any bootstrap server
+            # Tally from latest-message-per-node (LMD).
+            # node_tips is {device_id: tip_hash} — one current tip per node.
+            # M9 FIX preserved: deterministic tiebreak via secondary sort on hash.
+            tally = {}
+            for tip_hash in node_tips.values():
+                tally[tip_hash] = tally.get(tip_hash, 0) + 1
             majority_hash = max(tally, key=lambda h: (tally[h], h))
             conn.sendall(json.dumps({
                 "type":          "CHECKPOINT_TIP_RESPONSE",

@@ -2227,6 +2227,7 @@ class Node:
             "type":      "SUBMIT_TIP",
             "device_id": self.wallet.device_id,
             "slot":      time_slot,
+            "cp_slot":   cp_boundary,
             "tip_hash":  tip_at_cp,
         })
 
@@ -2636,19 +2637,62 @@ class Node:
                         if our_tip is None:
                             our_tip = GENESIS_PREV_HASH
 
-                    majority_hash, count, peer_id = self._bootstrap_query_checkpoint_tip(next_cp)
+                    # Submit current tip to bootstrap right now, overwriting
+                    # any stale tip from a fork that got reorged out.
+                    # Bootstrap LMD stores exactly one tip per node.
+                    self._bootstrap_submit({
+                        "type":      "SUBMIT_TIP",
+                        "device_id": self.wallet.device_id,
+                        "slot":      get_current_slot(),
+                        "cp_slot":   next_cp,
+                        "tip_hash":  our_tip,
+                    })
 
-                    if majority_hash is not None and our_tip != majority_hash:
+                    # Consensus retry loop: require quorum before proceeding.
+                    # With N online peers require min(N,2) votes so one node
+                    # cannot checkpoint unilaterally before the other has voted.
+                    known_peers       = len(self.network.get_online_peers())
+                    min_votes         = max(1, min(known_peers, 2))
+                    max_attempts      = 10
+                    consensus_reached = False
+                    count             = 0
+
+                    for attempt in range(max_attempts):
+                        majority_hash, count, peer_id = \
+                            self._bootstrap_query_checkpoint_tip(next_cp)
+
+                        if majority_hash is None:
+                            print(f"\n  [checkpoint] slot {next_cp}: no votes yet "
+                                  f"(attempt {attempt+1}/{max_attempts}), "
+                                  f"waiting...\n  > ", end="", flush=True)
+                            time.sleep(3)
+                            continue
+
+                        if count < min_votes:
+                            print(f"\n  [checkpoint] slot {next_cp}: quorum not met "
+                                  f"({count}/{min_votes} votes, "
+                                  f"attempt {attempt+1}/{max_attempts}), "
+                                  f"waiting...\n  > ", end="", flush=True)
+                            time.sleep(3)
+                            continue
+
+                        if our_tip == majority_hash:
+                            consensus_reached = True
+                            break
+
+                        # Quorum met but we disagree -- sync and resubmit
                         print(f"\n  [checkpoint] Minority fork at slot {next_cp} "
-                              f"— our tip {str(our_tip)[:16]}... "
+                              f"our tip {str(our_tip)[:16]}... "
                               f"majority {majority_hash[:16]}... "
-                              f"(count={count}). Syncing...\n  > ", end="", flush=True)
+                              f"(count={count}). Syncing...\n  > ",
+                              end="", flush=True)
                         sync_done = threading.Event()
                         def _sync_and_signal():
                             self.network._sync_ledger()
                             sync_done.set()
                         threading.Thread(target=_sync_and_signal, daemon=True).start()
                         sync_done.wait(timeout=30.0)
+
                         with self.ledger._lock:
                             our_tip = None
                             for b in reversed(self.ledger.chain):
@@ -2656,15 +2700,28 @@ class Node:
                                     our_tip = compute_block_hash(b)
                                     break
                             if our_tip is None and self.ledger.checkpoints:
-                                our_tip = self.ledger.checkpoints[-1].get("chain_tip_hash")
+                                our_tip = self.ledger.checkpoints[-1].get(
+                                    "chain_tip_hash")
                             if our_tip is None:
                                 our_tip = GENESIS_PREV_HASH
-                        if our_tip != majority_hash:
-                            print(f"\n  [checkpoint] Still diverged after sync — "
-                                  f"skipping slot {next_cp}, retry next cycle.\n  > ",
-                                  end="", flush=True)
-                            time.sleep(30)
-                            continue
+
+                        # Resubmit updated tip after sync
+                        self._bootstrap_submit({
+                            "type":      "SUBMIT_TIP",
+                            "device_id": self.wallet.device_id,
+                            "slot":      get_current_slot(),
+                            "cp_slot":   next_cp,
+                            "tip_hash":  our_tip,
+                        })
+                        time.sleep(3)
+
+                    if not consensus_reached:
+                        print(f"\n  [checkpoint] Could not reach consensus for "
+                              f"slot {next_cp} after {max_attempts} attempts "
+                              f"-- skipping, retry next cycle.\n  > ",
+                              end="", flush=True)
+                        time.sleep(30)
+                        continue
 
                     if self.ledger.create_checkpoint(next_cp):
                         print(f"\n  ╔══════════════════════════════════════╗")

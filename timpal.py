@@ -2495,6 +2495,7 @@ class Node:
                                                 if k not in ("vrf_sig", "vrf_public_key")})
                     txs          = list(self.ledger.transactions[-20:])
                     total_minted = self.ledger.total_minted
+                    summary      = self.ledger.get_summary()
 
                 payload_data = {
                     "type":         "LEDGER_PUSH",
@@ -2503,6 +2504,7 @@ class Node:
                     "blocks":       blocks_push,
                     "transactions": txs,
                     "total_minted": total_minted,
+                    "chain_height": summary["chain_height"],
                     "timestamp":    int(time.time())
                 }
                 payload_bytes = json.dumps(payload_data, sort_keys=True, separators=(',', ':')).encode()

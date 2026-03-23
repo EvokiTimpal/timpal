@@ -1,23 +1,22 @@
 """TIMPAL API v3.2 — serves live ledger data for timpal.org explorer.
 
-v3.2 changes:
+v3.2 fixes:
+  - total_minted now uses node-reported value directly instead of recomputing
+    from accumulated blocks. Recomputing caused inflation when both nodes pushed
+    the same blocks and any duplicate slipped through dedup.
+  - chain_height (VRF rounds) now uses node-reported chain_height from LEDGER_PUSH
+    instead of len(block_rewards) from accumulated blocks — same root cause.
+  - LEDGER_PUSH now accepts chain_height field (timpal.py v3.2 sends it).
+
+v3.2 (original):
   - Version bump. No functional changes. Protocol compatibility with timpal.py v3.2.
 
 v3.1 changes:
   - UNIT = 100_000_000 added. All amounts from nodes are now int (units).
     API converts to TMPL (float) at the display boundary by dividing by UNIT.
-    All JSON responses carry TMPL values — index.html requires no changes.
   - total_minted comparison updated for integer arithmetic.
   - FIX: chain_tip_hash now correctly stores the SHA-256 hash of the tip block
     itself, not its prev_hash field.
-
-v3.0 changes (unchanged):
-  - Nodes push "blocks" (chain blocks) instead of flat "rewards" list
-  - Explorer shows chain height, slot, prev_hash linkage, confirmed status
-  - All existing endpoints unchanged — block structure is a superset of reward
-
-Push authentication unchanged: nodes sign with Dilithium3 private key.
-No shared secret exists anywhere.
 """
 
 import json
@@ -46,10 +45,10 @@ CONFIRMATION_DEPTH = 6   # must match timpal.py
 
 # ── In-memory ledger state ─────────────────────────────────────────────────────
 _ledger = {
-    "blocks":       [],   # chain blocks (amounts stored as received — int units)
-    "transactions": [],
-    "total_minted": 0,    # int units; convert to TMPL for display
-    "chain_height": 0,
+    "blocks":         [],   # chain blocks (amounts stored as received — int units)
+    "transactions":   [],
+    "total_minted":   0,    # int units; convert to TMPL for display
+    "chain_height":   0,    # authoritative from node push
     "chain_tip_slot": -1,
     "chain_tip_hash": "0" * 64
 }
@@ -67,17 +66,14 @@ POST_RATE_LIMIT = 5
 
 
 def _compute_block_hash(block: dict) -> str:
-    """SHA-256 of canonical block serialization — must match timpal.py exactly.
-    Uses sort_keys=True and no spaces, identical to canonical_block() in timpal.py.
-    Used to record the actual chain tip hash (not the tip's prev_hash field).
-    """
+    """SHA-256 of canonical block serialization — must match timpal.py exactly."""
     return hashlib.sha256(
         json.dumps(block, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
 
 
 def _to_tmpl(units) -> float:
-    """Convert internal units to TMPL for display. Handles int and float gracefully."""
+    """Convert internal units to TMPL for display."""
     try:
         return units / UNIT
     except Exception:
@@ -145,13 +141,20 @@ def _clean_post_rate():
 
 def _rebuild_stats_cache(blocks, txs, total_minted_units, chain_height,
                          chain_tip_slot, chain_tip_hash):
-    """Build stats cache. All amounts converted from units to TMPL here."""
+    """Build stats cache. All amounts converted from units to TMPL here.
+
+    FIX: total_minted_tmpl comes directly from the node-reported total_minted,
+    not recomputed from accumulated blocks. The node is the source of truth.
+    FIX: VRF rounds (total_rewards) uses node-reported chain_height, not
+    len(block_rewards) from accumulated blocks.
+    """
     current_slot  = chain_tip_slot
     block_rewards = [b for b in blocks if b.get("type") == "block_reward"]
 
-    # Convert block amounts (units) to TMPL for display
-    computed_tmpl  = sum(_to_tmpl(b.get("amount", 0)) for b in block_rewards)
-    total_minted_tmpl = max(computed_tmpl, _to_tmpl(total_minted_units))
+    # FIX: use node-reported total_minted directly.
+    # Recomputing from accumulated blocks caused inflation when both nodes
+    # pushed overlapping recent blocks and any duplicate slipped through dedup.
+    total_minted_tmpl = _to_tmpl(total_minted_units)
 
     node_counts = {}
     for b in block_rewards:
@@ -172,7 +175,8 @@ def _rebuild_stats_cache(blocks, txs, total_minted_units, chain_height,
     return {
         "total_minted":    round(total_minted_tmpl, 8),
         "remaining":       round(TOTAL_SUPPLY_TMPL - total_minted_tmpl, 8),
-        "total_rewards":   len(block_rewards),
+        # FIX: use node-reported chain_height for VRF rounds, not len(block_rewards)
+        "total_rewards":   chain_height,
         "total_txs":       len(txs),
         "active_nodes":    len(node_counts),
         "chain_height":    chain_height,
@@ -385,8 +389,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps({"error": "invalid signature"}).encode())
                 return
 
-            # v3.1: node pushes amounts as int units. Accept int or float for
-            # backward compat at the API ingest layer; display always divides by UNIT.
             incoming_blocks = data.get("blocks", [])
             txs             = data.get("transactions", [])
 
@@ -432,19 +434,22 @@ class Handler(BaseHTTPRequestHandler):
                 _ledger["blocks"]       = _ledger["blocks"][-10000:]
                 _ledger["transactions"] = _ledger["transactions"][-5000:]
 
-                # total_minted now in units; store as-is, convert at display boundary
+                # FIX: trust node-reported total_minted and chain_height directly.
+                # These are the ground truth values from the node's ledger.
+                # Do NOT recompute from accumulated blocks — that causes inflation
+                # when both nodes push overlapping recent blocks.
                 incoming_minted = data.get("total_minted", 0)
                 if incoming_minted > _ledger["total_minted"]:
                     _ledger["total_minted"] = incoming_minted
 
-                # Update chain height and tip from incoming data.
-                # FIX: chain_tip_hash is the SHA-256 of the tip block itself,
-                # NOT the tip block's prev_hash field. Use _compute_block_hash()
-                # which matches canonical_block() in timpal.py exactly.
+                incoming_height = data.get("chain_height", 0)
+                if incoming_height > _ledger["chain_height"]:
+                    _ledger["chain_height"] = incoming_height
+
+                # Update tip from the highest-slot block we have
                 block_rewards = [b for b in _ledger["blocks"] if b.get("type") == "block_reward"]
                 if block_rewards:
                     tip_block = max(block_rewards, key=lambda b: b.get("slot", -1))
-                    _ledger["chain_height"]   = len(block_rewards)
                     _ledger["chain_tip_slot"] = tip_block.get("slot", -1)
                     _ledger["chain_tip_hash"] = _compute_block_hash(tip_block)
 
@@ -476,7 +481,6 @@ if __name__ == "__main__":
     threading.Thread(target=_clean_post_rate, daemon=True).start()
     print("TIMPAL API v3.2 running on port 7781")
     print("Push authentication: Dilithium3 signature (no shared secret)")
-    print("v3.2: version bump; v3.1: UNIT=10^8 integer migration; amounts divided by UNIT at display boundary")
-    print("FIX: chain_tip_hash now correctly hashes the tip block (not its prev_hash)")
+    print("FIX: total_minted and chain_height from node push (not recomputed from blocks)")
     server = ThreadingHTTPServer(("0.0.0.0", 7781), Handler)
     server.serve_forever()

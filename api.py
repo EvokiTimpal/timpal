@@ -55,6 +55,7 @@ _ledger = {
 }
 _ledger_lock = threading.Lock()
 _last_update = 0
+_node_wins    = {}   # persisted win counts per device_id from push
 
 # ── Cached computed stats ──────────────────────────────────────────────────────
 _stats_cache      = None
@@ -376,7 +377,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"error": str(e)}).encode())
 
     def do_POST(self):
-        global _last_update, _stats_cache
+        global _last_update, _stats_cache, _node_wins
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -479,6 +480,12 @@ class Handler(BaseHTTPRequestHandler):
                 incoming_height = data.get("chain_height", 0)
                 if incoming_height > _ledger["chain_height"]:
                     _ledger["chain_height"] = incoming_height
+
+                # Update persisted win count for this node
+                incoming_nw = data.get("node_wins", 0)
+                push_did    = data.get("device_id", "")
+                if push_did and isinstance(incoming_nw, int) and incoming_nw > _node_wins.get(push_did, 0):
+                    _node_wins[push_did] = incoming_nw
 
                 # Update tip from the highest-slot block we have
                 block_rewards = [b for b in _ledger["blocks"] if b.get("type") == "block_reward"]

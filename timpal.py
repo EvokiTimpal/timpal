@@ -871,6 +871,14 @@ class Ledger:
                 chain_tip_hash = GENESIS_PREV_HASH
                 chain_tip_slot = -1
 
+            # Accumulate node_wins: prev checkpoint counts + wins in pruned blocks
+            prev_node_wins = dict(self.checkpoints[-1].get("node_wins", {})) if self.checkpoints else {}
+            cp_node_wins   = dict(prev_node_wins)
+            for b in c_prune:
+                wid = b.get("winner_id", "")
+                if wid:
+                    cp_node_wins[wid] = cp_node_wins.get(wid, 0) + 1
+
             cp = {
                 "slot":              checkpoint_slot,
                 "prune_before":      prune_before,
@@ -883,7 +891,8 @@ class Ledger:
                 "spent_tx_ids":      spent_tx_ids,
                 "chain_tip_hash":    chain_tip_hash,
                 "chain_tip_slot":    chain_tip_slot,
-                "timestamp":         int(time.time())
+                "timestamp":         int(time.time()),
+                "node_wins":         cp_node_wins
             }
 
             # c_keep may be empty — that's fine. _get_tip() falls back to
@@ -1803,37 +1812,32 @@ class Node:
         self._lottery_lock    = threading.Lock()
 
     def _seed_node_wins(self):
-        """Seed ledger.node_wins from checkpoint balances + current chain.
+        """Seed ledger.node_wins from checkpoint + current chain on startup.
 
-        Called once at startup. Ensures node stats on the explorer add up
-        to total VRF rounds immediately after any restart, not just from
-        the current process run.
+        Called once at startup. Guarantees sum(node_wins.values()) ==
+        total_minted // REWARD_PER_ROUND immediately after any restart.
 
         Strategy:
-          - Checkpoint balances reflect all minted TMPL up to prune_before.
-            Dividing each address's checkpoint balance by REWARD_PER_ROUND
-            gives a lower-bound win count for that address.
-          - Current chain blocks (post-checkpoint) are counted directly.
-          - Take the max of the seeded value and any already-persisted value
-            so we never go backwards.
+          - Read exact win counts from checkpoint["node_wins"] (baked in
+            create_checkpoint from now on).
+          - Add wins from current chain blocks (post-checkpoint).
+          - Take max vs any already-persisted value so we never go backwards.
         """
         with self.ledger._lock:
-            # Count wins from current chain
+            # Exact counts from last checkpoint (zero for old checkpoints
+            # that predate this fix — they will be correct after next cp)
+            cp_counts = {}
+            if self.ledger.checkpoints:
+                cp_counts = dict(self.ledger.checkpoints[-1].get("node_wins", {}))
+
+            # Count wins from current chain (post-checkpoint blocks)
             chain_counts = {}
             for b in self.ledger.chain:
                 wid = b.get("winner_id", "")
                 if wid:
                     chain_counts[wid] = chain_counts.get(wid, 0) + 1
 
-            # Estimate wins from last checkpoint balances
-            cp_counts = {}
-            if self.ledger.checkpoints:
-                cp = self.ledger.checkpoints[-1]
-                for addr, bal in cp.get("balances", {}).items():
-                    if isinstance(bal, int) and bal >= REWARD_PER_ROUND:
-                        cp_counts[addr] = bal // REWARD_PER_ROUND
-
-            # Merge: take max of checkpoint estimate + chain count vs persisted
+            # Merge: checkpoint + chain = full accurate count
             all_addrs = set(chain_counts) | set(cp_counts) | set(self.ledger.node_wins)
             changed = False
             for addr in all_addrs:

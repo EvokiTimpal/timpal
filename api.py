@@ -283,10 +283,12 @@ class Handler(BaseHTTPRequestHandler):
                 addr_txs_recv = [t for t in txs if t.get("recipient_id", "") == addr]
                 addr_txs      = sorted(addr_txs_sent + addr_txs_recv,
                                        key=lambda t: t.get("timestamp", 0), reverse=True)
+                actual_rewards = max(len(addr_blocks), _node_wins.get(addr, 0))
+                actual_earned  = round(actual_rewards * _to_tmpl(105_750_000), 8)
                 self.wfile.write(json.dumps({
                     "address":        addr,
-                    "total_rewards":  len(addr_blocks),
-                    "total_earned":   round(sum(_to_tmpl(b.get("amount", 0)) for b in addr_blocks), 8),
+                    "total_rewards":  actual_rewards,
+                    "total_earned":   actual_earned,
                     "total_sent":     round(sum(_to_tmpl(t.get("amount", 0)) for t in addr_txs_sent), 8),
                     "total_received": round(sum(_to_tmpl(t.get("amount", 0)) for t in addr_txs_recv), 8),
                     "blocks": [

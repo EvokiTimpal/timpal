@@ -205,6 +205,7 @@ class Ledger:
         self.fee_rewards     = []
         self.total_minted    = 0
         self.checkpoints     = []
+        self.node_wins       = {}
         self._lock           = threading.RLock()
         self._spent_tx_ids_set: set = set()
         self._orphan_pool: dict = {}
@@ -219,6 +220,7 @@ class Ledger:
                 self.checkpoints  = data.get("checkpoints", [])
                 self.chain        = data.get("chain", [])
                 self.fee_rewards  = data.get("fee_rewards", [])
+                self.node_wins    = data.get("node_wins", {})
                 self.recalculate_totals()
                 if self.checkpoints:
                     self._spent_tx_ids_set = set(self.checkpoints[-1].get("spent_tx_ids", []))
@@ -234,7 +236,8 @@ class Ledger:
                 "chain":        self.chain,
                 "fee_rewards":  self.fee_rewards,
                 "total_minted": self.total_minted,
-                "checkpoints":  self.checkpoints
+                "checkpoints":  self.checkpoints,
+                "node_wins":    self.node_wins
             }, f, indent=2)
         os.replace(tmp, LEDGER_FILE)
 
@@ -2205,6 +2208,10 @@ class Node:
 
         if winner["winner_id"] == self.wallet.device_id:
             self._total_wins += 1
+            with self.ledger._lock:
+                my_id = self.wallet.device_id
+                self.ledger.node_wins[my_id] = self.ledger.node_wins.get(my_id, 0) + 1
+                self.ledger.save()
 
         gid = reward_id + ":" + winner["winner_id"]
         with self.network._seen_lock:
@@ -2515,7 +2522,7 @@ class Node:
                     "fee_rewards":  fee_rewards,
                     "total_minted": total_minted,
                     "chain_height": summary["chain_height"],
-                    "node_wins":    self._total_wins,
+                    "node_wins":    self.ledger.node_wins.get(self.wallet.device_id, 0),
                     "timestamp":    int(time.time())
                 }
                 payload_bytes = json.dumps(payload_data, sort_keys=True, separators=(',', ':')).encode()

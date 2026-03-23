@@ -47,6 +47,7 @@ CONFIRMATION_DEPTH = 6   # must match timpal.py
 _ledger = {
     "blocks":         [],   # chain blocks (amounts stored as received — int units)
     "transactions":   [],
+    "fee_rewards":    [],   # fee redistribution entries
     "total_minted":   0,    # int units; convert to TMPL for display
     "chain_height":   0,    # authoritative from node push
     "chain_tip_slot": -1,
@@ -139,8 +140,8 @@ def _clean_post_rate():
                 del _post_rate[ip]
 
 
-def _rebuild_stats_cache(blocks, txs, total_minted_units, chain_height,
-                         chain_tip_slot, chain_tip_hash):
+def _rebuild_stats_cache(blocks, txs, fee_rewards, total_minted_units, chain_height,
+                         chain_tip_slot, chain_tip_hash, node_wins_override=None):
     """Build stats cache. All amounts converted from units to TMPL here.
 
     FIX: total_minted_tmpl comes directly from the node-reported total_minted,
@@ -161,6 +162,11 @@ def _rebuild_stats_cache(blocks, txs, total_minted_units, chain_height,
         wid = b.get("winner_id", "")
         if wid:
             node_counts[wid] = node_counts.get(wid, 0) + 1
+    # Override with persisted node_wins from push — survives restarts and checkpoints
+    if node_wins_override:
+        for wid, cnt in node_wins_override.items():
+            if cnt > node_counts.get(wid, 0):
+                node_counts[wid] = cnt
 
     total_r    = sum(node_counts.values()) or 1
     node_stats = sorted([
@@ -175,14 +181,27 @@ def _rebuild_stats_cache(blocks, txs, total_minted_units, chain_height,
     return {
         "total_minted":    round(total_minted_tmpl, 8),
         "remaining":       round(TOTAL_SUPPLY_TMPL - total_minted_tmpl, 8),
-        # FIX: use node-reported chain_height for VRF rounds, not len(block_rewards)
-        "total_rewards":   chain_height,
+        # FIX: derive VRF rounds from total_minted — accurate across checkpoints.
+        # chain_height resets after pruning so it undercounts historical rounds.
+        "total_rewards":   total_minted_units // 105_750_000,
         "total_txs":       len(txs),
         "active_nodes":    len(node_counts),
         "chain_height":    chain_height,
         "chain_tip_slot":  chain_tip_slot,
         "chain_tip_hash":  chain_tip_hash,
         "node_stats":      node_stats,
+        "recent_fee_rewards": [
+            {
+                "winner_id":  fr.get("winner_id", ""),
+                "amount":     round(_to_tmpl(fr.get("amount", 0)), 8),
+                "time_slot":  fr.get("time_slot", ""),
+                "time":       fmt_time(fr.get("timestamp"))
+            }
+            for fr in sorted(
+                fee_rewards,
+                key=lambda f: f.get("time_slot", 0), reverse=True
+            )[:20]
+        ],
         "recent_blocks": [
             {
                 "id":        b.get("winner_id", ""),
@@ -238,7 +257,8 @@ class Handler(BaseHTTPRequestHandler):
                         "total_rewards": 0, "total_txs": 0, "active_nodes": 0,
                         "chain_height": 0, "chain_tip_slot": -1,
                         "chain_tip_hash": "0" * 64,
-                        "node_stats": [], "recent_blocks": [], "recent_txs": []
+                        "node_stats": [], "recent_blocks": [], "recent_txs": [],
+                        "tip_slot": -1
                     }).encode())
                 else:
                     self.wfile.write(json.dumps(cache).encode())
@@ -431,8 +451,22 @@ class Handler(BaseHTTPRequestHandler):
                         _ledger["transactions"].append(t)
                         existing_txids.add(t.get("tx_id"))
 
+                incoming_frs = data.get("fee_rewards", [])
+                existing_frids = {fr.get("reward_id") for fr in _ledger["fee_rewards"]}
+                for fr in incoming_frs:
+                    if (isinstance(fr, dict)
+                            and fr.get("reward_id")
+                            and fr.get("reward_id") not in existing_frids
+                            and isinstance(fr.get("amount"), int)
+                            and fr.get("amount", 0) > 0
+                            and isinstance(fr.get("winner_id"), str)
+                            and len(fr.get("winner_id", "")) == 64):
+                        _ledger["fee_rewards"].append(fr)
+                        existing_frids.add(fr["reward_id"])
+
                 _ledger["blocks"]       = _ledger["blocks"][-10000:]
                 _ledger["transactions"] = _ledger["transactions"][-5000:]
+                _ledger["fee_rewards"]  = _ledger["fee_rewards"][-2000:]
 
                 # FIX: trust node-reported total_minted and chain_height directly.
                 # These are the ground truth values from the node's ledger.
@@ -460,9 +494,12 @@ class Handler(BaseHTTPRequestHandler):
                 tip_slot_snap = _ledger["chain_tip_slot"]
                 tip_hash_snap = _ledger["chain_tip_hash"]
 
+                frs_snap      = list(_ledger["fee_rewards"])
+
             new_cache = _rebuild_stats_cache(
-                blocks_snap, txs_snap, minted_snap,
-                height_snap, tip_slot_snap, tip_hash_snap
+                blocks_snap, txs_snap, frs_snap, minted_snap,
+                height_snap, tip_slot_snap, tip_hash_snap,
+                node_wins_override=dict(_node_wins)
             )
             with _stats_cache_lock:
                 _stats_cache = new_cache

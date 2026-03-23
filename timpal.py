@@ -2579,8 +2579,11 @@ class Node:
                     last_cp_slot = self.ledger.checkpoints[-1]["slot"]
                     next_cp = last_cp_slot + CHECKPOINT_INTERVAL
                 else:
-                    boundary = (current_slot // CHECKPOINT_INTERVAL) * CHECKPOINT_INTERVAL
-                    next_cp  = boundary if boundary > 0 else CHECKPOINT_INTERVAL
+                    # Fresh node — no checkpoints yet.
+                    # Use the NEXT upcoming boundary above current slot, not the
+                    # current or past one. Past boundaries have stale bootstrap
+                    # votes from previous network runs that we can never beat.
+                    next_cp = ((current_slot // CHECKPOINT_INTERVAL) + 1) * CHECKPOINT_INTERVAL
 
                 if current_slot >= next_cp + CHECKPOINT_BUFFER:
                     # M6 FIX: don't checkpoint if we have no chain data at all.

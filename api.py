@@ -306,7 +306,18 @@ class Handler(BaseHTTPRequestHandler):
                 addr_txs_recv = [t for t in txs if t.get("recipient_id", "") == addr]
                 addr_txs      = sorted(addr_txs_sent + addr_txs_recv,
                                        key=lambda t: t.get("timestamp", 0), reverse=True)
-                actual_rewards = max(len(addr_blocks), _node_wins.get(addr, 0))
+                # Single source of truth: _stats_cache is the same object
+                # the node stats panel reads. Reading _node_wins or _ledger["blocks"]
+                # directly produces a different snapshot and causes mismatches.
+                with _stats_cache_lock:
+                    cache = _stats_cache
+                cache_rewards = 0
+                if cache:
+                    for n in cache.get("node_stats", []):
+                        if n.get("id") == addr:
+                            cache_rewards = n.get("rewards", 0)
+                            break
+                actual_rewards = cache_rewards
                 actual_earned  = round(actual_rewards * _to_tmpl(105_750_000), 8)
                 self.wfile.write(json.dumps({
                     "address":        addr,

@@ -205,7 +205,6 @@ class Ledger:
         self.fee_rewards     = []
         self.total_minted    = 0
         self.checkpoints     = []
-        self.node_wins       = {}
         self._lock           = threading.RLock()
         self._spent_tx_ids_set: set = set()
         self._orphan_pool: dict = {}
@@ -220,7 +219,6 @@ class Ledger:
                 self.checkpoints  = data.get("checkpoints", [])
                 self.chain        = data.get("chain", [])
                 self.fee_rewards  = data.get("fee_rewards", [])
-                self.node_wins    = data.get("node_wins", {})
                 self.recalculate_totals()
                 if self.checkpoints:
                     self._spent_tx_ids_set = set(self.checkpoints[-1].get("spent_tx_ids", []))
@@ -236,8 +234,7 @@ class Ledger:
                 "chain":        self.chain,
                 "fee_rewards":  self.fee_rewards,
                 "total_minted": self.total_minted,
-                "checkpoints":  self.checkpoints,
-                "node_wins":    self.node_wins
+                "checkpoints":  self.checkpoints
             }, f, indent=2)
         os.replace(tmp, LEDGER_FILE)
 
@@ -871,14 +868,6 @@ class Ledger:
                 chain_tip_hash = GENESIS_PREV_HASH
                 chain_tip_slot = -1
 
-            # Accumulate node_wins: prev checkpoint counts + wins in pruned blocks
-            prev_node_wins = dict(self.checkpoints[-1].get("node_wins", {})) if self.checkpoints else {}
-            cp_node_wins   = dict(prev_node_wins)
-            for b in c_prune:
-                wid = b.get("winner_id", "")
-                if wid:
-                    cp_node_wins[wid] = cp_node_wins.get(wid, 0) + 1
-
             cp = {
                 "slot":              checkpoint_slot,
                 "prune_before":      prune_before,
@@ -891,8 +880,7 @@ class Ledger:
                 "spent_tx_ids":      spent_tx_ids,
                 "chain_tip_hash":    chain_tip_hash,
                 "chain_tip_slot":    chain_tip_slot,
-                "timestamp":         int(time.time()),
-                "node_wins":         cp_node_wins
+                "timestamp":         int(time.time())
             }
 
             # c_keep may be empty — that's fine. _get_tip() falls back to
@@ -1802,8 +1790,6 @@ class Node:
         self.network._node_ref = self
         self._sending         = False
         self._total_wins      = 0     # cumulative wins this process run
-        self._my_won_slots    = set()  # slots counted this process run (prevents double-count)
-        self._seed_node_wins()
         # M1 FIX: _my_tickets protected by its own lock.
         # Eliminates RuntimeError from concurrent read-in-lottery /
         # delete-in-cleanup without lock.
@@ -1811,44 +1797,6 @@ class Node:
         self._my_tickets_lock = threading.Lock()
         self._commits         = {}
         self._lottery_lock    = threading.Lock()
-
-    def _seed_node_wins(self):
-        """Seed ledger.node_wins from checkpoint + current chain on startup.
-
-        Called once at startup. Guarantees sum(node_wins.values()) ==
-        total_minted // REWARD_PER_ROUND immediately after any restart.
-
-        Strategy:
-          - Read exact win counts from checkpoint["node_wins"] (baked in
-            create_checkpoint from now on).
-          - Add wins from current chain blocks (post-checkpoint).
-          - Take max vs any already-persisted value so we never go backwards.
-        """
-        with self.ledger._lock:
-            # Exact counts from last checkpoint (zero for old checkpoints
-            # that predate this fix — they will be correct after next cp)
-            cp_counts = {}
-            if self.ledger.checkpoints:
-                cp_counts = dict(self.ledger.checkpoints[-1].get("node_wins", {}))
-
-            # Count wins from current chain (post-checkpoint blocks)
-            chain_counts = {}
-            for b in self.ledger.chain:
-                wid = b.get("winner_id", "")
-                if wid:
-                    chain_counts[wid] = chain_counts.get(wid, 0) + 1
-
-            # Merge: checkpoint + chain = full accurate count
-            all_addrs = set(chain_counts) | set(cp_counts) | set(self.ledger.node_wins)
-            changed = False
-            for addr in all_addrs:
-                seeded = cp_counts.get(addr, 0) + chain_counts.get(addr, 0)
-                current = self.ledger.node_wins.get(addr, 0)
-                if seeded > current:
-                    self.ledger.node_wins[addr] = seeded
-                    changed = True
-            if changed:
-                self.ledger.save()
 
     def _acquire_lock(self):
         import sys
@@ -2230,15 +2178,6 @@ class Node:
 
         with self.ledger._lock:
             if any(b.get("slot") == time_slot for b in self.ledger.chain):
-                # Block already in chain — may have arrived via gossip before
-                # _claim_reward ran. Count our win if not yet counted.
-                if (winner["winner_id"] == self.wallet.device_id
-                        and time_slot not in self._my_won_slots):
-                    self._my_won_slots.add(time_slot)
-                    self._total_wins += 1
-                    my_id = self.wallet.device_id
-                    self.ledger.node_wins[my_id] = self.ledger.node_wins.get(my_id, 0) + 1
-                    self.ledger.save()
                 return
             tip_hash, tip_slot = self.ledger._get_tip()
 
@@ -2265,12 +2204,7 @@ class Node:
             return
 
         if winner["winner_id"] == self.wallet.device_id:
-            self._my_won_slots.add(time_slot)
             self._total_wins += 1
-            with self.ledger._lock:
-                my_id = self.wallet.device_id
-                self.ledger.node_wins[my_id] = self.ledger.node_wins.get(my_id, 0) + 1
-                self.ledger.save()
 
         gid = reward_id + ":" + winner["winner_id"]
         with self.network._seen_lock:
@@ -2565,24 +2499,40 @@ class Node:
                         rid = b.get("reward_id", "")
                         if rid not in seen_rids:
                             seen_rids.add(rid)
-                            blocks_push.append({k: v for k, v in b.items()
-                                                if k not in ("vrf_sig", "vrf_public_key")})
+                            stripped = {k: v for k, v in b.items()
+                                        if k not in ("vrf_sig", "vrf_public_key")}
+                            # Embed canonical hash computed from full block before stripping.
+                            # api.py reads this field to verify chain_tip_hash without
+                            # needing the stripped fields — compute_block_hash(stripped)
+                            # would produce a different hash and cannot be used for this.
+                            stripped["canonical_hash"] = compute_block_hash(b)
+                            blocks_push.append(stripped)
                     txs          = list(self.ledger.transactions[-20:])
                     fee_rewards  = list(self.ledger.fee_rewards[-50:])
                     total_minted = self.ledger.total_minted
                     summary      = self.ledger.get_summary()
+                    # Canonical tip hash computed from full block before stripping.
+                    # api.py consumes this directly — never recomputes from stripped blocks.
+                    if self.ledger.chain:
+                        chain_tip_hash = compute_block_hash(self.ledger.chain[-1])
+                        chain_tip_slot = self.ledger.chain[-1].get("slot", -1)
+                    else:
+                        chain_tip_hash = "0" * 64
+                        chain_tip_slot = -1
 
                 payload_data = {
-                    "type":         "LEDGER_PUSH",
-                    "device_id":    self.wallet.device_id,
-                    "public_key":   self.wallet.get_public_key_hex(),
-                    "blocks":       blocks_push,
-                    "transactions": txs,
-                    "fee_rewards":  fee_rewards,
-                    "total_minted": total_minted,
-                    "chain_height": total_minted // REWARD_PER_ROUND,
-                    "node_wins":    self.ledger.node_wins.get(self.wallet.device_id, 0),
-                    "timestamp":    int(time.time())
+                    "type":           "LEDGER_PUSH",
+                    "device_id":      self.wallet.device_id,
+                    "public_key":     self.wallet.get_public_key_hex(),
+                    "blocks":         blocks_push,
+                    "transactions":   txs,
+                    "fee_rewards":    fee_rewards,
+                    "total_minted":   total_minted,
+                    "chain_height":   summary["chain_height"],
+                    "chain_tip_hash": chain_tip_hash,
+                    "chain_tip_slot": chain_tip_slot,
+                    "node_wins":      self._total_wins,
+                    "timestamp":      int(time.time())
                 }
                 payload_bytes = json.dumps(payload_data, sort_keys=True, separators=(',', ':')).encode()
                 payload_data["signature"] = self.wallet.sign(payload_bytes)

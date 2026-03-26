@@ -41,7 +41,10 @@ import hashlib
 UNIT               = 100_000_000        # 1 TMPL = 10^8 units (must match timpal.py)
 TOTAL_SUPPLY_TMPL  = 250_000_000.0      # display constant (TMPL)
 
-CONFIRMATION_DEPTH = 6   # must match timpal.py
+CONFIRMATION_DEPTH  = 6         # must match timpal.py
+GENESIS_TIME        = 1774123200  # must match timpal.py and bootstrap.py
+REWARD_INTERVAL     = 5.0         # seconds per slot; used to bound incoming_tip_slot
+TIMESTAMP_TOLERANCE = 30          # max seconds a payload timestamp may exceed local time
 
 # ── In-memory ledger state ─────────────────────────────────────────────────────
 _ledger = {
@@ -68,11 +71,13 @@ _post_rate_lock = threading.Lock()
 POST_RATE_LIMIT = 5
 
 
-def _compute_block_hash(block: dict) -> str:
-    """SHA-256 of canonical block serialization — must match timpal.py exactly."""
-    return hashlib.sha256(
-        json.dumps(block, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+# NOTE: _compute_block_hash is intentionally absent from api.py.
+# Blocks in the push payload have vrf_sig and vrf_public_key stripped by timpal.py
+# before transmission. Hashing a stripped block produces a different value than the
+# canonical hash of the full block — calling compute_block_hash on payload blocks
+# would always produce the wrong result. The canonical hash is instead embedded by
+# timpal.py as canonical_hash on each block (computed before stripping) and is
+# trusted here because it is covered by the Dilithium3 payload signature.
 
 
 def _to_tmpl(units) -> float:
@@ -90,6 +95,16 @@ def _is_valid_hex64(s) -> bool:
 
 
 def _verify_push_signature(data: dict) -> bool:
+    """Verify the Dilithium3 signature on an incoming LEDGER_PUSH payload.
+
+    The signature is computed by timpal.py over the entire payload dict
+    (all fields except "signature" itself, serialised with sort_keys=True).
+    This means the signature covers every field that do_POST subsequently
+    reads and trusts: blocks, canonical_hash, chain_tip_hash, chain_tip_slot,
+    total_minted, chain_height, node_wins, and timestamp.
+
+    No field from data may be acted upon before this function returns True.
+    """
     if not _DILITHIUM_AVAILABLE:
         print("[!] WARNING: push accepted without signature verification")
         return True
@@ -420,6 +435,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps({"error": "unknown type"}).encode())
                 return
 
+            # ── Trust boundary ────────────────────────────────────────────────
+            # _verify_push_signature verifies the Dilithium3 signature over the
+            # entire payload (all fields except "signature"). Every field accessed
+            # below this point — including blocks, canonical_hash, chain_tip_hash,
+            # chain_tip_slot, total_minted — is authenticated by that signature.
+            # Only data.get("type") is read above this gate, for routing only;
+            # no sensitive payload content is acted upon before verification.
             if not _verify_push_signature(data):
                 self.wfile.write(json.dumps({"error": "invalid signature"}).encode())
                 return
@@ -437,6 +459,69 @@ class Handler(BaseHTTPRequestHandler):
                    if isinstance(t, dict)
                    and isinstance(t.get("amount"), (int, float))
                    and isinstance(t.get("tx_id"), str)]
+
+            # ── Tip field validation (before _ledger_lock) ────────────────────
+            # All four checks happen here, after signature is verified above.
+            # Signature covers chain_tip_hash and chain_tip_slot because they are
+            # in payload_data before payload_bytes is computed in timpal.py.
+
+            incoming_tip_hash = data.get("chain_tip_hash")   # None if absent
+            incoming_tip_slot = data.get("chain_tip_slot")   # None if absent
+
+            # 1. If present, chain_tip_hash must be valid hex64 — no silent accept.
+            if incoming_tip_hash is not None and not _is_valid_hex64(incoming_tip_hash):
+                self.wfile.write(json.dumps({"error": "invalid chain_tip_hash"}).encode())
+                return
+
+            # 2. If present, chain_tip_slot must be >= -1 (where -1 is the empty-chain
+            #    sentinel), bounded by the payload's own timestamp to prevent large
+            #    forward jumps. Values below -1 are never produced by timpal.py.
+            if incoming_tip_slot is not None:
+                if not isinstance(incoming_tip_slot, int) or incoming_tip_slot < -1:
+                    self.wfile.write(json.dumps({"error": "invalid chain_tip_slot"}).encode())
+                    return
+                payload_ts = data.get("timestamp", 0)
+                # Harden: payload timestamp must not exceed local time by more than
+                # TIMESTAMP_TOLERANCE seconds. Prevents a manipulated future timestamp
+                # from inflating max_expected and bypassing the slot bound.
+                if isinstance(payload_ts, (int, float)):
+                    if payload_ts > time.time() + TIMESTAMP_TOLERANCE:
+                        self.wfile.write(json.dumps({"error": "payload timestamp too far in future"}).encode())
+                        return
+                    if payload_ts > GENESIS_TIME:
+                        max_expected = int((payload_ts - GENESIS_TIME) / REWARD_INTERVAL) + 10
+                        if incoming_tip_slot > max_expected:
+                            self.wfile.write(json.dumps({"error": "chain_tip_slot exceeds expected range"}).encode())
+                            return
+
+            # 3. Cross-check: if block_reward blocks were pushed, the highest slot
+            #    among them must equal incoming_tip_slot. The tip block is always in
+            #    recent_blocks (chain[-50:]), so any mismatch is internally inconsistent.
+            if incoming_tip_slot is not None and incoming_blocks:
+                br_slots = [b.get("slot") for b in incoming_blocks
+                             if b.get("type", "block_reward") == "block_reward"
+                             and isinstance(b.get("slot"), int)]
+                if br_slots and max(br_slots) != incoming_tip_slot:
+                    self.wfile.write(json.dumps({"error": "chain_tip_slot mismatch with pushed blocks"}).encode())
+                    return
+
+            # 4. chain_tip_hash must equal canonical_hash of the tip block.
+            #    Trust model: canonical_hash is embedded by timpal.py in each
+            #    stripped block before the payload is signed. The Dilithium3
+            #    signature (verified above) authenticates it. api.py reads it
+            #    directly — it does not recompute hashes from stripped blocks,
+            #    which would always produce the wrong value due to missing fields.
+            #    If canonical_hash is absent (older node), check silently skips.
+            if incoming_tip_hash is not None and incoming_blocks:
+                br_blocks = [b for b in incoming_blocks
+                              if b.get("type", "block_reward") == "block_reward"
+                              and isinstance(b.get("slot"), int)]
+                if br_blocks:
+                    tip_block      = max(br_blocks, key=lambda b: b.get("slot", -1))
+                    tip_canon_hash = tip_block.get("canonical_hash", "")
+                    if tip_canon_hash and incoming_tip_hash != tip_canon_hash:
+                        self.wfile.write(json.dumps({"error": "chain_tip_hash mismatch with tip block"}).encode())
+                        return
 
             with _ledger_lock:
                 existing_slots = {
@@ -501,12 +586,14 @@ class Handler(BaseHTTPRequestHandler):
                 if push_did and isinstance(incoming_nw, int) and incoming_nw > _node_wins.get(push_did, 0):
                     _node_wins[push_did] = incoming_nw
 
-                # Update tip from the highest-slot block we have
-                block_rewards = [b for b in _ledger["blocks"] if b.get("type") == "block_reward"]
-                if block_rewards:
-                    tip_block = max(block_rewards, key=lambda b: b.get("slot", -1))
-                    _ledger["chain_tip_slot"] = tip_block.get("slot", -1)
-                    _ledger["chain_tip_hash"] = _compute_block_hash(tip_block)
+                # Apply tip update — fully validated before _ledger_lock.
+                # incoming_tip_hash and incoming_tip_slot are None if the field
+                # was absent (safe fallback: tip simply does not update).
+                if (incoming_tip_hash is not None
+                        and incoming_tip_slot is not None
+                        and incoming_tip_slot > _ledger["chain_tip_slot"]):
+                    _ledger["chain_tip_slot"] = incoming_tip_slot
+                    _ledger["chain_tip_hash"] = incoming_tip_hash
 
                 blocks_snap   = list(_ledger["blocks"])
                 txs_snap      = list(_ledger["transactions"])

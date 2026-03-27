@@ -875,7 +875,7 @@ class Ledger:
                 "total_minted":      self.total_minted,
                 "kept_minted":       kept_minted,
                 "chain_hash":        Ledger._compute_hash(sorted(c_prune,  key=lambda b:  b.get("slot", 0))),
-                "txs_hash":          Ledger._compute_hash(sorted(t_prune,  key=lambda t:  t.get("timestamp", 0))),
+                "txs_hash":          Ledger._compute_hash(sorted(t_prune,  key=lambda t:  (t.get("timestamp", 0), t.get("tx_id", "")))),
                 "fee_rewards_hash":  Ledger._compute_hash(sorted(fr_prune, key=lambda fr: fr.get("time_slot", 0))),
                 "spent_tx_ids":      spent_tx_ids,
                 "chain_tip_hash":    chain_tip_hash,
@@ -912,7 +912,7 @@ class Ledger:
                     return False
             t_verify = [t for t in self.transactions if (t.get("slot") or 0) < prune_before]
             if t_verify:
-                if Ledger._compute_hash(sorted(t_verify, key=lambda t: t.get("timestamp", 0))) != checkpoint.get("txs_hash", ""):
+                if Ledger._compute_hash(sorted(t_verify, key=lambda t: (t.get("timestamp", 0), t.get("tx_id", "")))) != checkpoint.get("txs_hash", ""):
                     return False
             fr_verify = [fr for fr in self.fee_rewards if fr.get("time_slot", 0) < prune_before]
             if fr_verify and checkpoint.get("fee_rewards_hash"):
@@ -2541,7 +2541,6 @@ class Node:
                     "chain_height":   summary["chain_height"],
                     "chain_tip_hash": chain_tip_hash,
                     "chain_tip_slot": chain_tip_slot,
-                    "node_wins":           self._total_wins,
                     "checkpoint_balances": checkpoint_balances,
                     "checkpoint_slot":     checkpoint_slot_val,
                     "timestamp":           int(time.time())

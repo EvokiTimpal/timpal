@@ -333,11 +333,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
-    def do_GET(self):
-        self.send_response(200)
+    def _send_json(self, code: int, body: dict):
+        """Send HTTP status + JSON body in one call."""
+        self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
+        self.wfile.write(json.dumps(body).encode())
+
+    def do_GET(self):
         try:
             parsed = urllib.parse.urlparse(self.path)
             path   = parsed.path.rstrip("/")
@@ -348,25 +352,25 @@ class Handler(BaseHTTPRequestHandler):
                 with _stats_cache_lock:
                     cache = _stats_cache
                 if cache is None:
-                    self.wfile.write(json.dumps({
+                    self._send_json(200, {
                         "total_minted": 0, "remaining": TOTAL_SUPPLY_TMPL,
                         "total_rewards": 0, "total_txs": 0, "active_nodes": 0,
                         "chain_height": 0, "chain_tip_slot": -1,
                         "chain_tip_hash": "0" * 64,
                         "node_stats": [], "recent_blocks": [], "recent_txs": [],
                         "tip_slot": -1
-                    }).encode())
+                    })
                 else:
-                    self.wfile.write(json.dumps(cache).encode())
+                    self._send_json(200, cache)
 
             # ── GET /api/address?id=<hex64> ───────────────────────────────────
             elif path == "/api/address":
                 addr = params.get("id", [""])[0].strip()
                 if not addr:
-                    self.wfile.write(json.dumps({"error": "missing id"}).encode())
+                    self._send_json(400, {"error": "missing id"})
                     return
                 if not _is_valid_hex64(addr):
-                    self.wfile.write(json.dumps({"error": "invalid address format"}).encode())
+                    self._send_json(400, {"error": "invalid address format"})
                     return
 
                 with _tip_lock:
@@ -430,7 +434,7 @@ class Handler(BaseHTTPRequestHandler):
                     })
                 all_txs.sort(key=lambda t: t.get("timestamp", 0), reverse=True)
 
-                self.wfile.write(json.dumps({
+                self._send_json(200, {
                     "address":        addr,
                     "total_rewards":  total_rewards,
                     "total_earned":   total_earned,
@@ -447,16 +451,16 @@ class Handler(BaseHTTPRequestHandler):
                         for r in block_rows
                     ],
                     "transactions": all_txs
-                }).encode())
+                })
 
             # ── GET /api/tx?id=<tx_id> ────────────────────────────────────────
             elif path == "/api/tx":
                 tx_id = params.get("id", [""])[0].strip()
                 if not tx_id:
-                    self.wfile.write(json.dumps({"error": "missing id"}).encode())
+                    self._send_json(400, {"error": "missing id"})
                     return
                 if not isinstance(tx_id, str) or len(tx_id) > 64 or not tx_id.replace("-", "").isalnum():
-                    self.wfile.write(json.dumps({"error": "invalid tx_id format"}).encode())
+                    self._send_json(400, {"error": "invalid tx_id format"})
                     return
                 with _db_lock:
                     conn = sqlite3.connect(DB_PATH)
@@ -466,9 +470,9 @@ class Handler(BaseHTTPRequestHandler):
                     ).fetchone()
                     conn.close()
                 if not row:
-                    self.wfile.write(json.dumps({"error": "not found"}).encode())
+                    self._send_json(404, {"error": "not found"})
                     return
-                self.wfile.write(json.dumps({
+                self._send_json(200, {
                     "tx_id":     row[0],
                     "sender":    row[1],
                     "recipient": row[2],
@@ -478,18 +482,18 @@ class Handler(BaseHTTPRequestHandler):
                     "time":      fmt_time(row[5]),
                     "signature": row[6] or "",
                     "confirmed": True
-                }).encode())
+                })
 
             # ── GET /api/block?slot=<int> ─────────────────────────────────────
             elif path == "/api/block":
                 slot_str = params.get("slot", [""])[0].strip()
                 if not slot_str:
-                    self.wfile.write(json.dumps({"error": "missing slot"}).encode())
+                    self._send_json(400, {"error": "missing slot"})
                     return
                 try:
                     slot = int(slot_str)
                 except ValueError:
-                    self.wfile.write(json.dumps({"error": "invalid slot"}).encode())
+                    self._send_json(400, {"error": "invalid slot"})
                     return
                 with _tip_lock:
                     current_slot = _tip["chain_tip_slot"]
@@ -501,9 +505,9 @@ class Handler(BaseHTTPRequestHandler):
                     ).fetchone()
                     conn.close()
                 if not row:
-                    self.wfile.write(json.dumps({"error": "not found"}).encode())
+                    self._send_json(404, {"error": "not found"})
                     return
-                self.wfile.write(json.dumps({
+                self._send_json(200, {
                     "slot":      row[0],
                     "winner":    row[1],
                     "amount":    round(_to_tmpl(row[2]), 8),
@@ -512,20 +516,16 @@ class Handler(BaseHTTPRequestHandler):
                     "timestamp": row[4],
                     "confirmed": _is_confirmed(slot, current_slot),
                     "nodes":     row[5] or 1
-                }).encode())
+                })
 
             else:
-                self.wfile.write(json.dumps({"error": "not found"}).encode())
+                self._send_json(404, {"error": "not found"})
 
         except Exception as e:
-            self.wfile.write(json.dumps({"error": str(e)}).encode())
+            self._send_json(500, {"error": str(e)})
 
     def do_POST(self):
         global _last_update, _stats_cache
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
         try:
             ip  = self.client_address[0]
             now = time.time()
@@ -533,21 +533,21 @@ class Handler(BaseHTTPRequestHandler):
             with _post_rate_lock:
                 times = [t for t in _post_rate.get(ip, []) if now - t < 10]
                 if len(times) >= POST_RATE_LIMIT:
-                    self.wfile.write(json.dumps({"error": "rate limit exceeded"}).encode())
+                    self._send_json(429, {"error": "rate limit exceeded"})
                     return
                 times.append(now)
                 _post_rate[ip] = times
 
             length = int(self.headers.get("Content-Length", 0))
             if length > 2_000_000:
-                self.wfile.write(json.dumps({"error": "payload too large"}).encode())
+                self._send_json(400, {"error": "payload too large"})
                 return
 
             body = self.rfile.read(length)
             data = json.loads(body.decode())
 
             if data.get("type") != "LEDGER_PUSH":
-                self.wfile.write(json.dumps({"error": "unknown type"}).encode())
+                self._send_json(400, {"error": "unknown type"})
                 return
 
             # ── Trust boundary ────────────────────────────────────────────────
@@ -556,7 +556,7 @@ class Handler(BaseHTTPRequestHandler):
             # below — blocks, canonical_hash, chain_tip_hash, chain_tip_slot,
             # total_minted, checkpoint_balances — is authenticated by that signature.
             if not _verify_push_signature(data):
-                self.wfile.write(json.dumps({"error": "invalid signature"}).encode())
+                self._send_json(401, {"error": "invalid signature"})
                 return
 
             incoming_blocks = data.get("blocks", [])
@@ -564,12 +564,14 @@ class Handler(BaseHTTPRequestHandler):
 
             incoming_blocks = [b for b in incoming_blocks
                                if isinstance(b, dict)
-                               and isinstance(b.get("amount"), (int, float))
+                               and isinstance(b.get("amount"), int)
+                               and not isinstance(b.get("amount"), bool)
                                and _is_valid_hex64(b.get("winner_id", ""))
                                and isinstance(b.get("slot"), int)]
             txs = [t for t in txs
                    if isinstance(t, dict)
-                   and isinstance(t.get("amount"), (int, float))
+                   and isinstance(t.get("amount"), int)
+                   and not isinstance(t.get("amount"), bool)
                    and isinstance(t.get("tx_id"), str)]
 
             # ── Tip field validation ──────────────────────────────────────────
@@ -577,22 +579,22 @@ class Handler(BaseHTTPRequestHandler):
             incoming_tip_slot = data.get("chain_tip_slot")
 
             if incoming_tip_hash is not None and not _is_valid_hex64(incoming_tip_hash):
-                self.wfile.write(json.dumps({"error": "invalid chain_tip_hash"}).encode())
+                self._send_json(400, {"error": "invalid chain_tip_hash"})
                 return
 
             if incoming_tip_slot is not None:
                 if not isinstance(incoming_tip_slot, int) or incoming_tip_slot < -1:
-                    self.wfile.write(json.dumps({"error": "invalid chain_tip_slot"}).encode())
+                    self._send_json(400, {"error": "invalid chain_tip_slot"})
                     return
                 payload_ts = data.get("timestamp", 0)
                 if isinstance(payload_ts, (int, float)):
                     if payload_ts > time.time() + TIMESTAMP_TOLERANCE:
-                        self.wfile.write(json.dumps({"error": "payload timestamp too far in future"}).encode())
+                        self._send_json(400, {"error": "payload timestamp too far in future"})
                         return
                     if payload_ts > GENESIS_TIME:
                         max_expected = int((payload_ts - GENESIS_TIME) / REWARD_INTERVAL) + 10
                         if incoming_tip_slot > max_expected:
-                            self.wfile.write(json.dumps({"error": "chain_tip_slot exceeds expected range"}).encode())
+                            self._send_json(400, {"error": "chain_tip_slot exceeds expected range"})
                             return
 
             if incoming_tip_slot is not None and incoming_blocks:
@@ -600,7 +602,7 @@ class Handler(BaseHTTPRequestHandler):
                              if b.get("type", "block_reward") == "block_reward"
                              and isinstance(b.get("slot"), int)]
                 if br_slots and max(br_slots) != incoming_tip_slot:
-                    self.wfile.write(json.dumps({"error": "chain_tip_slot mismatch with pushed blocks"}).encode())
+                    self._send_json(400, {"error": "chain_tip_slot mismatch with pushed blocks"})
                     return
 
             if incoming_tip_hash is not None and incoming_blocks:
@@ -610,8 +612,11 @@ class Handler(BaseHTTPRequestHandler):
                 if br_blocks:
                     tip_block      = max(br_blocks, key=lambda b: b.get("slot", -1))
                     tip_canon_hash = tip_block.get("canonical_hash", "")
-                    if tip_canon_hash and incoming_tip_hash != tip_canon_hash:
-                        self.wfile.write(json.dumps({"error": "chain_tip_hash mismatch with tip block"}).encode())
+                    if not tip_canon_hash:
+                        self._send_json(400, {"error": "missing canonical_hash in tip block"})
+                        return
+                    if incoming_tip_hash != tip_canon_hash:
+                        self._send_json(400, {"error": "chain_tip_hash mismatch with tip block"})
                         return
 
             # ── Extract scalars ───────────────────────────────────────────────
@@ -716,10 +721,10 @@ class Handler(BaseHTTPRequestHandler):
                 _stats_cache = new_cache
 
             _last_update = time.time()
-            self.wfile.write(json.dumps({"ok": True}).encode())
+            self._send_json(200, {"ok": True})
 
         except Exception as e:
-            self.wfile.write(json.dumps({"error": str(e)}).encode())
+            self._send_json(500, {"error": str(e)})
 
     def log_message(self, format, *args):
         pass

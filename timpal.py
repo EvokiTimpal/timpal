@@ -2295,9 +2295,6 @@ class Node:
                 next_slot_time = GENESIS_TIME + (int(elapsed / REWARD_INTERVAL) + 1) * REWARD_INTERVAL
                 time.sleep(max(0.05, next_slot_time - time.time()))
 
-                if is_era2(self.ledger):
-                    continue
-
                 time_slot  = get_current_slot()
                 if time_slot < 0:
                     continue
@@ -2378,7 +2375,12 @@ class Node:
 
                 winner = self._pick_winner(time_slot, all_reveals)
                 if winner:
-                    self._claim_reward(winner, time_slot, active_nodes)
+                    if is_era2(self.ledger):
+                        # Era 2: no new TMPL minted — lottery still runs to
+                        # determine slot winner who collects all pending fees.
+                        self._collect_slot_fees(time_slot, winner["winner_id"])
+                    else:
+                        self._claim_reward(winner, time_slot, active_nodes)
                 self._cleanup_slot(time_slot)
 
             except Exception as e:

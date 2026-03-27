@@ -76,9 +76,9 @@ except ImportError:
     print("\n  [!] cryptography not installed. Run: pip3 install dilithium-py cryptography\n")
     exit(1)
 
-VERSION             = "3.2"
-MIN_VERSION         = "3.1"
-GENESIS_TIME        = 1774123200        # ← SET BEFORE LAUNCH — same value in bootstrap.py
+VERSION             = "3.3"
+MIN_VERSION         = "3.3"
+GENESIS_TIME        = 1774706400        # ← SET BEFORE LAUNCH — same value in bootstrap.py
 ERA2_ROUND          = 236_406_620       # total VRF rounds (blocks produced) before Era 2
 TARGET_PARTICIPANTS = 10                # target eligible nodes per slot
 

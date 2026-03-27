@@ -29,10 +29,10 @@ import random
 import hashlib
 
 PORT        = 7777
-VERSION     = "3.2"
-MIN_VERSION = "3.1"
+VERSION     = "3.3"
+MIN_VERSION = "3.3"
 
-GENESIS_TIME = 1774123200   # ← same value as in timpal.py
+GENESIS_TIME = 1774706400   # ← same value as in timpal.py
 
 REWARD_INTERVAL        = 5.0
 TARGET_PARTICIPANTS    = 10

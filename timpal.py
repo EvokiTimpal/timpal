@@ -2511,6 +2511,16 @@ class Node:
                     fee_rewards  = list(self.ledger.fee_rewards[-50:])
                     total_minted = self.ledger.total_minted
                     summary      = self.ledger.get_summary()
+                    # Checkpoint balances for explorer historical accuracy.
+                    # Sent every push so api.py can count blocks for addresses
+                    # whose rewards were pruned before the API first started.
+                    checkpoint_balances = {}
+                    checkpoint_slot_val = 0
+                    if self.ledger.checkpoints:
+                        _cp = self.ledger.checkpoints[-1]
+                        checkpoint_balances = _cp.get("balances", {})
+                        checkpoint_slot_val = _cp.get("slot", 0)
+
                     # Canonical tip hash computed from full block before stripping.
                     # api.py consumes this directly — never recomputes from stripped blocks.
                     if self.ledger.chain:
@@ -2531,8 +2541,10 @@ class Node:
                     "chain_height":   summary["chain_height"],
                     "chain_tip_hash": chain_tip_hash,
                     "chain_tip_slot": chain_tip_slot,
-                    "node_wins":      self._total_wins,
-                    "timestamp":      int(time.time())
+                    "node_wins":           self._total_wins,
+                    "checkpoint_balances": checkpoint_balances,
+                    "checkpoint_slot":     checkpoint_slot_val,
+                    "timestamp":           int(time.time())
                 }
                 payload_bytes = json.dumps(payload_data, sort_keys=True, separators=(',', ':')).encode()
                 payload_data["signature"] = self.wallet.sign(payload_bytes)

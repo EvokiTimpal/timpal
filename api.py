@@ -1,26 +1,31 @@
-"""TIMPAL API v3.2 — serves live ledger data for timpal.org explorer.
+"""TIMPAL API v3.2 — SQLite-backed explorer for timpal.org.
 
-v3.2 fixes:
-  - total_minted now uses node-reported value directly instead of recomputing
-    from accumulated blocks. Recomputing caused inflation when both nodes pushed
-    the same blocks and any duplicate slipped through dedup.
-  - chain_height (VRF rounds) now uses node-reported chain_height from LEDGER_PUSH
-    instead of len(block_rewards) from accumulated blocks — same root cause.
-  - LEDGER_PUSH now accepts chain_height field (timpal.py v3.2 sends it).
+v3.3 changes (this version):
+  - Replaced in-memory _ledger dict with SQLite persistent storage.
+    All blocks, transactions, and fee_rewards accumulate permanently.
+    Explorer data survives API restarts — no more rolling window reset.
+  - Address and block queries read from the full SQLite index.
+    Block counts and earned amounts are accurate for the full lifetime
+    of the API process, not just since the last restart.
+  - timpal.py now sends checkpoint_balances in LEDGER_PUSH. The API
+    stores them as a historical baseline for addresses whose blocks
+    predate the SQLite DB.
+  - chain_height display uses total_minted // REWARD_PER_ROUND —
+    same formula as VRF Rounds so both stats always match.
+  - Payload size limit raised to 2MB (checkpoint_balances can be large).
 
-v3.2 (original):
-  - Version bump. No functional changes. Protocol compatibility with timpal.py v3.2.
-
-v3.1 changes:
-  - UNIT = 100_000_000 added. All amounts from nodes are now int (units).
-    API converts to TMPL (float) at the display boundary by dividing by UNIT.
-  - total_minted comparison updated for integer arithmetic.
-  - FIX: chain_tip_hash now correctly stores the SHA-256 hash of the tip block
-    itself, not its prev_hash field.
+v3.2 fixes (carried forward):
+  - total_minted from node push directly (not recomputed from blocks).
+  - chain_tip_hash correct canonical hash of full tip block.
+  - Dilithium3 push signature verification.
+  - Full tip field validation on LEDGER_PUSH.
+  - _compute_block_hash removed (would always produce wrong hash on
+    stripped blocks).
 """
 
 import json
 import os
+import sqlite3
 import time
 import threading
 import urllib.parse
@@ -37,32 +42,33 @@ except ImportError:
 
 import hashlib
 
-# ── v3.1 integer migration ─────────────────────────────────────────────────────
-UNIT               = 100_000_000        # 1 TMPL = 10^8 units (must match timpal.py)
-TOTAL_SUPPLY_TMPL  = 250_000_000.0      # display constant (TMPL)
+# ── Constants ──────────────────────────────────────────────────────────────────
+UNIT                = 100_000_000
+TOTAL_SUPPLY_TMPL   = 250_000_000.0
+REWARD_PER_ROUND    = 105_750_000       # units per block; used for VRF rounds display
+CONFIRMATION_DEPTH  = 6
+GENESIS_TIME        = 1774123200
+REWARD_INTERVAL     = 5.0
+TIMESTAMP_TOLERANCE = 30
 
-CONFIRMATION_DEPTH  = 6         # must match timpal.py
-GENESIS_TIME        = 1774123200  # must match timpal.py and bootstrap.py
-REWARD_INTERVAL     = 5.0         # seconds per slot; used to bound incoming_tip_slot
-TIMESTAMP_TOLERANCE = 30          # max seconds a payload timestamp may exceed local time
+# ── SQLite ─────────────────────────────────────────────────────────────────────
+DB_PATH  = os.path.expanduser("~/.timpal_explorer.db")
+_db_lock = threading.Lock()
 
-# ── In-memory ledger state ─────────────────────────────────────────────────────
-_ledger = {
-    "blocks":         [],   # chain blocks (amounts stored as received — int units)
-    "transactions":   [],
-    "fee_rewards":    [],   # fee redistribution entries
-    "total_minted":   0,    # int units; convert to TMPL for display
-    "chain_height":   0,    # authoritative from node push
+# ── In-memory tip state ────────────────────────────────────────────────────────
+# Kept in memory for fast POST validation — persisted to meta table on every push.
+_tip_lock = threading.Lock()
+_tip = {
     "chain_tip_slot": -1,
-    "chain_tip_hash": "0" * 64
+    "chain_tip_hash": "0" * 64,
+    "total_minted":   0,
+    "chain_height":   0,
 }
-_ledger_lock = threading.Lock()
-_last_update = 0
 
-
-# ── Cached computed stats ──────────────────────────────────────────────────────
+# ── Stats cache ────────────────────────────────────────────────────────────────
 _stats_cache      = None
 _stats_cache_lock = threading.Lock()
+_last_update      = 0
 
 # ── Per-IP POST rate limiting ──────────────────────────────────────────────────
 _post_rate      = {}
@@ -73,14 +79,86 @@ POST_RATE_LIMIT = 5
 # NOTE: _compute_block_hash is intentionally absent from api.py.
 # Blocks in the push payload have vrf_sig and vrf_public_key stripped by timpal.py
 # before transmission. Hashing a stripped block produces a different value than the
-# canonical hash of the full block — calling compute_block_hash on payload blocks
-# would always produce the wrong result. The canonical hash is instead embedded by
-# timpal.py as canonical_hash on each block (computed before stripping) and is
-# trusted here because it is covered by the Dilithium3 payload signature.
+# canonical hash of the full block. The canonical hash is embedded by timpal.py as
+# canonical_hash on each block (computed before stripping) and trusted here because
+# it is covered by the Dilithium3 payload signature.
 
+
+# ── Database ───────────────────────────────────────────────────────────────────
+
+def _init_db():
+    """Create tables if not exist. WAL mode for concurrent read performance."""
+    with _db_lock:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS blocks (
+                slot           INTEGER PRIMARY KEY,
+                reward_id      TEXT,
+                winner_id      TEXT NOT NULL,
+                amount         INTEGER NOT NULL,
+                timestamp      INTEGER,
+                type           TEXT DEFAULT 'block_reward',
+                prev_hash      TEXT,
+                vrf_ticket     TEXT,
+                canonical_hash TEXT,
+                nodes          INTEGER DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_blocks_winner ON blocks(winner_id);
+            CREATE INDEX IF NOT EXISTS idx_blocks_type   ON blocks(type);
+
+            CREATE TABLE IF NOT EXISTS transactions (
+                tx_id        TEXT PRIMARY KEY,
+                sender_id    TEXT,
+                recipient_id TEXT,
+                amount       INTEGER,
+                fee          INTEGER,
+                timestamp    REAL,
+                slot         INTEGER,
+                signature    TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_txs_sender    ON transactions(sender_id);
+            CREATE INDEX IF NOT EXISTS idx_txs_recipient ON transactions(recipient_id);
+
+            CREATE TABLE IF NOT EXISTS fee_rewards (
+                reward_id  TEXT PRIMARY KEY,
+                winner_id  TEXT,
+                amount     INTEGER,
+                timestamp  INTEGER,
+                time_slot  INTEGER
+            );
+
+            CREATE TABLE IF NOT EXISTS checkpoint_balances (
+                address         TEXT PRIMARY KEY,
+                balance         INTEGER NOT NULL,
+                checkpoint_slot INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT
+            );
+        """)
+        conn.commit()
+        conn.close()
+
+
+def _load_state():
+    """Reload persisted tip state from meta table on startup."""
+    with _db_lock:
+        conn = sqlite3.connect(DB_PATH)
+        rows = {r[0]: r[1] for r in conn.execute("SELECT key, value FROM meta").fetchall()}
+        conn.close()
+    with _tip_lock:
+        _tip["chain_tip_slot"] = int(rows.get("chain_tip_slot", -1))
+        _tip["chain_tip_hash"] = rows.get("chain_tip_hash", "0" * 64)
+        _tip["total_minted"]   = int(rows.get("total_minted",   0))
+        _tip["chain_height"]   = int(rows.get("chain_height",   0))
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _to_tmpl(units) -> float:
-    """Convert internal units to TMPL for display."""
     try:
         return units / UNIT
     except Exception:
@@ -96,38 +174,30 @@ def _is_valid_hex64(s) -> bool:
 def _verify_push_signature(data: dict) -> bool:
     """Verify the Dilithium3 signature on an incoming LEDGER_PUSH payload.
 
-    The signature is computed by timpal.py over the entire payload dict
-    (all fields except "signature" itself, serialised with sort_keys=True).
-    This means the signature covers every field that do_POST subsequently
-    reads and trusts: blocks, canonical_hash, chain_tip_hash, chain_tip_slot,
-    total_minted, chain_height, node_wins, and timestamp.
-
-    No field from data may be acted upon before this function returns True.
+    The signature covers every field in the payload except the signature itself.
+    Fields accessed after this gate — blocks, canonical_hash, chain_tip_hash,
+    chain_tip_slot, total_minted, checkpoint_balances — are all authenticated.
+    No sensitive payload content is acted upon before this returns True.
     """
     if not _DILITHIUM_AVAILABLE:
         print("[!] WARNING: push accepted without signature verification")
         return True
-
     device_id  = data.get("device_id", "")
     public_key = data.get("public_key", "")
     signature  = data.get("signature", "")
-
     if not device_id or not public_key or not signature:
         return False
-
     try:
         pub_bytes = bytes.fromhex(public_key)
         if hashlib.sha256(pub_bytes).hexdigest() != device_id:
             return False
     except Exception:
         return False
-
     payload_data = {k: v for k, v in data.items() if k != "signature"}
     try:
         payload_bytes = json.dumps(payload_data, sort_keys=True, separators=(',', ':')).encode()
     except Exception:
         return False
-
     try:
         sig_bytes = bytes.fromhex(signature)
         return Dilithium3.verify(pub_bytes, payload_bytes, sig_bytes)
@@ -156,88 +226,103 @@ def _clean_post_rate():
                 del _post_rate[ip]
 
 
-def _rebuild_stats_cache(blocks, txs, fee_rewards, total_minted_units, chain_height,
-                         chain_tip_slot, chain_tip_hash):
-    """Build stats cache. All amounts converted from units to TMPL here.
+# ── Stats cache ────────────────────────────────────────────────────────────────
 
-    FIX: total_minted_tmpl comes directly from the node-reported total_minted,
-    not recomputed from accumulated blocks. The node is the source of truth.
-    FIX: VRF rounds (total_rewards) uses node-reported chain_height, not
-    len(block_rewards) from accumulated blocks.
-    """
-    current_slot  = chain_tip_slot
-    block_rewards = [b for b in blocks if b.get("type") == "block_reward"]
+def _rebuild_stats_cache() -> dict:
+    """Query SQLite for all stats. Full historical counts — no rolling window."""
+    with _tip_lock:
+        total_minted_units = _tip["total_minted"]
+        chain_tip_slot     = _tip["chain_tip_slot"]
+        chain_tip_hash     = _tip["chain_tip_hash"]
 
-    # FIX: use node-reported total_minted directly.
-    # Recomputing from accumulated blocks caused inflation when both nodes
-    # pushed overlapping recent blocks and any duplicate slipped through dedup.
+    with _db_lock:
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            node_rows = conn.execute(
+                "SELECT winner_id, COUNT(*) FROM blocks "
+                "WHERE type='block_reward' GROUP BY winner_id"
+            ).fetchall()
+            node_counts = {r[0]: r[1] for r in node_rows}
+
+            block_rows = conn.execute(
+                "SELECT slot, winner_id, amount, timestamp, prev_hash "
+                "FROM blocks ORDER BY slot DESC LIMIT 50"
+            ).fetchall()
+
+            tx_rows = conn.execute(
+                "SELECT tx_id, sender_id, recipient_id, amount, timestamp "
+                "FROM transactions ORDER BY timestamp DESC LIMIT 50"
+            ).fetchall()
+
+            fr_rows = conn.execute(
+                "SELECT winner_id, amount, time_slot, timestamp "
+                "FROM fee_rewards ORDER BY time_slot DESC LIMIT 20"
+            ).fetchall()
+
+            tx_count = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+        finally:
+            conn.close()
+
     total_minted_tmpl = _to_tmpl(total_minted_units)
+    total_r = sum(node_counts.values()) or 1
+    vrf_rounds = total_minted_units // REWARD_PER_ROUND
 
-    node_counts = {}
-    for b in block_rewards:
-        wid = b.get("winner_id", "")
-        if wid:
-            node_counts[wid] = node_counts.get(wid, 0) + 1
-
-    total_r    = sum(node_counts.values()) or 1
     node_stats = sorted([
-        {"id": nid, "id_short": nid[:16] + "...",
-         "rewards": cnt, "pct": round(cnt / total_r * 100, 2)}
+        {
+            "id":       nid,
+            "id_short": nid[:16] + "...",
+            "rewards":  cnt,
+            "pct":      round(cnt / total_r * 100, 2)
+        }
         for nid, cnt in node_counts.items()
     ], key=lambda x: x["rewards"], reverse=True)
 
-    recent_blocks = sorted(blocks, key=lambda b: b.get("slot", 0), reverse=True)[:50]
-    recent_txs    = sorted(txs,    key=lambda t: t.get("timestamp", 0), reverse=True)[:50]
-
     return {
-        "total_minted":    round(total_minted_tmpl, 8),
-        "remaining":       round(TOTAL_SUPPLY_TMPL - total_minted_tmpl, 8),
-        # FIX: derive VRF rounds from total_minted — accurate across checkpoints.
-        # chain_height resets after pruning so it undercounts historical rounds.
-        "total_rewards":   total_minted_units // 105_750_000,
-        "total_txs":       len(txs),
-        "active_nodes":    len(node_counts),
-        "chain_height":    chain_height,
-        "chain_tip_slot":  chain_tip_slot,
-        "chain_tip_hash":  chain_tip_hash,
-        "node_stats":      node_stats,
+        "total_minted":   round(total_minted_tmpl, 8),
+        "remaining":      round(TOTAL_SUPPLY_TMPL - total_minted_tmpl, 8),
+        "total_rewards":  vrf_rounds,
+        "total_txs":      tx_count,
+        "active_nodes":   len(node_counts),
+        "chain_height":   vrf_rounds,   # same formula — always matches VRF Rounds
+        "chain_tip_slot": chain_tip_slot,
+        "chain_tip_hash": chain_tip_hash,
+        "node_stats":     node_stats,
         "recent_fee_rewards": [
             {
-                "winner_id":  fr.get("winner_id", ""),
-                "amount":     round(_to_tmpl(fr.get("amount", 0)), 8),
-                "time_slot":  fr.get("time_slot", ""),
-                "time":       fmt_time(fr.get("timestamp"))
+                "winner_id": r[0],
+                "amount":    round(_to_tmpl(r[1]), 8),
+                "time_slot": r[2],
+                "time":      fmt_time(r[3])
             }
-            for fr in sorted(
-                fee_rewards,
-                key=lambda f: f.get("time_slot", 0), reverse=True
-            )[:20]
+            for r in fr_rows
         ],
         "recent_blocks": [
             {
-                "id":        b.get("winner_id", ""),
-                "amount":    round(_to_tmpl(b.get("amount", 0)), 8),
-                "time":      fmt_time(b.get("timestamp")),
-                "slot":      b.get("slot", ""),
-                "prev_hash": b.get("prev_hash", "")[:16] + "..." if b.get("prev_hash") else "",
-                "confirmed": _is_confirmed(b.get("slot", 0), current_slot)
+                "id":        r[1],
+                "amount":    round(_to_tmpl(r[2]), 8),
+                "time":      fmt_time(r[3]),
+                "slot":      r[0],
+                "prev_hash": (r[4] or "")[:16] + "..." if r[4] else "",
+                "confirmed": _is_confirmed(r[0], chain_tip_slot)
             }
-            for b in recent_blocks
+            for r in block_rows
         ],
         "recent_txs": [
             {
-                "tx_id":     t.get("tx_id", ""),
-                "id":        (t.get("tx_id", "") or "")[:16] + "...",
-                "sender":    t.get("sender_id", ""),
-                "recipient": t.get("recipient_id", ""),
-                "amount":    round(_to_tmpl(t.get("amount", 0)), 8),
-                "time":      fmt_time(t.get("timestamp")),
-                "timestamp": t.get("timestamp", 0)
+                "tx_id":     r[0],
+                "id":        (r[0] or "")[:16] + "...",
+                "sender":    r[1],
+                "recipient": r[2],
+                "amount":    round(_to_tmpl(r[3]), 8),
+                "time":      fmt_time(r[4]),
+                "timestamp": r[4]
             }
-            for t in recent_txs
-        ]
+            for r in tx_rows
+        ],
     }
 
+
+# ── HTTP Handler ───────────────────────────────────────────────────────────────
 
 class Handler(BaseHTTPRequestHandler):
 
@@ -258,7 +343,7 @@ class Handler(BaseHTTPRequestHandler):
             path   = parsed.path.rstrip("/")
             params = urllib.parse.parse_qs(parsed.query)
 
-            # ── GET /api — main stats ─────────────────────────────────────────
+            # ── GET /api ──────────────────────────────────────────────────────
             if path in ("", "/", "/api", "/api/"):
                 with _stats_cache_lock:
                     cache = _stats_cache
@@ -283,59 +368,85 @@ class Handler(BaseHTTPRequestHandler):
                 if not _is_valid_hex64(addr):
                     self.wfile.write(json.dumps({"error": "invalid address format"}).encode())
                     return
-                with _ledger_lock:
-                    blocks = list(_ledger["blocks"])
-                    txs    = list(_ledger["transactions"])
-                    current_slot = _ledger["chain_tip_slot"]
-                addr_blocks   = sorted([b for b in blocks if b.get("winner_id", "") == addr],
-                                       key=lambda b: b.get("slot", 0), reverse=True)
-                addr_txs_sent = [t for t in txs if t.get("sender_id",    "") == addr]
-                addr_txs_recv = [t for t in txs if t.get("recipient_id", "") == addr]
-                addr_txs      = sorted(addr_txs_sent + addr_txs_recv,
-                                       key=lambda t: t.get("timestamp", 0), reverse=True)
-                # Read reward count from _stats_cache — the identical object the
-                # node stats panel reads from. Both panels now return the same
-                # number from the same snapshot. Reading live from _ledger["blocks"]
-                # produces a different count whenever new blocks arrive between the
-                # last POST (cache rebuild) and this GET, causing visible mismatches.
-                with _stats_cache_lock:
-                    cache = _stats_cache
-                actual_rewards = 0
-                if cache:
-                    for n in cache.get("node_stats", []):
-                        if n.get("id") == addr:
-                            actual_rewards = n.get("rewards", 0)
-                            break
-                actual_earned  = round(actual_rewards * _to_tmpl(105_750_000), 8)
+
+                with _tip_lock:
+                    current_slot = _tip["chain_tip_slot"]
+
+                with _db_lock:
+                    conn = sqlite3.connect(DB_PATH)
+                    try:
+                        block_count = conn.execute(
+                            "SELECT COUNT(*) FROM blocks "
+                            "WHERE winner_id=? AND type='block_reward'",
+                            (addr,)
+                        ).fetchone()[0]
+
+                        block_rows = conn.execute(
+                            "SELECT slot, amount, timestamp, prev_hash FROM blocks "
+                            "WHERE winner_id=? AND type='block_reward' "
+                            "ORDER BY slot DESC LIMIT 100",
+                            (addr,)
+                        ).fetchall()
+
+                        sent_rows = conn.execute(
+                            "SELECT amount, fee, timestamp, recipient_id, tx_id "
+                            "FROM transactions WHERE sender_id=? "
+                            "ORDER BY timestamp DESC",
+                            (addr,)
+                        ).fetchall()
+
+                        recv_rows = conn.execute(
+                            "SELECT amount, timestamp, sender_id, tx_id "
+                            "FROM transactions WHERE recipient_id=? "
+                            "ORDER BY timestamp DESC",
+                            (addr,)
+                        ).fetchall()
+                    finally:
+                        conn.close()
+
+                total_rewards = block_count
+                total_earned  = round(total_rewards * _to_tmpl(REWARD_PER_ROUND), 8)
+                total_sent    = round(sum(_to_tmpl(r[0]) for r in sent_rows), 8)
+                total_recv    = round(sum(_to_tmpl(r[0]) for r in recv_rows), 8)
+
+                all_txs = []
+                for r in sent_rows:
+                    all_txs.append({
+                        "tx_id":        r[4],
+                        "direction":    "sent",
+                        "counterparty": r[3],
+                        "amount":       round(_to_tmpl(r[0]), 8),
+                        "time":         fmt_time(r[2]),
+                        "timestamp":    r[2]
+                    })
+                for r in recv_rows:
+                    all_txs.append({
+                        "tx_id":        r[3],
+                        "direction":    "received",
+                        "counterparty": r[2],
+                        "amount":       round(_to_tmpl(r[0]), 8),
+                        "time":         fmt_time(r[1]),
+                        "timestamp":    r[1]
+                    })
+                all_txs.sort(key=lambda t: t.get("timestamp", 0), reverse=True)
+
                 self.wfile.write(json.dumps({
                     "address":        addr,
-                    "total_rewards":  actual_rewards,
-                    "total_earned":   actual_earned,
-                    "total_sent":     round(sum(_to_tmpl(t.get("amount", 0)) for t in addr_txs_sent), 8),
-                    "total_received": round(sum(_to_tmpl(t.get("amount", 0)) for t in addr_txs_recv), 8),
+                    "total_rewards":  total_rewards,
+                    "total_earned":   total_earned,
+                    "total_sent":     total_sent,
+                    "total_received": total_recv,
                     "blocks": [
                         {
-                            "amount":    round(_to_tmpl(b.get("amount", 0)), 8),
-                            "time":      fmt_time(b.get("timestamp")),
-                            "slot":      b.get("slot", ""),
-                            "prev_hash": b.get("prev_hash", ""),
-                            "confirmed": _is_confirmed(b.get("slot", 0), current_slot)
+                            "amount":    round(_to_tmpl(r[1]), 8),
+                            "time":      fmt_time(r[2]),
+                            "slot":      r[0],
+                            "prev_hash": r[3] or "",
+                            "confirmed": _is_confirmed(r[0], current_slot)
                         }
-                        for b in addr_blocks[:100]
+                        for r in block_rows
                     ],
-                    "transactions": [
-                        {
-                            "tx_id":       t.get("tx_id", ""),
-                            "direction":   "sent" if t.get("sender_id") == addr else "received",
-                            "counterparty":(t.get("recipient_id", "")
-                                            if t.get("sender_id") == addr
-                                            else t.get("sender_id", "")),
-                            "amount":      round(_to_tmpl(t.get("amount", 0)), 8),
-                            "time":        fmt_time(t.get("timestamp")),
-                            "timestamp":   t.get("timestamp", 0)
-                        }
-                        for t in addr_txs
-                    ]
+                    "transactions": all_txs
                 }).encode())
 
             # ── GET /api/tx?id=<tx_id> ────────────────────────────────────────
@@ -347,21 +458,25 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(tx_id, str) or len(tx_id) > 64 or not tx_id.replace("-", "").isalnum():
                     self.wfile.write(json.dumps({"error": "invalid tx_id format"}).encode())
                     return
-                with _ledger_lock:
-                    tx = next((t for t in _ledger["transactions"]
-                               if t.get("tx_id", "") == tx_id), None)
-                if not tx:
+                with _db_lock:
+                    conn = sqlite3.connect(DB_PATH)
+                    row = conn.execute(
+                        "SELECT tx_id, sender_id, recipient_id, amount, fee, timestamp, signature "
+                        "FROM transactions WHERE tx_id=?", (tx_id,)
+                    ).fetchone()
+                    conn.close()
+                if not row:
                     self.wfile.write(json.dumps({"error": "not found"}).encode())
                     return
                 self.wfile.write(json.dumps({
-                    "tx_id":     tx.get("tx_id", ""),
-                    "sender":    tx.get("sender_id", ""),
-                    "recipient": tx.get("recipient_id", ""),
-                    "amount":    round(_to_tmpl(tx.get("amount", 0)), 8),
-                    "fee":       round(_to_tmpl(tx.get("fee", 0)), 8),
-                    "timestamp": tx.get("timestamp", 0),
-                    "time":      fmt_time(tx.get("timestamp")),
-                    "signature": tx.get("signature", ""),
+                    "tx_id":     row[0],
+                    "sender":    row[1],
+                    "recipient": row[2],
+                    "amount":    round(_to_tmpl(row[3]), 8),
+                    "fee":       round(_to_tmpl(row[4] or 0), 8),
+                    "timestamp": row[5],
+                    "time":      fmt_time(row[5]),
+                    "signature": row[6] or "",
                     "confirmed": True
                 }).encode())
 
@@ -376,22 +491,27 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError:
                     self.wfile.write(json.dumps({"error": "invalid slot"}).encode())
                     return
-                with _ledger_lock:
-                    block = next((b for b in _ledger["blocks"]
-                                  if b.get("slot") == slot), None)
-                    current_slot = _ledger["chain_tip_slot"]
-                if not block:
+                with _tip_lock:
+                    current_slot = _tip["chain_tip_slot"]
+                with _db_lock:
+                    conn = sqlite3.connect(DB_PATH)
+                    row = conn.execute(
+                        "SELECT slot, winner_id, amount, prev_hash, timestamp, nodes "
+                        "FROM blocks WHERE slot=?", (slot,)
+                    ).fetchone()
+                    conn.close()
+                if not row:
                     self.wfile.write(json.dumps({"error": "not found"}).encode())
                     return
                 self.wfile.write(json.dumps({
-                    "slot":       block.get("slot"),
-                    "winner":     block.get("winner_id", ""),
-                    "amount":     round(_to_tmpl(block.get("amount", 0)), 8),
-                    "prev_hash":  block.get("prev_hash", ""),
-                    "time":       fmt_time(block.get("timestamp")),
-                    "timestamp":  block.get("timestamp", 0),
-                    "confirmed":  _is_confirmed(slot, current_slot),
-                    "nodes":      block.get("nodes", 1)
+                    "slot":      row[0],
+                    "winner":    row[1],
+                    "amount":    round(_to_tmpl(row[2]), 8),
+                    "prev_hash": row[3] or "",
+                    "time":      fmt_time(row[4]),
+                    "timestamp": row[4],
+                    "confirmed": _is_confirmed(slot, current_slot),
+                    "nodes":     row[5] or 1
                 }).encode())
 
             else:
@@ -419,7 +539,7 @@ class Handler(BaseHTTPRequestHandler):
                 _post_rate[ip] = times
 
             length = int(self.headers.get("Content-Length", 0))
-            if length > 1_000_000:
+            if length > 2_000_000:
                 self.wfile.write(json.dumps({"error": "payload too large"}).encode())
                 return
 
@@ -433,10 +553,8 @@ class Handler(BaseHTTPRequestHandler):
             # ── Trust boundary ────────────────────────────────────────────────
             # _verify_push_signature verifies the Dilithium3 signature over the
             # entire payload (all fields except "signature"). Every field accessed
-            # below this point — including blocks, canonical_hash, chain_tip_hash,
-            # chain_tip_slot, total_minted — is authenticated by that signature.
-            # Only data.get("type") is read above this gate, for routing only;
-            # no sensitive payload content is acted upon before verification.
+            # below — blocks, canonical_hash, chain_tip_hash, chain_tip_slot,
+            # total_minted, checkpoint_balances — is authenticated by that signature.
             if not _verify_push_signature(data):
                 self.wfile.write(json.dumps({"error": "invalid signature"}).encode())
                 return
@@ -444,7 +562,6 @@ class Handler(BaseHTTPRequestHandler):
             incoming_blocks = data.get("blocks", [])
             txs             = data.get("transactions", [])
 
-            # Structural validation
             incoming_blocks = [b for b in incoming_blocks
                                if isinstance(b, dict)
                                and isinstance(b.get("amount"), (int, float))
@@ -455,30 +572,19 @@ class Handler(BaseHTTPRequestHandler):
                    and isinstance(t.get("amount"), (int, float))
                    and isinstance(t.get("tx_id"), str)]
 
-            # ── Tip field validation (before _ledger_lock) ────────────────────
-            # All four checks happen here, after signature is verified above.
-            # Signature covers chain_tip_hash and chain_tip_slot because they are
-            # in payload_data before payload_bytes is computed in timpal.py.
+            # ── Tip field validation ──────────────────────────────────────────
+            incoming_tip_hash = data.get("chain_tip_hash")
+            incoming_tip_slot = data.get("chain_tip_slot")
 
-            incoming_tip_hash = data.get("chain_tip_hash")   # None if absent
-            incoming_tip_slot = data.get("chain_tip_slot")   # None if absent
-
-            # 1. If present, chain_tip_hash must be valid hex64 — no silent accept.
             if incoming_tip_hash is not None and not _is_valid_hex64(incoming_tip_hash):
                 self.wfile.write(json.dumps({"error": "invalid chain_tip_hash"}).encode())
                 return
 
-            # 2. If present, chain_tip_slot must be >= -1 (where -1 is the empty-chain
-            #    sentinel), bounded by the payload's own timestamp to prevent large
-            #    forward jumps. Values below -1 are never produced by timpal.py.
             if incoming_tip_slot is not None:
                 if not isinstance(incoming_tip_slot, int) or incoming_tip_slot < -1:
                     self.wfile.write(json.dumps({"error": "invalid chain_tip_slot"}).encode())
                     return
                 payload_ts = data.get("timestamp", 0)
-                # Harden: payload timestamp must not exceed local time by more than
-                # TIMESTAMP_TOLERANCE seconds. Prevents a manipulated future timestamp
-                # from inflating max_expected and bypassing the slot bound.
                 if isinstance(payload_ts, (int, float)):
                     if payload_ts > time.time() + TIMESTAMP_TOLERANCE:
                         self.wfile.write(json.dumps({"error": "payload timestamp too far in future"}).encode())
@@ -489,9 +595,6 @@ class Handler(BaseHTTPRequestHandler):
                             self.wfile.write(json.dumps({"error": "chain_tip_slot exceeds expected range"}).encode())
                             return
 
-            # 3. Cross-check: if block_reward blocks were pushed, the highest slot
-            #    among them must equal incoming_tip_slot. The tip block is always in
-            #    recent_blocks (chain[-50:]), so any mismatch is internally inconsistent.
             if incoming_tip_slot is not None and incoming_blocks:
                 br_slots = [b.get("slot") for b in incoming_blocks
                              if b.get("type", "block_reward") == "block_reward"
@@ -500,13 +603,6 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(json.dumps({"error": "chain_tip_slot mismatch with pushed blocks"}).encode())
                     return
 
-            # 4. chain_tip_hash must equal canonical_hash of the tip block.
-            #    Trust model: canonical_hash is embedded by timpal.py in each
-            #    stripped block before the payload is signed. The Dilithium3
-            #    signature (verified above) authenticates it. api.py reads it
-            #    directly — it does not recompute hashes from stripped blocks,
-            #    which would always produce the wrong value due to missing fields.
-            #    If canonical_hash is absent (older node), check silently skips.
             if incoming_tip_hash is not None and incoming_blocks:
                 br_blocks = [b for b in incoming_blocks
                               if b.get("type", "block_reward") == "block_reward"
@@ -518,85 +614,104 @@ class Handler(BaseHTTPRequestHandler):
                         self.wfile.write(json.dumps({"error": "chain_tip_hash mismatch with tip block"}).encode())
                         return
 
-            with _ledger_lock:
-                existing_slots = {
-                    b.get("slot"): b
-                    for b in _ledger["blocks"] if b.get("type") == "block_reward"
-                }
-                for b in incoming_blocks:
-                    slot  = b.get("slot")
-                    rtype = b.get("type", "block_reward")
+            # ── Extract scalars ───────────────────────────────────────────────
+            incoming_minted = data.get("total_minted", 0)
+            incoming_height = data.get("chain_height", 0)
 
-                    if rtype == "block_reward":
-                        if not _is_valid_hex64(b.get("vrf_ticket", "")):
-                            continue
+            incoming_cp_balances = data.get("checkpoint_balances", {})
+            incoming_cp_slot     = data.get("checkpoint_slot", 0)
+            valid_cp = (isinstance(incoming_cp_balances, dict)
+                        and isinstance(incoming_cp_slot, int)
+                        and incoming_cp_slot > 0)
 
-                    if slot is not None and rtype != "fee_reward":
-                        if slot not in existing_slots:
-                            _ledger["blocks"].append(b)
-                            existing_slots[slot] = b
-                    else:
-                        if not any(x.get("reward_id") == b.get("reward_id")
-                                   for x in _ledger["blocks"]):
-                            _ledger["blocks"].append(b)
-
-                existing_txids = {t.get("tx_id") for t in _ledger["transactions"]}
-                for t in txs:
-                    if t.get("tx_id") not in existing_txids:
-                        _ledger["transactions"].append(t)
-                        existing_txids.add(t.get("tx_id"))
-
-                incoming_frs = data.get("fee_rewards", [])
-                existing_frids = {fr.get("reward_id") for fr in _ledger["fee_rewards"]}
-                for fr in incoming_frs:
-                    if (isinstance(fr, dict)
-                            and fr.get("reward_id")
-                            and fr.get("reward_id") not in existing_frids
-                            and isinstance(fr.get("amount"), int)
-                            and fr.get("amount", 0) > 0
-                            and isinstance(fr.get("winner_id"), str)
-                            and len(fr.get("winner_id", "")) == 64):
-                        _ledger["fee_rewards"].append(fr)
-                        existing_frids.add(fr["reward_id"])
-
-                _ledger["blocks"]       = _ledger["blocks"][-10000:]
-                _ledger["transactions"] = _ledger["transactions"][-5000:]
-                _ledger["fee_rewards"]  = _ledger["fee_rewards"][-2000:]
-
-                # FIX: trust node-reported total_minted and chain_height directly.
-                # These are the ground truth values from the node's ledger.
-                # Do NOT recompute from accumulated blocks — that causes inflation
-                # when both nodes push overlapping recent blocks.
-                incoming_minted = data.get("total_minted", 0)
-                if incoming_minted > _ledger["total_minted"]:
-                    _ledger["total_minted"] = incoming_minted
-
-                incoming_height = data.get("chain_height", 0)
-                if incoming_height > _ledger["chain_height"]:
-                    _ledger["chain_height"] = incoming_height
-
-                # Apply tip update — fully validated before _ledger_lock.
-                # incoming_tip_hash and incoming_tip_slot are None if the field
-                # was absent (safe fallback: tip simply does not update).
+            # ── Update in-memory tip (before DB write) ────────────────────────
+            with _tip_lock:
+                if incoming_minted > _tip["total_minted"]:
+                    _tip["total_minted"] = incoming_minted
+                if incoming_height > _tip["chain_height"]:
+                    _tip["chain_height"] = incoming_height
                 if (incoming_tip_hash is not None
                         and incoming_tip_slot is not None
-                        and incoming_tip_slot > _ledger["chain_tip_slot"]):
-                    _ledger["chain_tip_slot"] = incoming_tip_slot
-                    _ledger["chain_tip_hash"] = incoming_tip_hash
+                        and incoming_tip_slot > _tip["chain_tip_slot"]):
+                    _tip["chain_tip_slot"] = incoming_tip_slot
+                    _tip["chain_tip_hash"] = incoming_tip_hash
+                tip_snapshot = dict(_tip)
 
-                blocks_snap   = list(_ledger["blocks"])
-                txs_snap      = list(_ledger["transactions"])
-                minted_snap   = _ledger["total_minted"]
-                height_snap   = _ledger["chain_height"]
-                tip_slot_snap = _ledger["chain_tip_slot"]
-                tip_hash_snap = _ledger["chain_tip_hash"]
+            # ── Write to SQLite ───────────────────────────────────────────────
+            with _db_lock:
+                conn = sqlite3.connect(DB_PATH)
+                try:
+                    for b in incoming_blocks:
+                        rtype = b.get("type", "block_reward")
+                        if rtype == "block_reward" and not _is_valid_hex64(b.get("vrf_ticket", "")):
+                            continue
+                        conn.execute(
+                            "INSERT OR IGNORE INTO blocks "
+                            "(slot, reward_id, winner_id, amount, timestamp, type, "
+                            " prev_hash, vrf_ticket, canonical_hash, nodes) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (b.get("slot"), b.get("reward_id"), b.get("winner_id"),
+                             int(b.get("amount", 0)), b.get("timestamp"),
+                             rtype, b.get("prev_hash"), b.get("vrf_ticket"),
+                             b.get("canonical_hash"), b.get("nodes", 1))
+                        )
 
-                frs_snap      = list(_ledger["fee_rewards"])
+                    for t in txs:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO transactions "
+                            "(tx_id, sender_id, recipient_id, amount, fee, timestamp, slot, signature) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                            (t.get("tx_id"), t.get("sender_id"), t.get("recipient_id"),
+                             int(t.get("amount", 0)), int(t.get("fee", 0)),
+                             t.get("timestamp"), t.get("slot"), t.get("signature"))
+                        )
 
-            new_cache = _rebuild_stats_cache(
-                blocks_snap, txs_snap, frs_snap, minted_snap,
-                height_snap, tip_slot_snap, tip_hash_snap
-            )
+                    for fr in data.get("fee_rewards", []):
+                        if (isinstance(fr, dict)
+                                and fr.get("reward_id")
+                                and isinstance(fr.get("amount"), int)
+                                and fr.get("amount", 0) > 0
+                                and _is_valid_hex64(fr.get("winner_id", ""))):
+                            conn.execute(
+                                "INSERT OR IGNORE INTO fee_rewards "
+                                "(reward_id, winner_id, amount, timestamp, time_slot) "
+                                "VALUES (?, ?, ?, ?, ?)",
+                                (fr["reward_id"], fr["winner_id"], fr["amount"],
+                                 fr.get("timestamp"), fr.get("time_slot"))
+                            )
+
+                    if valid_cp:
+                        cur = conn.execute(
+                            "SELECT value FROM meta WHERE key='checkpoint_slot'"
+                        ).fetchone()
+                        cur_cp_slot = int(cur[0]) if cur else 0
+                        if incoming_cp_slot > cur_cp_slot:
+                            conn.executemany(
+                                "INSERT OR REPLACE INTO checkpoint_balances "
+                                "(address, balance, checkpoint_slot) VALUES (?, ?, ?)",
+                                [(addr, int(bal), incoming_cp_slot)
+                                 for addr, bal in incoming_cp_balances.items()
+                                 if isinstance(addr, str) and len(addr) == 64
+                                 and isinstance(bal, int) and bal >= 0]
+                            )
+                            conn.execute(
+                                "INSERT OR REPLACE INTO meta VALUES ('checkpoint_slot', ?)",
+                                (str(incoming_cp_slot),)
+                            )
+
+                    conn.execute("INSERT OR REPLACE INTO meta VALUES ('total_minted',   ?)",
+                                 (str(tip_snapshot["total_minted"]),))
+                    conn.execute("INSERT OR REPLACE INTO meta VALUES ('chain_height',   ?)",
+                                 (str(tip_snapshot["chain_height"]),))
+                    conn.execute("INSERT OR REPLACE INTO meta VALUES ('chain_tip_slot', ?)",
+                                 (str(tip_snapshot["chain_tip_slot"]),))
+                    conn.execute("INSERT OR REPLACE INTO meta VALUES ('chain_tip_hash', ?)",
+                                 (tip_snapshot["chain_tip_hash"],))
+                    conn.commit()
+                finally:
+                    conn.close()
+
+            new_cache = _rebuild_stats_cache()
             with _stats_cache_lock:
                 _stats_cache = new_cache
 
@@ -611,9 +726,15 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    _init_db()
+    _load_state()
+    startup_cache = _rebuild_stats_cache()
+    with _stats_cache_lock:
+        _stats_cache = startup_cache
     threading.Thread(target=_clean_post_rate, daemon=True).start()
-    print("TIMPAL API v3.2 running on port 7781")
-    print("Push authentication: Dilithium3 signature (no shared secret)")
-    print("FIX: total_minted and chain_height from node push (not recomputed from blocks)")
+    print("TIMPAL API v3.2 (SQLite) running on port 7781")
+    print(f"Database : {DB_PATH}")
+    print("Auth     : Dilithium3 push signature")
+    print("Storage  : Persistent — data survives restarts")
     server = ThreadingHTTPServer(("0.0.0.0", 7781), Handler)
     server.serve_forever()

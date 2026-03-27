@@ -293,12 +293,19 @@ class Handler(BaseHTTPRequestHandler):
                 addr_txs_recv = [t for t in txs if t.get("recipient_id", "") == addr]
                 addr_txs      = sorted(addr_txs_sent + addr_txs_recv,
                                        key=lambda t: t.get("timestamp", 0), reverse=True)
-                # Count rewards directly from the rolling window blocks — same
-                # source as node_stats in _rebuild_stats_cache. No cache lookup,
-                # no override inflation — both panels now read from identical data.
-                actual_rewards = len([b for b in blocks
-                                      if b.get("winner_id") == addr
-                                      and b.get("type") == "block_reward"])
+                # Read reward count from _stats_cache — the identical object the
+                # node stats panel reads from. Both panels now return the same
+                # number from the same snapshot. Reading live from _ledger["blocks"]
+                # produces a different count whenever new blocks arrive between the
+                # last POST (cache rebuild) and this GET, causing visible mismatches.
+                with _stats_cache_lock:
+                    cache = _stats_cache
+                actual_rewards = 0
+                if cache:
+                    for n in cache.get("node_stats", []):
+                        if n.get("id") == addr:
+                            actual_rewards = n.get("rewards", 0)
+                            break
                 actual_earned  = round(actual_rewards * _to_tmpl(105_750_000), 8)
                 self.wfile.write(json.dumps({
                     "address":        addr,

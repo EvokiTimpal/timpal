@@ -58,7 +58,6 @@ _ledger = {
 }
 _ledger_lock = threading.Lock()
 _last_update = 0
-_node_wins    = {}   # persisted win counts per device_id from push
 
 
 # ── Cached computed stats ──────────────────────────────────────────────────────
@@ -158,7 +157,7 @@ def _clean_post_rate():
 
 
 def _rebuild_stats_cache(blocks, txs, fee_rewards, total_minted_units, chain_height,
-                         chain_tip_slot, chain_tip_hash, node_wins_override=None):
+                         chain_tip_slot, chain_tip_hash):
     """Build stats cache. All amounts converted from units to TMPL here.
 
     FIX: total_minted_tmpl comes directly from the node-reported total_minted,
@@ -179,11 +178,6 @@ def _rebuild_stats_cache(blocks, txs, fee_rewards, total_minted_units, chain_hei
         wid = b.get("winner_id", "")
         if wid:
             node_counts[wid] = node_counts.get(wid, 0) + 1
-    # Override with persisted node_wins from push — survives restarts and checkpoints
-    if node_wins_override:
-        for wid, cnt in node_wins_override.items():
-            if cnt > node_counts.get(wid, 0):
-                node_counts[wid] = cnt
 
     total_r    = sum(node_counts.values()) or 1
     node_stats = sorted([
@@ -299,18 +293,12 @@ class Handler(BaseHTTPRequestHandler):
                 addr_txs_recv = [t for t in txs if t.get("recipient_id", "") == addr]
                 addr_txs      = sorted(addr_txs_sent + addr_txs_recv,
                                        key=lambda t: t.get("timestamp", 0), reverse=True)
-                # Single source of truth: _stats_cache is the same object
-                # the node stats panel reads. Reading _node_wins or _ledger["blocks"]
-                # directly produces a different snapshot and causes mismatches.
-                with _stats_cache_lock:
-                    cache = _stats_cache
-                cache_rewards = 0
-                if cache:
-                    for n in cache.get("node_stats", []):
-                        if n.get("id") == addr:
-                            cache_rewards = n.get("rewards", 0)
-                            break
-                actual_rewards = cache_rewards
+                # Count rewards directly from the rolling window blocks — same
+                # source as node_stats in _rebuild_stats_cache. No cache lookup,
+                # no override inflation — both panels now read from identical data.
+                actual_rewards = len([b for b in blocks
+                                      if b.get("winner_id") == addr
+                                      and b.get("type") == "block_reward"])
                 actual_earned  = round(actual_rewards * _to_tmpl(105_750_000), 8)
                 self.wfile.write(json.dumps({
                     "address":        addr,
@@ -406,7 +394,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"error": str(e)}).encode())
 
     def do_POST(self):
-        global _last_update, _stats_cache, _node_wins
+        global _last_update, _stats_cache
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -580,12 +568,6 @@ class Handler(BaseHTTPRequestHandler):
                 if incoming_height > _ledger["chain_height"]:
                     _ledger["chain_height"] = incoming_height
 
-                # Update persisted win count for this node
-                incoming_nw = data.get("node_wins", 0)
-                push_did    = data.get("device_id", "")
-                if push_did and isinstance(incoming_nw, int) and incoming_nw > _node_wins.get(push_did, 0):
-                    _node_wins[push_did] = incoming_nw
-
                 # Apply tip update — fully validated before _ledger_lock.
                 # incoming_tip_hash and incoming_tip_slot are None if the field
                 # was absent (safe fallback: tip simply does not update).
@@ -606,8 +588,7 @@ class Handler(BaseHTTPRequestHandler):
 
             new_cache = _rebuild_stats_cache(
                 blocks_snap, txs_snap, frs_snap, minted_snap,
-                height_snap, tip_slot_snap, tip_hash_snap,
-                node_wins_override=dict(_node_wins)
+                height_snap, tip_slot_snap, tip_hash_snap
             )
             with _stats_cache_lock:
                 _stats_cache = new_cache

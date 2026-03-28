@@ -2,25 +2,17 @@
 
 v3.3 changes (this version):
   - Replaced in-memory _ledger dict with SQLite persistent storage.
-    All blocks, transactions, and fee_rewards accumulate permanently.
-    Explorer data survives API restarts — no more rolling window reset.
   - Address and block queries read from the full SQLite index.
-    Block counts and earned amounts are accurate for the full lifetime
-    of the API process, not just since the last restart.
-  - timpal.py now sends checkpoint_balances in LEDGER_PUSH. The API
-    stores them as a historical baseline for addresses whose blocks
-    predate the SQLite DB.
-  - chain_height display uses total_minted // REWARD_PER_ROUND —
-    same formula as VRF Rounds so both stats always match.
-  - Payload size limit raised to 2MB (checkpoint_balances can be large).
+  - timpal.py now sends checkpoint_balances in LEDGER_PUSH.
+  - chain_height display uses total_minted // REWARD_PER_ROUND.
+  - Payload size limit raised to 2MB.
 
 v3.2 fixes (carried forward):
-  - total_minted from node push directly (not recomputed from blocks).
+  - total_minted from node push directly.
   - chain_tip_hash correct canonical hash of full tip block.
   - Dilithium3 push signature verification.
   - Full tip field validation on LEDGER_PUSH.
-  - _compute_block_hash removed (would always produce wrong hash on
-    stripped blocks).
+  - _compute_block_hash removed.
 """
 
 import json
@@ -38,14 +30,12 @@ try:
 except ImportError:
     _DILITHIUM_AVAILABLE = False
     print("[!] dilithium-py not installed — push signature verification disabled")
-    print("    Run: pip3 install dilithium-py cryptography")
 
 import hashlib
 
-# ── Constants ──────────────────────────────────────────────────────────────────
 UNIT                = 100_000_000
 TOTAL_SUPPLY_TMPL   = 250_000_000.0
-REWARD_PER_ROUND    = 105_750_000       # units per block; used for VRF rounds display
+REWARD_PER_ROUND    = 105_750_000
 CHECKPOINT_BUFFER   = 120
 RECENT_WINDOW       = 50
 CONFIRMATION_DEPTH  = 6
@@ -53,12 +43,9 @@ GENESIS_TIME        = 1774706400
 REWARD_INTERVAL     = 5.0
 TIMESTAMP_TOLERANCE = 30
 
-# ── SQLite ─────────────────────────────────────────────────────────────────────
 DB_PATH  = os.path.expanduser("~/.timpal_explorer.db")
 _db_lock = threading.Lock()
 
-# ── In-memory tip state ────────────────────────────────────────────────────────
-# Kept in memory for fast POST validation — persisted to meta table on every push.
 _tip_lock = threading.Lock()
 _tip = {
     "chain_tip_slot": -1,
@@ -67,29 +54,16 @@ _tip = {
     "chain_height":   0,
 }
 
-# ── Stats cache ────────────────────────────────────────────────────────────────
 _stats_cache      = None
 _stats_cache_lock = threading.Lock()
 _last_update      = 0
 
-# ── Per-IP POST rate limiting ──────────────────────────────────────────────────
 _post_rate      = {}
 _post_rate_lock = threading.Lock()
 POST_RATE_LIMIT = 5
 
 
-# NOTE: _compute_block_hash is intentionally absent from api.py.
-# Blocks in the push payload have vrf_sig and vrf_public_key stripped by timpal.py
-# before transmission. Hashing a stripped block produces a different value than the
-# canonical hash of the full block. The canonical hash is embedded by timpal.py as
-# canonical_hash on each block (computed before stripping) and trusted here because
-# it is covered by the Dilithium3 payload signature.
-
-
-# ── Database ───────────────────────────────────────────────────────────────────
-
 def _init_db():
-    """Create tables if not exist. WAL mode for concurrent read performance."""
     with _db_lock:
         conn = sqlite3.connect(DB_PATH)
         conn.execute("PRAGMA journal_mode=WAL")
@@ -153,7 +127,6 @@ def _init_db():
 
 
 def _load_state():
-    """Reload persisted tip state from meta table on startup."""
     with _db_lock:
         conn = sqlite3.connect(DB_PATH)
         rows = {r[0]: r[1] for r in conn.execute("SELECT key, value FROM meta").fetchall()}
@@ -224,8 +197,6 @@ def _migrate_apply_checkpoint_prune():
             conn.close()
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
-
 def _to_tmpl(units) -> float:
     try:
         return units / UNIT
@@ -240,13 +211,6 @@ def _is_valid_hex64(s) -> bool:
 
 
 def _verify_push_signature(data: dict) -> bool:
-    """Verify the Dilithium3 signature on an incoming LEDGER_PUSH payload.
-
-    The signature covers every field in the payload except the signature itself.
-    Fields accessed after this gate — blocks, canonical_hash, chain_tip_hash,
-    chain_tip_slot, total_minted, checkpoint_balances — are all authenticated.
-    No sensitive payload content is acted upon before this returns True.
-    """
     if not _DILITHIUM_AVAILABLE:
         print("[!] WARNING: push accepted without signature verification")
         return True
@@ -294,10 +258,7 @@ def _clean_post_rate():
                 del _post_rate[ip]
 
 
-# ── Stats cache ────────────────────────────────────────────────────────────────
-
 def _rebuild_stats_cache() -> dict:
-    """Query SQLite for all stats. Full historical counts — no rolling window."""
     with _tip_lock:
         total_minted_units = _tip["total_minted"]
         chain_tip_slot     = _tip["chain_tip_slot"]
@@ -369,7 +330,7 @@ def _rebuild_stats_cache() -> dict:
         "total_rewards":  vrf_rounds,
         "total_txs":      tx_count,
         "active_nodes":   len(node_counts),
-        "chain_height":   vrf_rounds,   # same formula — always matches VRF Rounds
+        "chain_height":   vrf_rounds,
         "chain_tip_slot": chain_tip_slot,
         "chain_tip_hash": chain_tip_hash,
         "node_stats":     node_stats,
@@ -408,8 +369,6 @@ def _rebuild_stats_cache() -> dict:
     }
 
 
-# ── HTTP Handler ───────────────────────────────────────────────────────────────
-
 class Handler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self):
@@ -420,7 +379,6 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _send_json(self, code: int, body: dict):
-        """Send HTTP status + JSON body in one call."""
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -433,7 +391,6 @@ class Handler(BaseHTTPRequestHandler):
             path   = parsed.path.rstrip("/")
             params = urllib.parse.parse_qs(parsed.query)
 
-            # ── GET /api ──────────────────────────────────────────────────────
             if path in ("", "/", "/api", "/api/"):
                 with _stats_cache_lock:
                     cache = _stats_cache
@@ -449,7 +406,6 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._send_json(200, cache)
 
-            # ── GET /api/address?id=<hex64> ───────────────────────────────────
             elif path == "/api/address":
                 addr = params.get("id", [""])[0].strip()
                 if not addr:
@@ -470,6 +426,12 @@ class Handler(BaseHTTPRequestHandler):
                             "WHERE winner_id=? AND type='block_reward'",
                             (addr,)
                         ).fetchone()[0]
+
+                        pre_cp_row = conn.execute(
+                            "SELECT pre_checkpoint_blocks FROM checkpoint_balances WHERE address=?",
+                            (addr,)
+                        ).fetchone()
+                        pre_cp_blocks = pre_cp_row[0] if pre_cp_row else 0
 
                         block_rows = conn.execute(
                             "SELECT slot, amount, timestamp, prev_hash FROM blocks "
@@ -494,7 +456,7 @@ class Handler(BaseHTTPRequestHandler):
                     finally:
                         conn.close()
 
-                total_rewards = block_count
+                total_rewards = block_count + pre_cp_blocks
                 total_earned  = round(total_rewards * _to_tmpl(REWARD_PER_ROUND), 8)
                 total_sent    = round(sum(_to_tmpl(r[0]) for r in sent_rows), 8)
                 total_recv    = round(sum(_to_tmpl(r[0]) for r in recv_rows), 8)
@@ -539,7 +501,6 @@ class Handler(BaseHTTPRequestHandler):
                     "transactions": all_txs
                 })
 
-            # ── GET /api/tx?id=<tx_id> ────────────────────────────────────────
             elif path == "/api/tx":
                 tx_id = params.get("id", [""])[0].strip()
                 if not tx_id:
@@ -570,7 +531,6 @@ class Handler(BaseHTTPRequestHandler):
                     "confirmed": True
                 })
 
-            # ── GET /api/block?slot=<int> ─────────────────────────────────────
             elif path == "/api/block":
                 slot_str = params.get("slot", [""])[0].strip()
                 if not slot_str:
@@ -636,11 +596,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": "unknown type"})
                 return
 
-            # ── Trust boundary ────────────────────────────────────────────────
-            # _verify_push_signature verifies the Dilithium3 signature over the
-            # entire payload (all fields except "signature"). Every field accessed
-            # below — blocks, canonical_hash, chain_tip_hash, chain_tip_slot,
-            # total_minted, checkpoint_balances — is authenticated by that signature.
             if not _verify_push_signature(data):
                 self._send_json(401, {"error": "invalid signature"})
                 return
@@ -660,7 +615,6 @@ class Handler(BaseHTTPRequestHandler):
                    and not isinstance(t.get("amount"), bool)
                    and isinstance(t.get("tx_id"), str)]
 
-            # ── Tip field validation ──────────────────────────────────────────
             incoming_tip_hash = data.get("chain_tip_hash")
             incoming_tip_slot = data.get("chain_tip_slot")
 
@@ -705,7 +659,6 @@ class Handler(BaseHTTPRequestHandler):
                         self._send_json(400, {"error": "chain_tip_hash mismatch with tip block"})
                         return
 
-            # ── Extract scalars ───────────────────────────────────────────────
             incoming_minted = data.get("total_minted", 0)
             incoming_height = data.get("chain_height", 0)
 
@@ -715,7 +668,6 @@ class Handler(BaseHTTPRequestHandler):
                         and isinstance(incoming_cp_slot, int)
                         and incoming_cp_slot > 0)
 
-            # ── Update in-memory tip (before DB write) ────────────────────────
             with _tip_lock:
                 if incoming_minted > _tip["total_minted"]:
                     _tip["total_minted"] = incoming_minted
@@ -728,7 +680,6 @@ class Handler(BaseHTTPRequestHandler):
                     _tip["chain_tip_hash"] = incoming_tip_hash
                 tip_snapshot = dict(_tip)
 
-            # ── Write to SQLite ───────────────────────────────────────────────
             with _db_lock:
                 conn = sqlite3.connect(DB_PATH)
                 try:
@@ -801,16 +752,17 @@ class Handler(BaseHTTPRequestHandler):
                         ).fetchone()
                         cur_cp_slot = int(cur[0]) if cur else 0
                         if incoming_cp_slot > cur_cp_slot:
-                            # Accumulate pre_checkpoint_blocks correctly:
-                            # new_pre_cp = old_pre_cp + DB blocks in [prune_before, new_prune_before)
                             new_prune_before = max(0, incoming_cp_slot - CHECKPOINT_BUFFER)
                             old_pre_cp = {r[0]: r[1] for r in conn.execute(
                                 "SELECT address, pre_checkpoint_blocks FROM checkpoint_balances"
                             ).fetchall()}
+                            # BUG 1 FIX: use prune_before (current DB value) as lower bound,
+                            # not cur_cp_slot. Ensures the CHECKPOINT_BUFFER overlap window
+                            # [prune_before, new_prune_before) is fully accumulated before deletion.
                             new_block_counts = {r[0]: r[1] for r in conn.execute(
                                 "SELECT winner_id, COUNT(*) FROM blocks "
                                 "WHERE type='block_reward' AND slot >= ? AND slot < ? GROUP BY winner_id",
-                                (cur_cp_slot, new_prune_before)
+                                (prune_before, new_prune_before)
                             ).fetchall()}
                             records = []
                             for addr, bal in incoming_cp_balances.items():
@@ -875,7 +827,7 @@ if __name__ == "__main__":
     with _stats_cache_lock:
         _stats_cache = startup_cache
     threading.Thread(target=_clean_post_rate, daemon=True).start()
-    print("TIMPAL API v3.2 (SQLite) running on port 7781")
+    print("TIMPAL API v3.3 (SQLite) running on port 7781")
     print(f"Database : {DB_PATH}")
     print("Auth     : Dilithium3 push signature")
     print("Storage  : Persistent — data survives restarts")

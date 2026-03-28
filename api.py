@@ -180,7 +180,7 @@ def _migrate_apply_checkpoint_prune():
             if "prune_before" in rows:
                 return
 
-            new_prune_before = checkpoint_slot - CHECKPOINT_BUFFER
+            new_prune_before = max(0, checkpoint_slot - CHECKPOINT_BUFFER)
 
             overlap_rows = conn.execute(
                 "SELECT winner_id, COUNT(*) FROM blocks "
@@ -801,18 +801,45 @@ class Handler(BaseHTTPRequestHandler):
                         ).fetchone()
                         cur_cp_slot = int(cur[0]) if cur else 0
                         if incoming_cp_slot > cur_cp_slot:
+                            # Accumulate pre_checkpoint_blocks correctly:
+                            # new_pre_cp = old_pre_cp + DB blocks in [prune_before, new_prune_before)
+                            new_prune_before = max(0, incoming_cp_slot - CHECKPOINT_BUFFER)
+                            old_pre_cp = {r[0]: r[1] for r in conn.execute(
+                                "SELECT address, pre_checkpoint_blocks FROM checkpoint_balances"
+                            ).fetchall()}
+                            new_block_counts = {r[0]: r[1] for r in conn.execute(
+                                "SELECT winner_id, COUNT(*) FROM blocks "
+                                "WHERE type='block_reward' AND slot >= ? AND slot < ? GROUP BY winner_id",
+                                (prune_before, new_prune_before)
+                            ).fetchall()}
+                            records = []
+                            for addr, bal in incoming_cp_balances.items():
+                                if not (isinstance(addr, str) and len(addr) == 64):
+                                    continue
+                                if not (isinstance(bal, int) and bal >= 0):
+                                    continue
+                                pre_cp = old_pre_cp.get(addr, 0) + new_block_counts.get(addr, 0)
+                                records.append((int(bal), incoming_cp_slot, pre_cp, addr))
                             conn.executemany(
-                                "INSERT OR REPLACE INTO checkpoint_balances "
-                                "(address, balance, checkpoint_slot) VALUES (?, ?, ?)",
-                                [(addr, int(bal), incoming_cp_slot)
-                                 for addr, bal in incoming_cp_balances.items()
-                                 if isinstance(addr, str) and len(addr) == 64
-                                 and isinstance(bal, int) and bal >= 0]
+                                "INSERT INTO checkpoint_balances "
+                                "(address, balance, checkpoint_slot, pre_checkpoint_blocks) "
+                                "VALUES (?, ?, ?, ?) "
+                                "ON CONFLICT(address) DO UPDATE SET "
+                                "balance=excluded.balance, "
+                                "checkpoint_slot=excluded.checkpoint_slot, "
+                                "pre_checkpoint_blocks=excluded.pre_checkpoint_blocks",
+                                [(bal, cp, pre, addr) for bal, cp, pre, addr in records]
+                            )
+                            conn.execute("DELETE FROM blocks WHERE slot < ?", (new_prune_before,))
+                            conn.execute(
+                                "INSERT OR REPLACE INTO meta VALUES ('prune_before', ?)",
+                                (str(new_prune_before),)
                             )
                             conn.execute(
                                 "INSERT OR REPLACE INTO meta VALUES ('checkpoint_slot', ?)",
                                 (str(incoming_cp_slot),)
                             )
+                            prune_before = new_prune_before
 
                     conn.execute("INSERT OR REPLACE INTO meta VALUES ('total_minted',   ?)",
                                  (str(tip_snapshot["total_minted"]),))

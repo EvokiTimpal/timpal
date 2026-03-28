@@ -764,11 +764,24 @@ class Handler(BaseHTTPRequestHandler):
                                 "WHERE type='block_reward' AND slot >= ? AND slot < ? GROUP BY winner_id",
                                 (prune_before, new_prune_before)
                             ).fetchall()}
+                            # Checkpoint integrity: sum of balances must not exceed total_minted.
+                            # Catches corrupted or malformed checkpoint payloads before they
+                            # are written to DB and history is irreversibly pruned.
+                            cp_balance_sum = sum(
+                                v for v in incoming_cp_balances.values()
+                                if isinstance(v, int) and not isinstance(v, bool)
+                            )
+                            if cp_balance_sum > incoming_minted:
+                                self._send_json(400, {"error": "checkpoint balances exceed total_minted"})
+                                return
                             records = []
                             for addr, bal in incoming_cp_balances.items():
                                 if not (isinstance(addr, str) and len(addr) == 64):
                                     continue
                                 if not (isinstance(bal, int) and bal >= 0):
+                                    continue
+                                # Per-address sanity: no single address can hold more than total_minted.
+                                if bal > incoming_minted:
                                     continue
                                 pre_cp = old_pre_cp.get(addr, 0) + new_block_counts.get(addr, 0)
                                 records.append((int(bal), incoming_cp_slot, pre_cp, addr))

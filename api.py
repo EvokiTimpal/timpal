@@ -751,6 +751,12 @@ class Handler(BaseHTTPRequestHandler):
                             "SELECT value FROM meta WHERE key='checkpoint_slot'"
                         ).fetchone()
                         cur_cp_slot = int(cur[0]) if cur else 0
+                        if incoming_cp_slot <= cur_cp_slot:
+                            self._send_json(400, {"error": "stale checkpoint"})
+                            return
+                        if incoming_cp_slot <= prune_before:
+                            self._send_json(400, {"error": "checkpoint does not advance pruning"})
+                            return
                         if incoming_cp_slot > cur_cp_slot:
                             new_prune_before = max(0, incoming_cp_slot - CHECKPOINT_BUFFER)
                             old_pre_cp = {r[0]: r[1] for r in conn.execute(

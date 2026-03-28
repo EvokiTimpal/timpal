@@ -810,7 +810,7 @@ class Handler(BaseHTTPRequestHandler):
                             new_block_counts = {r[0]: r[1] for r in conn.execute(
                                 "SELECT winner_id, COUNT(*) FROM blocks "
                                 "WHERE type='block_reward' AND slot >= ? AND slot < ? GROUP BY winner_id",
-                                (prune_before, new_prune_before)
+                                (cur_cp_slot, new_prune_before)
                             ).fetchall()}
                             records = []
                             for addr, bal in incoming_cp_balances.items():

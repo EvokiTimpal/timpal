@@ -592,6 +592,15 @@ class Ledger:
 
             if changed:
                 self._drain_orphan_pool_locked()
+                # S15-3: Post-condition tip hash check after merge.
+                actual_tip_hash, _ = self._get_tip()
+                recomputed_tip = (compute_block_hash(self.chain[-1])
+                                  if self.chain else
+                                  (self.checkpoints[-1].get("chain_tip_hash", GENESIS_PREV_HASH)
+                                   if self.checkpoints else GENESIS_PREV_HASH))
+                if actual_tip_hash != recomputed_tip:
+                    print(f"\n  [merge] POST-CONDITION FAILED: tip mismatch — "
+                          f"triggering resync\n  > ", end="", flush=True)
                 self.save()
             return changed
 
@@ -924,6 +933,15 @@ class Ledger:
             self.checkpoints.append(checkpoint)
             self._spent_tx_ids_set = set(checkpoint.get("spent_tx_ids", []))
             self.total_minted = checkpoint.get("total_minted", 0)
+            # S15-2: Self-check — verify chain_hash consistent after pruning.
+            c_pruned_check = [b for b in self.chain if b.get("slot", prune_before) < prune_before]
+            if c_pruned_check:
+                recomputed = Ledger._compute_hash(sorted(c_pruned_check, key=lambda b: b.get("slot", 0)))
+                if recomputed != checkpoint.get("chain_hash", ""):
+                    self.checkpoints.pop()
+                    print(f"\n  [apply_checkpoint] SELF-CHECK FAILED slot={checkpoint.get('slot')} "
+                          f"chain_hash mismatch — checkpoint rejected\n  > ", end="", flush=True)
+                    return False
             self.save()
             return True
 
@@ -940,7 +958,7 @@ class Wallet:
         self.public_key, self.private_key = Dilithium3.keygen()
         self.device_id = hashlib.sha256(self.public_key).hexdigest()
         print(f"\n  New quantum-resistant wallet created.")
-        print(f"  Device ID: {self.device_id[:24]}...")
+        print(f"  Device ID: {self.device_id}")
         print(f"\n  WARNING — BACK UP YOUR WALLET FILE: {WALLET_FILE}")
         print(f"  If you delete it your TMPL is gone forever.")
 
@@ -1823,7 +1841,7 @@ class Node:
                     # v3.1 wallets load fine — only block versions < 3.1
                     if _ver(wd.get("version", "0.0")) < _ver(MIN_VERSION):
                         print("\n  " + "═"*52)
-                        print("  TIMPAL v3.2 — ACTION REQUIRED")
+                        print("  TIMPAL v3.3 — ACTION REQUIRED")
                         print("  " + "═"*52)
                         print(f"  Wallet version {wd.get('version','?')} is too old.")
                         print(f"  Delete old wallet and ledger, then restart:")
@@ -1861,7 +1879,7 @@ class Node:
                         break
             balance = self.ledger.get_balance(self.wallet.device_id)
             print(f"\n  Wallet loaded.")
-            print(f"  Device ID : {self.wallet.device_id[:24]}...")
+            print(f"  Device ID : {self.wallet.device_id}")
             print(f"  Balance   : {balance / UNIT:.8f} TMPL")
         else:
             self.wallet.create_new()
@@ -2780,14 +2798,14 @@ class Node:
 
     def start(self):
         print("\n" + "═"*54)
-        print("  TIMPAL v3.2 — Quantum-Resistant Money Without Masters")
+        print("  TIMPAL v3.3 — Quantum-Resistant Money Without Masters")
         print("  Quantum-Resistant | Worldwide | Instant | Chain-Anchored")
         print("═"*54)
         self.network.start()
         balance = self.ledger.get_balance(self.wallet.device_id)
         summary = self.ledger.get_summary()
         tip_hash, tip_slot = self.ledger._get_tip()
-        print(f"  Device ID    : {self.wallet.device_id[:24]}...")
+        print(f"  Device ID    : {self.wallet.device_id}")
         print(f"  Balance      : {balance / UNIT:.8f} TMPL")
         print(f"  Network      : {self.network.local_ip}:{self.network.port}")
         print(f"  Chain height : {summary['chain_height']} blocks (tip slot {tip_slot})")

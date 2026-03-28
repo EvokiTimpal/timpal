@@ -904,6 +904,47 @@ class Ledger:
             self.save()
             return True
 
+    @staticmethod
+    def _recompute_balances_locked(
+        c_prune: list, t_prune: list, fr_prune: list, prev_bal: dict
+    ) -> dict:
+        """Recompute balances from prunable history.
+
+        Extracted from create_checkpoint() — identical arithmetic.
+        Used by apply_checkpoint() (Gap 2) to independently verify that
+        the balance dict in a peer checkpoint matches local chain history
+        before accepting the checkpoint and irreversibly pruning history.
+
+        Caller must hold self._lock.
+        """
+        addrs = set(prev_bal.keys())
+        for b in c_prune:
+            wid = b.get("winner_id", "")
+            if wid: addrs.add(wid)
+        for t in t_prune:
+            sid = t.get("sender_id", "")
+            rid = t.get("recipient_id", "")
+            if sid: addrs.add(sid)
+            if rid: addrs.add(rid)
+        for fr in fr_prune:
+            wid = fr.get("winner_id", "")
+            if wid: addrs.add(wid)
+
+        balances = {}
+        for addr in addrs:
+            bal = prev_bal.get(addr, 0)
+            for t in t_prune:
+                if t.get("recipient_id") == addr: bal += t.get("amount", 0)
+                if t.get("sender_id")    == addr:
+                    bal -= t.get("amount", 0)
+                    bal -= t.get("fee", 0)
+            for b in c_prune:
+                if b.get("winner_id") == addr: bal += b.get("amount", 0)
+            for fr in fr_prune:
+                if fr.get("winner_id") == addr: bal += fr.get("amount", 0)
+            balances[addr] = bal
+        return balances
+
     def apply_checkpoint(self, checkpoint: dict) -> bool:
         """Apply a checkpoint received from a peer.
         FIX-D: prunes self.fee_rewards and verifies fee_rewards_hash.
@@ -927,21 +968,26 @@ class Ledger:
             if fr_verify and checkpoint.get("fee_rewards_hash"):
                 if Ledger._compute_hash(sorted(fr_verify, key=lambda fr: fr.get("time_slot", 0))) != checkpoint.get("fee_rewards_hash", ""):
                     return False
+            # Gap 2: Balance self-verification.
+            # Recompute balances from local chain history and reject if they
+            # don't match the checkpoint's balances dict. Only runs when
+            # c_verify is non-empty — same gate as chain_hash check — because
+            # without local block history we cannot independently reconstruct
+            # block rewards and the comparison would produce false rejections.
+            if c_verify:
+                prev_bal = dict(self.checkpoints[-1]["balances"]) if self.checkpoints else {}
+                computed = Ledger._recompute_balances_locked(c_verify, t_verify, fr_verify, prev_bal)
+                if computed != checkpoint.get("balances", {}):
+                    print(f"\n  [apply_checkpoint] GAP2 BALANCE CHECK FAILED "
+                          f"slot={checkpoint.get('slot')} — checkpoint rejected\n  > ",
+                          end="", flush=True)
+                    return False
             self.chain        = [b  for b  in self.chain        if b.get("slot",      prune_before) >= prune_before]
             self.transactions = [t  for t  in self.transactions if (t.get("slot") or 0) >= prune_before]
             self.fee_rewards  = [fr for fr in self.fee_rewards  if fr.get("time_slot", 0) >= prune_before]
             self.checkpoints.append(checkpoint)
             self._spent_tx_ids_set = set(checkpoint.get("spent_tx_ids", []))
             self.total_minted = checkpoint.get("total_minted", 0)
-            # S15-2: Self-check — verify chain_hash consistent after pruning.
-            c_pruned_check = [b for b in self.chain if b.get("slot", prune_before) < prune_before]
-            if c_pruned_check:
-                recomputed = Ledger._compute_hash(sorted(c_pruned_check, key=lambda b: b.get("slot", 0)))
-                if recomputed != checkpoint.get("chain_hash", ""):
-                    self.checkpoints.pop()
-                    print(f"\n  [apply_checkpoint] SELF-CHECK FAILED slot={checkpoint.get('slot')} "
-                          f"chain_hash mismatch — checkpoint rejected\n  > ", end="", flush=True)
-                    return False
             self.save()
             return True
 

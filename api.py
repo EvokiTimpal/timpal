@@ -46,6 +46,8 @@ import hashlib
 UNIT                = 100_000_000
 TOTAL_SUPPLY_TMPL   = 250_000_000.0
 REWARD_PER_ROUND    = 105_750_000       # units per block; used for VRF rounds display
+CHECKPOINT_BUFFER   = 120
+RECENT_WINDOW       = 50
 CONFIRMATION_DEPTH  = 6
 GENESIS_TIME        = 1774706400
 REWARD_INTERVAL     = 5.0
@@ -139,6 +141,13 @@ def _init_db():
                 value TEXT
             );
         """)
+        try:
+            conn.execute(
+                "ALTER TABLE checkpoint_balances "
+                "ADD COLUMN pre_checkpoint_blocks INTEGER DEFAULT 0"
+            )
+        except Exception:
+            pass
         conn.commit()
         conn.close()
 
@@ -154,6 +163,65 @@ def _load_state():
         _tip["chain_tip_hash"] = rows.get("chain_tip_hash", "0" * 64)
         _tip["total_minted"]   = int(rows.get("total_minted",   0))
         _tip["chain_height"]   = int(rows.get("chain_height",   0))
+
+
+def _migrate_apply_checkpoint_prune():
+    with _db_lock:
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            rows = {r[0]: r[1] for r in conn.execute(
+                "SELECT key, value FROM meta"
+            ).fetchall()}
+
+            checkpoint_slot = int(rows.get("checkpoint_slot", 0))
+            if checkpoint_slot <= 0:
+                return
+
+            if "prune_before" in rows:
+                return
+
+            new_prune_before = checkpoint_slot - CHECKPOINT_BUFFER
+
+            overlap_rows = conn.execute(
+                "SELECT winner_id, COUNT(*) FROM blocks "
+                "WHERE type='block_reward' "
+                "AND slot >= ? AND slot < ? "
+                "GROUP BY winner_id",
+                (new_prune_before, checkpoint_slot)
+            ).fetchall()
+            overlap = {r[0]: r[1] for r in overlap_rows}
+
+            cp_rows = conn.execute(
+                "SELECT address, balance FROM checkpoint_balances"
+            ).fetchall()
+
+            updates = []
+            for addr, bal in cp_rows:
+                total_blocks = bal // REWARD_PER_ROUND
+                adj = total_blocks - overlap.get(addr, 0)
+                if adj < 0:
+                    adj = 0
+                updates.append((adj, addr))
+
+            conn.executemany(
+                "UPDATE checkpoint_balances "
+                "SET pre_checkpoint_blocks=? WHERE address=?",
+                updates
+            )
+
+            conn.execute(
+                "DELETE FROM blocks WHERE slot < ?",
+                (new_prune_before,)
+            )
+
+            conn.execute(
+                "INSERT OR REPLACE INTO meta VALUES ('prune_before', ?)",
+                (str(new_prune_before),)
+            )
+
+            conn.commit()
+        finally:
+            conn.close()
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -238,11 +306,29 @@ def _rebuild_stats_cache() -> dict:
     with _db_lock:
         conn = sqlite3.connect(DB_PATH)
         try:
-            node_rows = conn.execute(
-                "SELECT winner_id, COUNT(*) FROM blocks "
-                "WHERE type='block_reward' GROUP BY winner_id"
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key='prune_before'"
+            ).fetchone()
+            prune_before = int(row[0]) if row else 0
+
+            pre_rows = conn.execute(
+                "SELECT address, pre_checkpoint_blocks "
+                "FROM checkpoint_balances WHERE pre_checkpoint_blocks > 0"
             ).fetchall()
-            node_counts = {r[0]: r[1] for r in node_rows}
+            pre_cp = {r[0]: r[1] for r in pre_rows}
+
+            live_rows = conn.execute(
+                "SELECT winner_id, COUNT(*) FROM blocks "
+                "WHERE type='block_reward' AND slot >= ? "
+                "GROUP BY winner_id",
+                (prune_before,)
+            ).fetchall()
+            live = {r[0]: r[1] for r in live_rows}
+
+            node_counts = {
+                nid: pre_cp.get(nid, 0) + live.get(nid, 0)
+                for nid in set(pre_cp) | set(live)
+            }
 
             block_rows = conn.execute(
                 "SELECT slot, winner_id, amount, timestamp, prev_hash "
@@ -646,20 +732,44 @@ class Handler(BaseHTTPRequestHandler):
             with _db_lock:
                 conn = sqlite3.connect(DB_PATH)
                 try:
+                    row = conn.execute(
+                        "SELECT value FROM meta WHERE key='prune_before'"
+                    ).fetchone()
+                    prune_before = int(row[0]) if row else 0
+
                     for b in incoming_blocks:
                         rtype = b.get("type", "block_reward")
                         if rtype == "block_reward" and not _is_valid_hex64(b.get("vrf_ticket", "")):
                             continue
-                        conn.execute(
-                            "INSERT OR IGNORE INTO blocks "
-                            "(slot, reward_id, winner_id, amount, timestamp, type, "
-                            " prev_hash, vrf_ticket, canonical_hash, nodes) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                            (b.get("slot"), b.get("reward_id"), b.get("winner_id"),
-                             int(b.get("amount", 0)), b.get("timestamp"),
-                             rtype, b.get("prev_hash"), b.get("vrf_ticket"),
-                             b.get("canonical_hash"), b.get("nodes", 1))
-                        )
+                        slot = b.get("slot")
+                        if slot is None:
+                            continue
+
+                        if slot < prune_before:
+                            continue
+
+                        if incoming_tip_slot is not None and slot > incoming_tip_slot - RECENT_WINDOW:
+                            conn.execute(
+                                "INSERT OR REPLACE INTO blocks "
+                                "(slot, reward_id, winner_id, amount, timestamp, type, "
+                                " prev_hash, vrf_ticket, canonical_hash, nodes) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                (slot, b.get("reward_id"), b.get("winner_id"),
+                                 int(b.get("amount", 0)), b.get("timestamp"),
+                                 rtype, b.get("prev_hash"), b.get("vrf_ticket"),
+                                 b.get("canonical_hash"), b.get("nodes", 1))
+                            )
+                        else:
+                            conn.execute(
+                                "INSERT OR IGNORE INTO blocks "
+                                "(slot, reward_id, winner_id, amount, timestamp, type, "
+                                " prev_hash, vrf_ticket, canonical_hash, nodes) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                (slot, b.get("reward_id"), b.get("winner_id"),
+                                 int(b.get("amount", 0)), b.get("timestamp"),
+                                 rtype, b.get("prev_hash"), b.get("vrf_ticket"),
+                                 b.get("canonical_hash"), b.get("nodes", 1))
+                            )
 
                     for t in txs:
                         conn.execute(
@@ -733,6 +843,7 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     _init_db()
     _load_state()
+    _migrate_apply_checkpoint_prune()
     startup_cache = _rebuild_stats_cache()
     with _stats_cache_lock:
         _stats_cache = startup_cache

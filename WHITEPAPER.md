@@ -2,7 +2,7 @@
 
 A Quantum-Resistant Peer-to-Peer Payment Protocol
 
-March 2026 — v3.2
+March 28, 2026 — v3.3
 
 ---
 
@@ -11,6 +11,8 @@ March 2026 — v3.2
 TIMPAL is a peer-to-peer payment protocol designed to function without banks, payment processors, or centralized infrastructure. It uses quantum-resistant Dilithium3 cryptography, a chain-anchored distributed ledger, an eligibility-gated commit-reveal VRF lottery, and a two-era economic model to create a fair, decentralized monetary system with a fixed supply of 250 million TMPL distributed over 37.5 years.
 
 The protocol enforces one node per physical device, preventing Sybil attacks and ensuring that participation in the reward system remains fair regardless of computational resources. Every transaction costs 0.0005 TMPL, paid to the slot winner, from genesis. No pre-mine. No insider allocation. No central authority.
+
+Genesis launched March 28, 2026 at 6:00 AM PST.
 
 ---
 
@@ -131,8 +133,6 @@ The ban counter resets to zero after a ban is served. This makes selective revea
 An OS-level file lock prevents more than one node running per device. Any second attempt exits immediately. More rewards require more physical devices — the same constraint for everyone.
 
 ### 3.8 Fork Choice and Chain Convergence
-
-v3.1 implements full fork resolution using chain weight — not block count. This carries forward unchanged in v3.2.
 
 **Normal extension.** When a node receives a new block, it validates the VRF proof, checks that `prev_hash` matches the current chain tip, and appends the block. This is the common case.
 
@@ -269,10 +269,10 @@ Private keys are encrypted at rest with AES-256-GCM. The encryption key is deriv
 
 ### 6.9 Bootstrap Server Trust Model
 
-The bootstrap server is a relay. It records commits and reveals but cannot verify Dilithium3 signatures — that is done on every node independently. In v3.2, the bootstrap server also relays chain tip information. A compromised or malicious bootstrap server can:
+The bootstrap server is a relay. It records commits and reveals but cannot verify Dilithium3 signatures — that is done on every node independently. The bootstrap server also relays chain tip information. A compromised or malicious bootstrap server can:
 
 - Refuse to record commits (causing nodes to skip slots)
-- Selectively withhold reveals (reducing the number of verified participants a node sees — but since v3.2 nodes compute the collective target locally from verified reveals only, the server cannot inject false reveals or pre-compute a manipulated target)
+- Selectively withhold reveals (reducing the number of verified participants a node sees — but since nodes compute the collective target locally from verified reveals only, the server cannot inject false reveals or pre-compute a manipulated target)
 - Report a false or stale chain tip
 
 It cannot:

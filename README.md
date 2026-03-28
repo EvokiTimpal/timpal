@@ -1,7 +1,9 @@
 # TIMPAL — Quantum-Resistant Money Without Masters
-v3.2 — Quantum-resistant. Worldwide. Instant. Free.
+v3.3 — Quantum-resistant. Worldwide. Instant. Free.
 
 TIMPAL is a peer-to-peer payment protocol. No banks. No servers. No company. No control. Just people sending value directly to each other.
+
+**Genesis launched: March 28, 2026 — 6:00 AM PST**
 
 ---
 
@@ -87,6 +89,25 @@ On first run, TIMPAL prompts you to set a password. Your private key is encrypte
 **If you forget your password, your TMPL is gone forever.** There is no recovery. Write it down and store it somewhere safe.
 
 If you have an existing unencrypted wallet from a previous version, TIMPAL will prompt you to encrypt it on next startup.
+
+---
+
+## Joining the network (v3.3)
+
+If you ran a previous version, delete your old wallet and ledger before starting:
+
+```
+rm -f ~/.timpal_wallet.json ~/.timpal_ledger.json
+rm -f ~/.timpal_peers.json ~/.timpal_bootstrap.json
+rm -f ~/.timpal_control.token ~/.timpal.lock
+```
+
+Then download the latest version and run:
+
+```
+curl -O https://raw.githubusercontent.com/EvokiTimpal/timpal/main/timpal.py
+python3 timpal.py
+```
 
 ---
 

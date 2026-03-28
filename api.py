@@ -1,32 +1,26 @@
-#!/usr/bin/env python3
-"""TIMPAL API v3.3 — SQLite-backed explorer for timpal.org.
+"""TIMPAL API v3.2 — SQLite-backed explorer for timpal.org.
 
-v3.3 changes (carried forward):
+v3.3 changes (this version):
   - Replaced in-memory _ledger dict with SQLite persistent storage.
+    All blocks, transactions, and fee_rewards accumulate permanently.
+    Explorer data survives API restarts — no more rolling window reset.
   - Address and block queries read from the full SQLite index.
-  - timpal.py sends checkpoint_balances in LEDGER_PUSH.
-  - chain_height display uses total_minted // REWARD_PER_ROUND.
-  - Payload size limit raised to 2MB.
-
-v3.3.1 changes (fork-block cleanup):
-  - INSERT OR REPLACE for recent blocks (last RECENT_WINDOW slots) overwrites
-    stale fork blocks that accumulated during early-network forks.
-  - Checkpoint advance prunes pre-checkpoint stale blocks from DB.
-  - pre_checkpoint_blocks column added to checkpoint_balances.
-    First checkpoint: (balance // REWARD_PER_ROUND) minus overlap blocks
-    already in DB (slot in [prune_before, cp_slot)) — no double-counting.
-    Subsequent checkpoints: old_pre_checkpoint_blocks + DB counts in the
-    old→new prune window — always exact.
-  - _rebuild_stats_cache merges pre_checkpoint_blocks with live DB counts
-    (slot >= prune_before) for accurate full-history node block counts.
-  - Startup migration: applies checkpoint prune retroactively to existing
-    DBs without requiring a wipe.
+    Block counts and earned amounts are accurate for the full lifetime
+    of the API process, not just since the last restart.
+  - timpal.py now sends checkpoint_balances in LEDGER_PUSH. The API
+    stores them as a historical baseline for addresses whose blocks
+    predate the SQLite DB.
+  - chain_height display uses total_minted // REWARD_PER_ROUND —
+    same formula as VRF Rounds so both stats always match.
+  - Payload size limit raised to 2MB (checkpoint_balances can be large).
 
 v3.2 fixes (carried forward):
-  - total_minted from node push directly.
+  - total_minted from node push directly (not recomputed from blocks).
   - chain_tip_hash correct canonical hash of full tip block.
   - Dilithium3 push signature verification.
   - Full tip field validation on LEDGER_PUSH.
+  - _compute_block_hash removed (would always produce wrong hash on
+    stripped blocks).
 """
 
 import json
@@ -51,19 +45,18 @@ import hashlib
 # ── Constants ──────────────────────────────────────────────────────────────────
 UNIT                = 100_000_000
 TOTAL_SUPPLY_TMPL   = 250_000_000.0
-REWARD_PER_ROUND    = 105_750_000
-CHECKPOINT_BUFFER   = 120
+REWARD_PER_ROUND    = 105_750_000       # units per block; used for VRF rounds display
 CONFIRMATION_DEPTH  = 6
 GENESIS_TIME        = 1774706400
 REWARD_INTERVAL     = 5.0
 TIMESTAMP_TOLERANCE = 30
-RECENT_WINDOW       = 50   # INSERT OR REPLACE for blocks within this many slots of tip
 
 # ── SQLite ─────────────────────────────────────────────────────────────────────
 DB_PATH  = os.path.expanduser("~/.timpal_explorer.db")
 _db_lock = threading.Lock()
 
 # ── In-memory tip state ────────────────────────────────────────────────────────
+# Kept in memory for fast POST validation — persisted to meta table on every push.
 _tip_lock = threading.Lock()
 _tip = {
     "chain_tip_slot": -1,
@@ -83,9 +76,18 @@ _post_rate_lock = threading.Lock()
 POST_RATE_LIMIT = 5
 
 
+# NOTE: _compute_block_hash is intentionally absent from api.py.
+# Blocks in the push payload have vrf_sig and vrf_public_key stripped by timpal.py
+# before transmission. Hashing a stripped block produces a different value than the
+# canonical hash of the full block. The canonical hash is embedded by timpal.py as
+# canonical_hash on each block (computed before stripping) and trusted here because
+# it is covered by the Dilithium3 payload signature.
+
+
 # ── Database ───────────────────────────────────────────────────────────────────
 
 def _init_db():
+    """Create tables if not exist. WAL mode for concurrent read performance."""
     with _db_lock:
         conn = sqlite3.connect(DB_PATH)
         conn.execute("PRAGMA journal_mode=WAL")
@@ -137,18 +139,12 @@ def _init_db():
                 value TEXT
             );
         """)
-        try:
-            conn.execute(
-                "ALTER TABLE checkpoint_balances "
-                "ADD COLUMN pre_checkpoint_blocks INTEGER DEFAULT 0"
-            )
-        except sqlite3.OperationalError:
-            pass  # column already exists
         conn.commit()
         conn.close()
 
 
 def _load_state():
+    """Reload persisted tip state from meta table on startup."""
     with _db_lock:
         conn = sqlite3.connect(DB_PATH)
         rows = {r[0]: r[1] for r in conn.execute("SELECT key, value FROM meta").fetchall()}
@@ -158,166 +154,6 @@ def _load_state():
         _tip["chain_tip_hash"] = rows.get("chain_tip_hash", "0" * 64)
         _tip["total_minted"]   = int(rows.get("total_minted",   0))
         _tip["chain_height"]   = int(rows.get("chain_height",   0))
-
-
-def _derive_first_checkpoint_records(conn, new_prune_before, cp_slot, cp_balances):
-    """Compute pre_checkpoint_blocks for the first checkpoint.
-
-    pre_checkpoint_blocks[addr] = (balance // REWARD_PER_ROUND)
-                                  - DB blocks in [new_prune_before, cp_slot)
-
-    The subtraction removes the overlap window (blocks that are in the DB
-    AND counted in the checkpoint balance) so live DB + pre_cp = correct total.
-    Must be called BEFORE DELETE FROM blocks.
-    """
-    overlap_rows = conn.execute(
-        "SELECT winner_id, COUNT(*) FROM blocks "
-        "WHERE slot >= ? AND slot < ? AND type='block_reward' GROUP BY winner_id",
-        (new_prune_before, cp_slot)
-    ).fetchall()
-    overlap = {r[0]: r[1] for r in overlap_rows}
-
-    records = []
-    for addr, bal in cp_balances.items():
-        if not (isinstance(addr, str) and len(addr) == 64):
-            continue
-        if not isinstance(bal, int) or bal < 0:
-            continue
-        total_from_bal = bal // REWARD_PER_ROUND if bal > 0 else 0
-        pre_blocks = max(0, total_from_bal - overlap.get(addr, 0))
-        records.append((addr, bal, cp_slot, pre_blocks))
-    return records
-
-
-def _migrate_apply_checkpoint_prune():
-    """One-time startup migration: fix stale fork blocks in existing DB.
-
-    If checkpoint_slot exists in meta but prune_before does not, the DB
-    has stale pre-checkpoint blocks from early-network forks. This:
-      1. Derives canonical pre-prune block counts (overlap-corrected).
-      2. Stores them in checkpoint_balances.pre_checkpoint_blocks.
-      3. DELETEs blocks with slot < prune_before (removes stale forks).
-      4. Records prune_before in meta.
-    Idempotent: returns immediately if prune_before already set.
-    """
-    with _db_lock:
-        conn = sqlite3.connect(DB_PATH)
-        try:
-            rows = {r[0]: r[1] for r in conn.execute("SELECT key, value FROM meta").fetchall()}
-
-            if "prune_before" in rows:
-                return  # already migrated
-
-            cp_slot = int(rows.get("checkpoint_slot", 0))
-            if cp_slot <= 0:
-                return
-
-            new_prune_before = cp_slot - CHECKPOINT_BUFFER
-            if new_prune_before <= 0:
-                return
-
-            bal_rows = conn.execute(
-                "SELECT address, balance FROM checkpoint_balances WHERE balance > 0"
-            ).fetchall()
-            if not bal_rows:
-                return
-
-            cp_balances = {r[0]: r[1] for r in bal_rows}
-            records = _derive_first_checkpoint_records(
-                conn, new_prune_before, cp_slot, cp_balances
-            )
-
-            for addr, bal, cp_s, pre_blocks in records:
-                conn.execute(
-                    "UPDATE checkpoint_balances SET pre_checkpoint_blocks=? WHERE address=?",
-                    (pre_blocks, addr)
-                )
-
-            deleted = conn.execute(
-                "DELETE FROM blocks WHERE slot < ?", (new_prune_before,)
-            ).rowcount
-
-            conn.execute(
-                "INSERT OR REPLACE INTO meta VALUES ('prune_before', ?)",
-                (str(new_prune_before),)
-            )
-            conn.commit()
-            print(f"[migration] Checkpoint prune applied: deleted {deleted} blocks "
-                  f"before slot {new_prune_before} (checkpoint slot {cp_slot})")
-        finally:
-            conn.close()
-
-
-# ── Checkpoint advance helper ──────────────────────────────────────────────────
-
-def _apply_checkpoint_to_db(conn, incoming_cp_slot, incoming_cp_balances):
-    """Process a newly advanced checkpoint. Called within _db_lock in do_POST.
-
-    First checkpoint (old prune_before == 0):
-      pre_checkpoint_blocks = (balance // REWARD_PER_ROUND) - overlap in DB.
-      Exact when no transactions before checkpoint.
-
-    Subsequent checkpoints:
-      pre_checkpoint_blocks = old_pre_checkpoint_blocks
-                              + DB blocks in [old_prune_before, new_prune_before).
-      Always exact.
-
-    In both cases: live DB retains slot >= new_prune_before.
-    Total = pre_checkpoint_blocks + live_DB_counts = full history, no gaps, no doubles.
-    """
-    new_prune_before = max(0, incoming_cp_slot - CHECKPOINT_BUFFER)
-
-    old_prune_row    = conn.execute("SELECT value FROM meta WHERE key='prune_before'").fetchone()
-    old_prune_before = int(old_prune_row[0]) if old_prune_row else 0
-
-    if old_prune_before == 0:
-        records = _derive_first_checkpoint_records(
-            conn, new_prune_before, incoming_cp_slot, incoming_cp_balances
-        )
-        conn.executemany(
-            "INSERT OR REPLACE INTO checkpoint_balances "
-            "(address, balance, checkpoint_slot, pre_checkpoint_blocks) "
-            "VALUES (?, ?, ?, ?)",
-            records
-        )
-    else:
-        old_rows    = conn.execute(
-            "SELECT address, pre_checkpoint_blocks FROM checkpoint_balances"
-        ).fetchall()
-        old_pre_cp  = {r[0]: r[1] for r in old_rows}
-
-        new_block_rows = conn.execute(
-            "SELECT winner_id, COUNT(*) FROM blocks "
-            "WHERE slot >= ? AND slot < ? AND type='block_reward' GROUP BY winner_id",
-            (old_prune_before, new_prune_before)
-        ).fetchall()
-        new_block_counts = {r[0]: r[1] for r in new_block_rows}
-
-        all_addrs = (set(old_pre_cp.keys())
-                     | set(new_block_counts.keys())
-                     | set(incoming_cp_balances.keys()))
-        records = []
-        for addr in all_addrs:
-            if not (isinstance(addr, str) and len(addr) == 64):
-                continue
-            bal = incoming_cp_balances.get(addr, 0)
-            if not isinstance(bal, int):
-                continue
-            pre_blocks = old_pre_cp.get(addr, 0) + new_block_counts.get(addr, 0)
-            records.append((addr, int(bal), incoming_cp_slot, pre_blocks))
-
-        conn.executemany(
-            "INSERT OR REPLACE INTO checkpoint_balances "
-            "(address, balance, checkpoint_slot, pre_checkpoint_blocks) "
-            "VALUES (?, ?, ?, ?)",
-            records
-        )
-
-    if new_prune_before > 0:
-        conn.execute("DELETE FROM blocks WHERE slot < ?", (new_prune_before,))
-
-    conn.execute("INSERT OR REPLACE INTO meta VALUES ('checkpoint_slot', ?)", (str(incoming_cp_slot),))
-    conn.execute("INSERT OR REPLACE INTO meta VALUES ('prune_before', ?)",    (str(new_prune_before),))
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -336,6 +172,13 @@ def _is_valid_hex64(s) -> bool:
 
 
 def _verify_push_signature(data: dict) -> bool:
+    """Verify the Dilithium3 signature on an incoming LEDGER_PUSH payload.
+
+    The signature covers every field in the payload except the signature itself.
+    Fields accessed after this gate — blocks, canonical_hash, chain_tip_hash,
+    chain_tip_slot, total_minted, checkpoint_balances — are all authenticated.
+    No sensitive payload content is acted upon before this returns True.
+    """
     if not _DILITHIUM_AVAILABLE:
         print("[!] WARNING: push accepted without signature verification")
         return True
@@ -386,12 +229,7 @@ def _clean_post_rate():
 # ── Stats cache ────────────────────────────────────────────────────────────────
 
 def _rebuild_stats_cache() -> dict:
-    """Build stats from DB.
-
-    node_counts = pre_checkpoint_blocks (blocks before prune_before, stored at
-    checkpoint time) + live DB blocks (slot >= prune_before). These ranges are
-    disjoint so there is no double-counting.
-    """
+    """Query SQLite for all stats. Full historical counts — no rolling window."""
     with _tip_lock:
         total_minted_units = _tip["total_minted"]
         chain_tip_slot     = _tip["chain_tip_slot"]
@@ -400,27 +238,11 @@ def _rebuild_stats_cache() -> dict:
     with _db_lock:
         conn = sqlite3.connect(DB_PATH)
         try:
-            prune_row    = conn.execute("SELECT value FROM meta WHERE key='prune_before'").fetchone()
-            prune_before = int(prune_row[0]) if prune_row else 0
-
-            pre_cp_rows   = conn.execute(
-                "SELECT address, pre_checkpoint_blocks FROM checkpoint_balances "
-                "WHERE pre_checkpoint_blocks > 0"
-            ).fetchall()
-            pre_cp_counts = {r[0]: r[1] for r in pre_cp_rows}
-
-            live_rows   = conn.execute(
+            node_rows = conn.execute(
                 "SELECT winner_id, COUNT(*) FROM blocks "
-                "WHERE type='block_reward' AND slot >= ? GROUP BY winner_id",
-                (prune_before,)
+                "WHERE type='block_reward' GROUP BY winner_id"
             ).fetchall()
-            live_counts = {r[0]: r[1] for r in live_rows}
-
-            all_node_ids = set(pre_cp_counts.keys()) | set(live_counts.keys())
-            node_counts  = {
-                nid: pre_cp_counts.get(nid, 0) + live_counts.get(nid, 0)
-                for nid in all_node_ids
-            }
+            node_counts = {r[0]: r[1] for r in node_rows}
 
             block_rows = conn.execute(
                 "SELECT slot, winner_id, amount, timestamp, prev_hash "
@@ -442,7 +264,7 @@ def _rebuild_stats_cache() -> dict:
             conn.close()
 
     total_minted_tmpl = _to_tmpl(total_minted_units)
-    total_r    = sum(node_counts.values()) or 1
+    total_r = sum(node_counts.values()) or 1
     vrf_rounds = total_minted_units // REWARD_PER_ROUND
 
     node_stats = sorted([
@@ -461,27 +283,40 @@ def _rebuild_stats_cache() -> dict:
         "total_rewards":  vrf_rounds,
         "total_txs":      tx_count,
         "active_nodes":   len(node_counts),
-        "chain_height":   vrf_rounds,
+        "chain_height":   vrf_rounds,   # same formula — always matches VRF Rounds
         "chain_tip_slot": chain_tip_slot,
         "chain_tip_hash": chain_tip_hash,
         "node_stats":     node_stats,
         "recent_fee_rewards": [
-            {"winner_id": r[0], "amount": round(_to_tmpl(r[1]), 8),
-             "time_slot": r[2], "time": fmt_time(r[3])}
+            {
+                "winner_id": r[0],
+                "amount":    round(_to_tmpl(r[1]), 8),
+                "time_slot": r[2],
+                "time":      fmt_time(r[3])
+            }
             for r in fr_rows
         ],
         "recent_blocks": [
-            {"id": r[1], "amount": round(_to_tmpl(r[2]), 8),
-             "time": fmt_time(r[3]), "slot": r[0],
-             "prev_hash": (r[4] or "")[:16] + "..." if r[4] else "",
-             "confirmed": _is_confirmed(r[0], chain_tip_slot)}
+            {
+                "id":        r[1],
+                "amount":    round(_to_tmpl(r[2]), 8),
+                "time":      fmt_time(r[3]),
+                "slot":      r[0],
+                "prev_hash": (r[4] or "")[:16] + "..." if r[4] else "",
+                "confirmed": _is_confirmed(r[0], chain_tip_slot)
+            }
             for r in block_rows
         ],
         "recent_txs": [
-            {"tx_id": r[0], "id": (r[0] or "")[:16] + "...",
-             "sender": r[1], "recipient": r[2],
-             "amount": round(_to_tmpl(r[3]), 8),
-             "time": fmt_time(r[4]), "timestamp": r[4]}
+            {
+                "tx_id":     r[0],
+                "id":        (r[0] or "")[:16] + "...",
+                "sender":    r[1],
+                "recipient": r[2],
+                "amount":    round(_to_tmpl(r[3]), 8),
+                "time":      fmt_time(r[4]),
+                "timestamp": r[4]
+            }
             for r in tx_rows
         ],
     }
@@ -499,6 +334,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _send_json(self, code: int, body: dict):
+        """Send HTTP status + JSON body in one call."""
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -511,6 +347,7 @@ class Handler(BaseHTTPRequestHandler):
             path   = parsed.path.rstrip("/")
             params = urllib.parse.parse_qs(parsed.query)
 
+            # ── GET /api ──────────────────────────────────────────────────────
             if path in ("", "/", "/api", "/api/"):
                 with _stats_cache_lock:
                     cache = _stats_cache
@@ -526,12 +363,15 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._send_json(200, cache)
 
+            # ── GET /api/address?id=<hex64> ───────────────────────────────────
             elif path == "/api/address":
                 addr = params.get("id", [""])[0].strip()
                 if not addr:
-                    self._send_json(400, {"error": "missing id"}); return
+                    self._send_json(400, {"error": "missing id"})
+                    return
                 if not _is_valid_hex64(addr):
-                    self._send_json(400, {"error": "invalid address format"}); return
+                    self._send_json(400, {"error": "invalid address format"})
+                    return
 
                 with _tip_lock:
                     current_slot = _tip["chain_tip_slot"]
@@ -541,68 +381,87 @@ class Handler(BaseHTTPRequestHandler):
                     try:
                         block_count = conn.execute(
                             "SELECT COUNT(*) FROM blocks "
-                            "WHERE winner_id=? AND type='block_reward'", (addr,)
-                        ).fetchone()[0]
-
-                        pre_cp_row    = conn.execute(
-                            "SELECT pre_checkpoint_blocks FROM checkpoint_balances WHERE address=?",
+                            "WHERE winner_id=? AND type='block_reward'",
                             (addr,)
-                        ).fetchone()
-                        pre_cp_blocks = pre_cp_row[0] if pre_cp_row and pre_cp_row[0] else 0
+                        ).fetchone()[0]
 
                         block_rows = conn.execute(
                             "SELECT slot, amount, timestamp, prev_hash FROM blocks "
                             "WHERE winner_id=? AND type='block_reward' "
-                            "ORDER BY slot DESC LIMIT 100", (addr,)
+                            "ORDER BY slot DESC LIMIT 100",
+                            (addr,)
                         ).fetchall()
 
                         sent_rows = conn.execute(
                             "SELECT amount, fee, timestamp, recipient_id, tx_id "
-                            "FROM transactions WHERE sender_id=? ORDER BY timestamp DESC",
+                            "FROM transactions WHERE sender_id=? "
+                            "ORDER BY timestamp DESC",
                             (addr,)
                         ).fetchall()
 
                         recv_rows = conn.execute(
                             "SELECT amount, timestamp, sender_id, tx_id "
-                            "FROM transactions WHERE recipient_id=? ORDER BY timestamp DESC",
+                            "FROM transactions WHERE recipient_id=? "
+                            "ORDER BY timestamp DESC",
                             (addr,)
                         ).fetchall()
                     finally:
                         conn.close()
 
-                total_rewards = block_count + pre_cp_blocks
+                total_rewards = block_count
                 total_earned  = round(total_rewards * _to_tmpl(REWARD_PER_ROUND), 8)
                 total_sent    = round(sum(_to_tmpl(r[0]) for r in sent_rows), 8)
                 total_recv    = round(sum(_to_tmpl(r[0]) for r in recv_rows), 8)
 
                 all_txs = []
                 for r in sent_rows:
-                    all_txs.append({"tx_id": r[4], "direction": "sent",
-                                    "counterparty": r[3], "amount": round(_to_tmpl(r[0]), 8),
-                                    "time": fmt_time(r[2]), "timestamp": r[2]})
+                    all_txs.append({
+                        "tx_id":        r[4],
+                        "direction":    "sent",
+                        "counterparty": r[3],
+                        "amount":       round(_to_tmpl(r[0]), 8),
+                        "time":         fmt_time(r[2]),
+                        "timestamp":    r[2]
+                    })
                 for r in recv_rows:
-                    all_txs.append({"tx_id": r[3], "direction": "received",
-                                    "counterparty": r[2], "amount": round(_to_tmpl(r[0]), 8),
-                                    "time": fmt_time(r[1]), "timestamp": r[1]})
+                    all_txs.append({
+                        "tx_id":        r[3],
+                        "direction":    "received",
+                        "counterparty": r[2],
+                        "amount":       round(_to_tmpl(r[0]), 8),
+                        "time":         fmt_time(r[1]),
+                        "timestamp":    r[1]
+                    })
                 all_txs.sort(key=lambda t: t.get("timestamp", 0), reverse=True)
 
                 self._send_json(200, {
-                    "address": addr, "total_rewards": total_rewards,
-                    "total_earned": total_earned, "total_sent": total_sent,
+                    "address":        addr,
+                    "total_rewards":  total_rewards,
+                    "total_earned":   total_earned,
+                    "total_sent":     total_sent,
                     "total_received": total_recv,
-                    "blocks": [{"amount": round(_to_tmpl(r[1]), 8), "time": fmt_time(r[2]),
-                                "slot": r[0], "prev_hash": r[3] or "",
-                                "confirmed": _is_confirmed(r[0], current_slot)}
-                               for r in block_rows],
+                    "blocks": [
+                        {
+                            "amount":    round(_to_tmpl(r[1]), 8),
+                            "time":      fmt_time(r[2]),
+                            "slot":      r[0],
+                            "prev_hash": r[3] or "",
+                            "confirmed": _is_confirmed(r[0], current_slot)
+                        }
+                        for r in block_rows
+                    ],
                     "transactions": all_txs
                 })
 
+            # ── GET /api/tx?id=<tx_id> ────────────────────────────────────────
             elif path == "/api/tx":
                 tx_id = params.get("id", [""])[0].strip()
                 if not tx_id:
-                    self._send_json(400, {"error": "missing id"}); return
+                    self._send_json(400, {"error": "missing id"})
+                    return
                 if not isinstance(tx_id, str) or len(tx_id) > 64 or not tx_id.replace("-", "").isalnum():
-                    self._send_json(400, {"error": "invalid tx_id format"}); return
+                    self._send_json(400, {"error": "invalid tx_id format"})
+                    return
                 with _db_lock:
                     conn = sqlite3.connect(DB_PATH)
                     row = conn.execute(
@@ -611,22 +470,31 @@ class Handler(BaseHTTPRequestHandler):
                     ).fetchone()
                     conn.close()
                 if not row:
-                    self._send_json(404, {"error": "not found"}); return
+                    self._send_json(404, {"error": "not found"})
+                    return
                 self._send_json(200, {
-                    "tx_id": row[0], "sender": row[1], "recipient": row[2],
-                    "amount": round(_to_tmpl(row[3]), 8), "fee": round(_to_tmpl(row[4] or 0), 8),
-                    "timestamp": row[5], "time": fmt_time(row[5]),
-                    "signature": row[6] or "", "confirmed": True
+                    "tx_id":     row[0],
+                    "sender":    row[1],
+                    "recipient": row[2],
+                    "amount":    round(_to_tmpl(row[3]), 8),
+                    "fee":       round(_to_tmpl(row[4] or 0), 8),
+                    "timestamp": row[5],
+                    "time":      fmt_time(row[5]),
+                    "signature": row[6] or "",
+                    "confirmed": True
                 })
 
+            # ── GET /api/block?slot=<int> ─────────────────────────────────────
             elif path == "/api/block":
                 slot_str = params.get("slot", [""])[0].strip()
                 if not slot_str:
-                    self._send_json(400, {"error": "missing slot"}); return
+                    self._send_json(400, {"error": "missing slot"})
+                    return
                 try:
                     slot = int(slot_str)
                 except ValueError:
-                    self._send_json(400, {"error": "invalid slot"}); return
+                    self._send_json(400, {"error": "invalid slot"})
+                    return
                 with _tip_lock:
                     current_slot = _tip["chain_tip_slot"]
                 with _db_lock:
@@ -637,11 +505,17 @@ class Handler(BaseHTTPRequestHandler):
                     ).fetchone()
                     conn.close()
                 if not row:
-                    self._send_json(404, {"error": "not found"}); return
+                    self._send_json(404, {"error": "not found"})
+                    return
                 self._send_json(200, {
-                    "slot": row[0], "winner": row[1], "amount": round(_to_tmpl(row[2]), 8),
-                    "prev_hash": row[3] or "", "time": fmt_time(row[4]), "timestamp": row[4],
-                    "confirmed": _is_confirmed(slot, current_slot), "nodes": row[5] or 1
+                    "slot":      row[0],
+                    "winner":    row[1],
+                    "amount":    round(_to_tmpl(row[2]), 8),
+                    "prev_hash": row[3] or "",
+                    "time":      fmt_time(row[4]),
+                    "timestamp": row[4],
+                    "confirmed": _is_confirmed(slot, current_slot),
+                    "nodes":     row[5] or 1
                 })
 
             else:
@@ -659,22 +533,31 @@ class Handler(BaseHTTPRequestHandler):
             with _post_rate_lock:
                 times = [t for t in _post_rate.get(ip, []) if now - t < 10]
                 if len(times) >= POST_RATE_LIMIT:
-                    self._send_json(429, {"error": "rate limit exceeded"}); return
+                    self._send_json(429, {"error": "rate limit exceeded"})
+                    return
                 times.append(now)
                 _post_rate[ip] = times
 
             length = int(self.headers.get("Content-Length", 0))
             if length > 2_000_000:
-                self._send_json(400, {"error": "payload too large"}); return
+                self._send_json(400, {"error": "payload too large"})
+                return
 
             body = self.rfile.read(length)
             data = json.loads(body.decode())
 
             if data.get("type") != "LEDGER_PUSH":
-                self._send_json(400, {"error": "unknown type"}); return
+                self._send_json(400, {"error": "unknown type"})
+                return
 
+            # ── Trust boundary ────────────────────────────────────────────────
+            # _verify_push_signature verifies the Dilithium3 signature over the
+            # entire payload (all fields except "signature"). Every field accessed
+            # below — blocks, canonical_hash, chain_tip_hash, chain_tip_slot,
+            # total_minted, checkpoint_balances — is authenticated by that signature.
             if not _verify_push_signature(data):
-                self._send_json(401, {"error": "invalid signature"}); return
+                self._send_json(401, {"error": "invalid signature"})
+                return
 
             incoming_blocks = data.get("blocks", [])
             txs             = data.get("transactions", [])
@@ -691,30 +574,36 @@ class Handler(BaseHTTPRequestHandler):
                    and not isinstance(t.get("amount"), bool)
                    and isinstance(t.get("tx_id"), str)]
 
+            # ── Tip field validation ──────────────────────────────────────────
             incoming_tip_hash = data.get("chain_tip_hash")
             incoming_tip_slot = data.get("chain_tip_slot")
 
             if incoming_tip_hash is not None and not _is_valid_hex64(incoming_tip_hash):
-                self._send_json(400, {"error": "invalid chain_tip_hash"}); return
+                self._send_json(400, {"error": "invalid chain_tip_hash"})
+                return
 
             if incoming_tip_slot is not None:
                 if not isinstance(incoming_tip_slot, int) or incoming_tip_slot < -1:
-                    self._send_json(400, {"error": "invalid chain_tip_slot"}); return
+                    self._send_json(400, {"error": "invalid chain_tip_slot"})
+                    return
                 payload_ts = data.get("timestamp", 0)
                 if isinstance(payload_ts, (int, float)):
                     if payload_ts > time.time() + TIMESTAMP_TOLERANCE:
-                        self._send_json(400, {"error": "payload timestamp too far in future"}); return
+                        self._send_json(400, {"error": "payload timestamp too far in future"})
+                        return
                     if payload_ts > GENESIS_TIME:
                         max_expected = int((payload_ts - GENESIS_TIME) / REWARD_INTERVAL) + 10
                         if incoming_tip_slot > max_expected:
-                            self._send_json(400, {"error": "chain_tip_slot exceeds expected range"}); return
+                            self._send_json(400, {"error": "chain_tip_slot exceeds expected range"})
+                            return
 
             if incoming_tip_slot is not None and incoming_blocks:
                 br_slots = [b.get("slot") for b in incoming_blocks
                              if b.get("type", "block_reward") == "block_reward"
                              and isinstance(b.get("slot"), int)]
                 if br_slots and max(br_slots) != incoming_tip_slot:
-                    self._send_json(400, {"error": "chain_tip_slot mismatch with pushed blocks"}); return
+                    self._send_json(400, {"error": "chain_tip_slot mismatch with pushed blocks"})
+                    return
 
             if incoming_tip_hash is not None and incoming_blocks:
                 br_blocks = [b for b in incoming_blocks
@@ -724,18 +613,23 @@ class Handler(BaseHTTPRequestHandler):
                     tip_block      = max(br_blocks, key=lambda b: b.get("slot", -1))
                     tip_canon_hash = tip_block.get("canonical_hash", "")
                     if not tip_canon_hash:
-                        self._send_json(400, {"error": "missing canonical_hash in tip block"}); return
+                        self._send_json(400, {"error": "missing canonical_hash in tip block"})
+                        return
                     if incoming_tip_hash != tip_canon_hash:
-                        self._send_json(400, {"error": "chain_tip_hash mismatch with tip block"}); return
+                        self._send_json(400, {"error": "chain_tip_hash mismatch with tip block"})
+                        return
 
-            incoming_minted      = data.get("total_minted", 0)
-            incoming_height      = data.get("chain_height", 0)
+            # ── Extract scalars ───────────────────────────────────────────────
+            incoming_minted = data.get("total_minted", 0)
+            incoming_height = data.get("chain_height", 0)
+
             incoming_cp_balances = data.get("checkpoint_balances", {})
             incoming_cp_slot     = data.get("checkpoint_slot", 0)
             valid_cp = (isinstance(incoming_cp_balances, dict)
                         and isinstance(incoming_cp_slot, int)
                         and incoming_cp_slot > 0)
 
+            # ── Update in-memory tip (before DB write) ────────────────────────
             with _tip_lock:
                 if incoming_minted > _tip["total_minted"]:
                     _tip["total_minted"] = incoming_minted
@@ -748,37 +642,20 @@ class Handler(BaseHTTPRequestHandler):
                     _tip["chain_tip_hash"] = incoming_tip_hash
                 tip_snapshot = dict(_tip)
 
+            # ── Write to SQLite ───────────────────────────────────────────────
             with _db_lock:
                 conn = sqlite3.connect(DB_PATH)
                 try:
-                    prune_row    = conn.execute("SELECT value FROM meta WHERE key='prune_before'").fetchone()
-                    prune_before = int(prune_row[0]) if prune_row else 0
-
-                    # ── Block insert ──────────────────────────────────────────
-                    # INSERT OR REPLACE for recent blocks (within RECENT_WINDOW of tip)
-                    # so canonical chain always overwrites stale fork blocks.
-                    # INSERT OR IGNORE for older blocks (stable historical data).
-                    # Skip blocks before prune_before (pre-checkpoint — never re-insert).
                     for b in incoming_blocks:
-                        rtype      = b.get("type", "block_reward")
-                        block_slot = b.get("slot", -1)
-
-                        if block_slot < prune_before:
-                            continue
-
+                        rtype = b.get("type", "block_reward")
                         if rtype == "block_reward" and not _is_valid_hex64(b.get("vrf_ticket", "")):
                             continue
-
-                        is_recent  = (incoming_tip_slot is not None
-                                      and block_slot > incoming_tip_slot - RECENT_WINDOW)
-                        insert_cmd = "INSERT OR REPLACE" if is_recent else "INSERT OR IGNORE"
-
                         conn.execute(
-                            f"{insert_cmd} INTO blocks "
+                            "INSERT OR IGNORE INTO blocks "
                             "(slot, reward_id, winner_id, amount, timestamp, type, "
                             " prev_hash, vrf_ticket, canonical_hash, nodes) "
                             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                            (block_slot, b.get("reward_id"), b.get("winner_id"),
+                            (b.get("slot"), b.get("reward_id"), b.get("winner_id"),
                              int(b.get("amount", 0)), b.get("timestamp"),
                              rtype, b.get("prev_hash"), b.get("vrf_ticket"),
                              b.get("canonical_hash"), b.get("nodes", 1))
@@ -814,12 +691,27 @@ class Handler(BaseHTTPRequestHandler):
                         ).fetchone()
                         cur_cp_slot = int(cur[0]) if cur else 0
                         if incoming_cp_slot > cur_cp_slot:
-                            _apply_checkpoint_to_db(conn, incoming_cp_slot, incoming_cp_balances)
+                            conn.executemany(
+                                "INSERT OR REPLACE INTO checkpoint_balances "
+                                "(address, balance, checkpoint_slot) VALUES (?, ?, ?)",
+                                [(addr, int(bal), incoming_cp_slot)
+                                 for addr, bal in incoming_cp_balances.items()
+                                 if isinstance(addr, str) and len(addr) == 64
+                                 and isinstance(bal, int) and bal >= 0]
+                            )
+                            conn.execute(
+                                "INSERT OR REPLACE INTO meta VALUES ('checkpoint_slot', ?)",
+                                (str(incoming_cp_slot),)
+                            )
 
-                    conn.execute("INSERT OR REPLACE INTO meta VALUES ('total_minted',   ?)", (str(tip_snapshot["total_minted"]),))
-                    conn.execute("INSERT OR REPLACE INTO meta VALUES ('chain_height',   ?)", (str(tip_snapshot["chain_height"]),))
-                    conn.execute("INSERT OR REPLACE INTO meta VALUES ('chain_tip_slot', ?)", (str(tip_snapshot["chain_tip_slot"]),))
-                    conn.execute("INSERT OR REPLACE INTO meta VALUES ('chain_tip_hash', ?)", (tip_snapshot["chain_tip_hash"],))
+                    conn.execute("INSERT OR REPLACE INTO meta VALUES ('total_minted',   ?)",
+                                 (str(tip_snapshot["total_minted"]),))
+                    conn.execute("INSERT OR REPLACE INTO meta VALUES ('chain_height',   ?)",
+                                 (str(tip_snapshot["chain_height"]),))
+                    conn.execute("INSERT OR REPLACE INTO meta VALUES ('chain_tip_slot', ?)",
+                                 (str(tip_snapshot["chain_tip_slot"]),))
+                    conn.execute("INSERT OR REPLACE INTO meta VALUES ('chain_tip_hash', ?)",
+                                 (tip_snapshot["chain_tip_hash"],))
                     conn.commit()
                 finally:
                     conn.close()
@@ -841,12 +733,11 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     _init_db()
     _load_state()
-    _migrate_apply_checkpoint_prune()
     startup_cache = _rebuild_stats_cache()
     with _stats_cache_lock:
         _stats_cache = startup_cache
     threading.Thread(target=_clean_post_rate, daemon=True).start()
-    print("TIMPAL API v3.3.1 (SQLite + fork-block cleanup) running on port 7781")
+    print("TIMPAL API v3.2 (SQLite) running on port 7781")
     print(f"Database : {DB_PATH}")
     print("Auth     : Dilithium3 push signature")
     print("Storage  : Persistent — data survives restarts")

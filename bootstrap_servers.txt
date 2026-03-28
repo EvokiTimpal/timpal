@@ -1,1 +1,2 @@
 bootstrap.timpal.org:7777
+204.168.222.130:7777

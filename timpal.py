@@ -1205,6 +1205,13 @@ class Network:
         self._sync_rate_lock   = threading.Lock()
         self._block_rate       = {}
         self._block_rate_lock  = threading.Lock()
+        # Gap 3: P2P lottery gossip storage.
+        # Commits and reveals received directly from peers, keyed by slot.
+        # Merged with bootstrap results at winner selection time so the
+        # lottery runs even if bootstrap is unreachable.
+        self._p2p_commits      = {}   # {slot: {device_id: commit_hash}}
+        self._p2p_reveals      = {}   # {slot: {device_id: reveal_dict}}
+        self._p2p_lottery_lock = threading.Lock()
 
     def _get_local_ip(self):
         try:
@@ -1743,6 +1750,62 @@ class Network:
                             print(f"\n  [checkpoint] Applied slot {cp_slot} from peer\n  > ",
                                   end="", flush=True)
                             self.broadcast({"type": "CHECKPOINT", "checkpoint": cp})
+
+            elif msg_type == "LOTTERY_COMMIT":
+                # Gap 3: P2P commit gossip.
+                # Validate structure and staleness, store, then re-gossip once.
+                # Dedup via seen_ids prevents infinite relay loops.
+                did    = msg.get("device_id", "")
+                slot   = msg.get("slot")
+                commit = msg.get("commit", "")
+                if not (isinstance(did, str) and len(did) == 64
+                        and all(c in "0123456789abcdef" for c in did)
+                        and isinstance(slot, int)
+                        and isinstance(commit, str) and len(commit) == 64
+                        and all(c in "0123456789abcdef" for c in commit)):
+                    return
+                if abs(slot - get_current_slot()) > 2:
+                    return
+                gid = f"lcommit:{slot}:{did}"
+                with self._seen_lock:
+                    if gid in self.seen_ids:
+                        return
+                    self.seen_ids.add(gid)
+                with self._p2p_lottery_lock:
+                    self._p2p_commits.setdefault(slot, {}).setdefault(did, commit)
+                threading.Thread(target=self.broadcast, args=(msg, None), daemon=True).start()
+
+            elif msg_type == "LOTTERY_REVEAL":
+                # Gap 3: P2P reveal gossip.
+                # Validate structure and staleness, store, then re-gossip once.
+                did    = msg.get("device_id", "")
+                slot   = msg.get("slot")
+                ticket = msg.get("ticket", "")
+                sig    = msg.get("sig", "")
+                seed   = msg.get("seed", "")
+                pk     = msg.get("public_key", "")
+                if not (isinstance(did, str) and len(did) == 64
+                        and all(c in "0123456789abcdef" for c in did)
+                        and isinstance(slot, int)
+                        and isinstance(ticket, str) and len(ticket) == 64
+                        and all(c in "0123456789abcdef" for c in ticket)
+                        and isinstance(seed, str) and seed == str(slot)
+                        and isinstance(sig, str) and len(sig) > 0
+                        and isinstance(pk, str) and len(pk) > 0):
+                    return
+                if abs(slot - get_current_slot()) > 2:
+                    return
+                gid = f"lreveal:{slot}:{did}"
+                with self._seen_lock:
+                    if gid in self.seen_ids:
+                        return
+                    self.seen_ids.add(gid)
+                with self._p2p_lottery_lock:
+                    self._p2p_reveals.setdefault(slot, {}).setdefault(did, {
+                        "ticket": ticket, "sig": sig,
+                        "seed": seed, "public_key": pk
+                    })
+                threading.Thread(target=self.broadcast, args=(msg, None), daemon=True).start()
 
             elif msg_type == "SYNC_REQUEST":
                 now = time.time()
@@ -2343,11 +2406,17 @@ class Node:
         with self._my_tickets_lock:
             for s in [s for s in self._my_tickets if s < time_slot - 10]:
                 del self._my_tickets[s]
+        # Gap 3: prune P2P lottery state for old slots.
+        with self.network._p2p_lottery_lock:
+            for s in [s for s in self.network._p2p_commits if s < time_slot - 10]:
+                del self.network._p2p_commits[s]
+            for s in [s for s in self.network._p2p_reveals if s < time_slot - 10]:
+                del self.network._p2p_reveals[s]
         cutoff = time_slot - 100
         with self.network._seen_lock:
             def _stale(sid):
                 try:
-                    if sid.startswith(("reward:", "checkpoint:", "fee:")):
+                    if sid.startswith(("reward:", "checkpoint:", "fee:", "lcommit:", "lreveal:")):
                         return int(sid.split(":")[1]) < cutoff
                 except Exception:
                     pass
@@ -2404,6 +2473,15 @@ class Node:
                     self._cleanup_slot(time_slot)
                     continue
 
+                # Gap 3: also broadcast commit directly to peers so they have
+                # it even if bootstrap is unreachable.
+                self.network.broadcast({
+                    "type":      "LOTTERY_COMMIT",
+                    "device_id": self.wallet.device_id,
+                    "slot":      time_slot,
+                    "commit":    commit
+                })
+
                 with self._lottery_lock:
                     self._commits.setdefault(time_slot, {})[self.wallet.device_id] = commit
 
@@ -2415,7 +2493,11 @@ class Node:
                 if already_won:
                     self._cleanup_slot(time_slot); continue
 
+                # Merge commits from bootstrap AND from P2P peers.
                 commits_merged = self._bootstrap_query_commits(time_slot)
+                with self.network._p2p_lottery_lock:
+                    for did, c in self.network._p2p_commits.get(time_slot, {}).items():
+                        commits_merged.setdefault(did, c)
                 with self._lottery_lock:
                     for did, c in commits_merged.items():
                         self._commits.setdefault(time_slot, {}).setdefault(did, c)
@@ -2426,6 +2508,17 @@ class Node:
                     "seed": seed, "public_key": self.wallet.public_key.hex()
                 })
 
+                # Gap 3: also broadcast reveal directly to peers.
+                self.network.broadcast({
+                    "type":       "LOTTERY_REVEAL",
+                    "device_id":  self.wallet.device_id,
+                    "slot":       time_slot,
+                    "ticket":     ticket,
+                    "sig":        sig_hex,
+                    "seed":       seed,
+                    "public_key": self.wallet.public_key.hex()
+                })
+
                 remaining = slot_start + 4.0 - time.time()
                 if remaining > 0:
                     time.sleep(remaining)
@@ -2434,7 +2527,11 @@ class Node:
                 if already_won:
                     self._cleanup_slot(time_slot); continue
 
+                # Merge reveals from bootstrap AND from P2P peers.
                 all_reveals, _ = self._bootstrap_query_reveals(time_slot)
+                with self.network._p2p_lottery_lock:
+                    for did, r in self.network._p2p_reveals.get(time_slot, {}).items():
+                        all_reveals.setdefault(did, r)
                 all_reveals[self.wallet.device_id] = {
                     "ticket": ticket, "sig": sig_hex,
                     "seed": seed, "public_key": self.wallet.public_key.hex()

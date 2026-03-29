@@ -1318,6 +1318,14 @@ class Network:
                     if data.get("type") == "PEERS":
                         ns = data.get("network_size", 0)
                         if ns > 0:
+                            # Cap upward growth to 3x current per update.
+                            # Prevents a malicious bootstrap from jumping
+                            # network_size from e.g. 1,000 to 1,000,000 in
+                            # one response, which would starve honest nodes
+                            # by collapsing their eligibility threshold.
+                            cur = self._network_size
+                            if cur > 0:
+                                ns = min(ns, cur * 3)
                             self._network_size = ns
                         bs_tip_slot = data.get("chain_tip_slot", -1)
                         with self.ledger._lock:
@@ -2119,6 +2127,11 @@ class Node:
                 data = json.loads(resp.decode())
                 ns = data.get("network_size", 0)
                 if ns > 0:
+                    # Cap upward growth to 3x current per update (see
+                    # _bootstrap_connect for full explanation).
+                    cur = self.network._network_size
+                    if cur > 0:
+                        ns = min(ns, cur * 3)
                     self.network._network_size = ns
                 with lock:
                     results.append(data.get("type", "ERROR"))

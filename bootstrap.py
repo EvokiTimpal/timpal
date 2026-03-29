@@ -38,7 +38,7 @@ REWARD_INTERVAL        = 5.0
 TARGET_PARTICIPANTS    = 10
 BAN_DURATION           = 10
 CHECKPOINT_INTERVAL    = 1000
-REVEAL_MISS_THRESHOLD  = 2
+REVEAL_MISS_THRESHOLD  = 1   # 1 missed reveal triggers ban — closes selective reveal rotation attack
 NETWORK_SIZE_SAMPLES   = 10
 GENESIS_PREV_HASH      = "0" * 64
 
@@ -305,16 +305,11 @@ def handle_client(conn, addr):
                 if slot > _chain_tip["slot"]:
                     _chain_tip.update({"hash": th, "slot": slot, "device_id": did})
                     print(f"  [chain] Tip: slot {slot} by {did[:20]}...")
-            # Accept explicit cp_slot from client; fall back to inference for old clients.
             cp_slot = msg.get("cp_slot")
             if not isinstance(cp_slot, int) or cp_slot % CHECKPOINT_INTERVAL != 0:
                 cp_slot = (slot // CHECKPOINT_INTERVAL) * CHECKPOINT_INTERVAL
             if cp_slot > 0:
                 with _checkpoint_tips_lock:
-                    # LMD-style: each node holds exactly one vote per cp_slot.
-                    # Overwriting replaces any stale tip submitted on a fork
-                    # that was subsequently reorged out — stale votes can never
-                    # accumulate and permanently split the tally.
                     _checkpoint_tips.setdefault(cp_slot, {})[did] = th
                     _checkpoint_winners.setdefault(cp_slot, {})
                     if th not in _checkpoint_winners[cp_slot]:
@@ -359,16 +354,6 @@ def handle_client(conn, addr):
                     "peer_id":       None
                 }).encode())
                 return
-            # M9 FIX: deterministic tiebreak via secondary sort on hash string.
-            # Before: max(tally, key=lambda h: tally[h])
-            #   → Python dict insertion order breaks ties → non-deterministic
-            #   → two bootstrap servers could return different majority hashes
-            # After: max(tally, key=lambda h: (tally[h], h))
-            #   → hash string as secondary key → same result regardless of
-            #     insertion order on any bootstrap server
-            # Tally from latest-message-per-node (LMD).
-            # node_tips is {device_id: tip_hash} — one current tip per node.
-            # M9 FIX preserved: deterministic tiebreak via secondary sort on hash.
             tally = {}
             for tip_hash in node_tips.values():
                 tally[tip_hash] = tally.get(tip_hash, 0) + 1
@@ -483,9 +468,6 @@ def handle_client(conn, addr):
                 conn.sendall(json.dumps({"type": "ERROR", "msg": "missing slot"}).encode()); return
             with lottery_lock:
                 sr = dict(reveals.get(slot, {}))
-                # C1 FIX: only use commit-verified reveals for target computation.
-                # Reveals in sr already required a matching commit (enforced in
-                # SUBMIT_REVEAL), so sr is the verified set by construction.
                 verified_reveals = {
                     did: r for did, r in sr.items()
                     if did in commits.get(slot, {})

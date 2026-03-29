@@ -2010,6 +2010,20 @@ class Node:
         return hashlib.sha256(f"{ticket}:{self.wallet.device_id}:{time_slot}".encode()).hexdigest()
 
     def _is_eligible_this_slot(self, time_slot: int, network_size: int) -> bool:
+        # Gap 1: Sybil resistance via minimum stake gate.
+        # Balance is read from the last checkpoint — identical on every node,
+        # no live-balance divergence, no fork risk.
+        # A node with zero or insufficient balance cannot participate in the
+        # lottery regardless of how many device IDs it controls.
+        # 10 TMPL minimum — earnable honestly, costly to replicate at scale.
+        MIN_STAKE = 10 * UNIT  # 10 TMPL in units
+        cp_balance = (
+            self.ledger.checkpoints[-1].get("balances", {}).get(self.wallet.device_id, 0)
+            if self.ledger.checkpoints else 0
+        )
+        if cp_balance < MIN_STAKE:
+            return False
+        # Existing eligibility hash check unchanged.
         if network_size <= TARGET_PARTICIPANTS:
             return True
         threshold = TARGET_PARTICIPANTS / network_size

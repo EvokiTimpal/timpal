@@ -78,11 +78,11 @@ The security of the wallet is bounded by the strength of the password. There is 
 - **Local:** UDP broadcast on port 7778 for same-network peer discovery.
 - **Global:** Bootstrap server at bootstrap.timpal.org:7777 introduces nodes worldwide. Stores no funds. Controls nothing.
 
-Once connected, nodes communicate directly peer-to-peer. The bootstrap server is not involved in transactions or rewards. Community-operated bootstrap servers are welcome — the more servers, the more resilient the network.
+Once connected, nodes communicate directly peer-to-peer. The bootstrap server is not involved in transactions, rewards, or lottery operation. It serves only as a peer directory and optional lottery relay. Community-operated bootstrap servers are welcome — the more servers, the more resilient the network.
 
 ### 3.5 Eligibility-Gated Commit-Reveal VRF Lottery
 
-Every 5 seconds, one node wins 1.0575 TMPL. The lottery uses an eligibility gate and a commit-reveal scheme to ensure fairness at any network size.
+Every 5 seconds, one node wins 1.0575 TMPL. The lottery uses an eligibility gate and a commit-reveal scheme to ensure fairness at any network size. Commits and reveals are propagated both through the bootstrap server and directly between peers via P2P gossip, ensuring the lottery continues even if bootstrap is unreachable.
 
 **Eligibility gate.** Before each slot, every node independently checks whether it is eligible to participate. The check uses a deterministic hash of the node's device ID and the slot number:
 
@@ -98,11 +98,11 @@ The threshold targets approximately 10 eligible nodes per slot regardless of tot
 commit = sha256(f"{ticket}:{device_id}:{slot}")
 ```
 
-The bootstrap server records the commit and responds with COMMIT_ACK or COMMIT_REJECTED (if the node is banned — see §3.6). A node that does not receive COMMIT_ACK does not proceed.
+The commit is submitted to the bootstrap server and simultaneously broadcast as a `LOTTERY_COMMIT` message directly to connected peers. The bootstrap server responds with COMMIT_ACK or COMMIT_REJECTED (if the node is banned — see §3.6). A node that does not receive COMMIT_ACK does not proceed.
 
-**Reveal phase (t=2.0).** Each committed node submits its actual ticket, signature, seed, and public key to the bootstrap server. The bootstrap server records it. A node that committed but does not reveal within the window is recorded as a missed reveal.
+**Reveal phase (t=2.0).** Each committed node submits its actual ticket, signature, seed, and public key to the bootstrap server and simultaneously broadcasts a `LOTTERY_REVEAL` message directly to connected peers. The bootstrap server records it. A node that committed but does not reveal within the window is recorded as a missed reveal.
 
-**Winner selection (t=4.0–4.5).** Every eligible node fetches all reveals from bootstrap and independently computes the collective target:
+**Winner selection (t=4.0–4.5).** Every eligible node collects all reveals from bootstrap and from peers received directly via P2P gossip, merging both sources. Each node independently computes the collective target:
 
 ```
 target = sha256(sorted_tickets_joined_with_colon)
@@ -164,6 +164,8 @@ Each device is limited to 60 transactions per minute. This prevents spam and flo
 Without checkpointing, the ledger would grow impractically large over 37.5 years, making it difficult for nodes in regions with limited storage or bandwidth.
 
 Every 1,000 slots (approximately 83 minutes), every node independently creates a checkpoint. The checkpoint records the balance of every address at that moment — including all fee rewards earned up to that point — the total supply minted, the SHA-256 hash of the chain tip at the time of pruning, and cryptographic hashes of all pruned rewards, transactions, and fee rewards. The chain tip hash is stored so that blocks produced after the checkpoint can be correctly linked — a block's `prev_hash` must match the stored tip even though the block it references has been pruned.
+
+Before accepting a checkpoint received from a peer, every node independently recomputes the balance of every address from its own local chain history and rejects the checkpoint if the recomputed balances do not match. This means a checkpoint with a corrupted or manipulated balance distribution cannot be accepted by honest nodes — the local chain history is the ground truth, not the peer's claim.
 
 A 120-slot buffer (10 minutes) is applied before pruning, giving late-arriving data time to propagate across the network before being permanently removed. Checkpoints are gossiped to peers automatically. A new node joining the network receives the latest checkpoint first, then only the blocks since that checkpoint — never the full history.
 
@@ -269,19 +271,20 @@ Private keys are encrypted at rest with AES-256-GCM. The encryption key is deriv
 
 ### 6.9 Bootstrap Server Trust Model
 
-The bootstrap server is a relay. It records commits and reveals but cannot verify Dilithium3 signatures — that is done on every node independently. The bootstrap server also relays chain tip information. A compromised or malicious bootstrap server can:
+The bootstrap server is an optional relay. It records commits and reveals and gossips them to querying nodes, but it is not the sole path for lottery data — nodes also exchange commits and reveals directly via P2P gossip. A compromised or malicious bootstrap server can:
 
-- Refuse to record commits (causing nodes to skip slots)
-- Selectively withhold reveals (reducing the number of verified participants a node sees — but since nodes compute the collective target locally from verified reveals only, the server cannot inject false reveals or pre-compute a manipulated target)
+- Refuse to relay commits or reveals (honest nodes receive them from peers directly — lottery continues unaffected)
 - Report a false or stale chain tip
 
 It cannot:
 
+- Stop lottery operation (P2P gossip delivers commits and reveals independently of bootstrap)
 - Forge a valid VRF ticket (requires the target node's private key)
 - Force a node to accept an invalid block (every node verifies chain linkage and VRF independently)
 - Steal funds or alter balances
+- Corrupt a checkpoint (every node independently recomputes balances from local chain history before accepting)
 
-Community-operated bootstrap servers reduce the impact of any single server failing or misbehaving. The more servers, the more resilient the network.
+Community-operated bootstrap servers reduce the impact of any single server failing or misbehaving. The more servers, the more resilient the network. Bootstrap is the door to the network — not the lock.
 
 ---
 
@@ -299,7 +302,7 @@ Community bootstrap servers, community tools, and community applications are all
 
 TIMPAL provides what the global financial system has failed to provide: a way for any person, anywhere, to hold and send value — without asking permission.
 
-The eligibility-gated lottery ensures the reward system remains fair and efficient whether the network has 10 nodes or 10 million. The collective target prevents any node from predicting or manipulating the outcome. The reveal obligation closes the selective-reveal attack. The chain spine anchors all rewards to a single, deterministic history. Chain-weight fork resolution with deterministic tie-breaking guarantees global convergence under any network partition. The two-era model ensures the network is self-sustaining forever — first through the lottery and fees, then through fees alone.
+The eligibility-gated lottery ensures the reward system remains fair and efficient whether the network has 10 nodes or 10 million. The collective target prevents any node from predicting or manipulating the outcome. The reveal obligation closes the selective-reveal attack. P2P lottery gossip ensures the network continues producing blocks even if every bootstrap server goes offline. Independent checkpoint balance verification means no node can corrupt the ledger's balance history without detection. The chain spine anchors all rewards to a single, deterministic history. Chain-weight fork resolution with deterministic tie-breaking guarantees global convergence under any network partition. The two-era model ensures the network is self-sustaining forever — first through the lottery and fees, then through fees alone.
 
 ---
 

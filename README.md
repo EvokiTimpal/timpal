@@ -48,8 +48,9 @@ Your node starts, creates a quantum-resistant wallet, prompts you to set a passw
 - **Quantum-resistant cryptography** — Dilithium3, NIST 2024 post-quantum standard.
 - **Encrypted wallet** — Private key encrypted with AES-256-GCM and a password you set. Never stored in plaintext.
 - **~30-second finality** — Blocks confirmed after 6 slots. Transactions are final and irreversible once confirmed.
-- **Checkpoints every ~83 minutes** — Every 1,000 slots (~83 min), all nodes independently create a checkpoint. Prunes raw history while preserving all balances. Keeps the ledger lightweight forever.
+- **Checkpoints every ~83 minutes** — Every 1,000 slots, all nodes independently create a checkpoint. Before accepting a peer checkpoint, every node independently recomputes balances from its own chain history — a corrupted checkpoint cannot be accepted. Prunes raw history while preserving all balances. Keeps the ledger lightweight forever.
 - **Eligibility-gated VRF lottery** — Every 5 seconds, one node wins 1.0575 TMPL. Only ~10 nodes are randomly eligible per slot regardless of how large the network grows, keeping participation fair and efficient at any scale. The winner is selected by a commit-reveal scheme — provably fair, no node has a permanent advantage.
+- **P2P lottery gossip** — Commits and reveals are broadcast directly between peers as well as through the bootstrap server. If bootstrap goes offline, the lottery keeps running — nodes collect lottery data from each other directly.
 - **Collective target** — The winning ticket is the one closest to a target that cannot be known until all reveals are in. No node can predict or cherry-pick the outcome.
 - **Fork resolution** — Heaviest valid chain wins. Weight is block count minus slot-gap penalties, so dense chains always beat sparse ones. Equal-weight forks resolve deterministically by comparing tip hashes. All nodes converge to the same chain regardless of arrival order.
 - **One node per device** — Fairness enforced by the protocol.
@@ -155,7 +156,7 @@ python3 timpal.py send c9da12e12fcb8782dbf7660a... 10.0
 
 ## Bootstrap node
 
-`bootstrap.timpal.org:7777` — door to the network. Stores no value. Controls nothing.
+`bootstrap.timpal.org:7777` — door to the network. Stores no value. Controls nothing. Not required for lottery operation — nodes exchange lottery data directly with each other.
 
 ---
 

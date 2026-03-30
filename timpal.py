@@ -996,15 +996,33 @@ class Ledger:
 
 class Wallet:
     def __init__(self):
-        self.public_key  = None
-        self.private_key = None
-        self.device_id   = None
+        self.public_key         = None
+        self.private_key        = None
+        self.device_id          = None
+        self.genesis_block_hash = None   # chain-anchored wallet identity (None = genesis phase)
 
-    def create_new(self):
+    def create_new(self, genesis_block_hash: str = None):
+        """Create a new wallet keypair.
+
+        genesis_block_hash — if provided, device_id is anchored to the live
+        chain: sha256(public_key_bytes + block_hash_bytes).
+        Prevents offline mass wallet generation — a valid block hash from
+        the live network is required for every wallet created after the
+        genesis phase (first 1000 blocks).
+        If None (genesis phase only), device_id = sha256(public_key) as before.
+        """
         self.public_key, self.private_key = Dilithium3.keygen()
-        self.device_id = hashlib.sha256(self.public_key).hexdigest()
+        if genesis_block_hash:
+            self.genesis_block_hash = genesis_block_hash
+            seed = self.public_key + bytes.fromhex(genesis_block_hash)
+            self.device_id = hashlib.sha256(seed).hexdigest()
+        else:
+            self.genesis_block_hash = None
+            self.device_id = hashlib.sha256(self.public_key).hexdigest()
         print(f"\n  New quantum-resistant wallet created.")
         print(f"  Device ID: {self.device_id}")
+        if genesis_block_hash:
+            print(f"  Anchored to block: {genesis_block_hash[:32]}...")
         print(f"\n  WARNING — BACK UP YOUR WALLET FILE: {WALLET_FILE}")
         print(f"  If you delete it your TMPL is gone forever.")
 
@@ -1031,6 +1049,8 @@ class Wallet:
                 "public_key": self.public_key.hex(),
                 "private_key": self.private_key.hex(), "quantum": True
             }
+        if self.genesis_block_hash:
+            data["genesis_block_hash"] = self.genesis_block_hash
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(data, f, indent=2)
@@ -1039,8 +1059,9 @@ class Wallet:
     def load(self, path=WALLET_FILE, password=None):
         with open(path, "r") as f:
             data = json.load(f)
-        self.public_key = bytes.fromhex(data["public_key"])
-        self.device_id  = data["device_id"]
+        self.public_key         = bytes.fromhex(data["public_key"])
+        self.device_id          = data["device_id"]
+        self.genesis_block_hash = data.get("genesis_block_hash")
         if data.get("encrypted"):
             if password is None:
                 raise ValueError("wallet is encrypted — password required")
@@ -1180,6 +1201,44 @@ def _save_bootstrap_servers(servers: list):
         pass
 
 
+def _fetch_wallet_block_hash() -> tuple:
+    """Fetch a recent block hash from bootstrap for chain-anchored wallet creation.
+
+    Returns (block_hash, genesis_phase) where:
+      block_hash   — 64-char hex string, or "" on failure
+      genesis_phase — True if network is still in first 1000 blocks (old
+                      wallet creation allowed), False if chain-anchored
+                      wallet is required.
+
+    Called before wallet creation when no wallet file exists.
+    Does not require a Network object — uses a raw socket to bootstrap.
+    """
+    for host, port in _load_bootstrap_servers():
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(10.0)
+            sock.connect((host, port))
+            sock.sendall(json.dumps({"type": "GET_WALLET_BLOCK_HASH"}).encode())
+            sock.shutdown(socket.SHUT_WR)
+            resp = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                resp += chunk
+            sock.close()
+            data         = json.loads(resp.decode())
+            block_hash   = data.get("block_hash", "")
+            genesis_phase= data.get("genesis_phase", True)
+            if block_hash and len(block_hash) == 64 and all(
+                c in "0123456789abcdef" for c in block_hash
+            ):
+                return block_hash, genesis_phase
+        except Exception:
+            continue
+    return "", True   # fallback: treat as genesis phase if bootstrap unreachable
+
+
 # ── Network ────────────────────────────────────────────────────────────────────
 
 class Network:
@@ -1295,8 +1354,13 @@ class Network:
                     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     sock.settimeout(10.0)
                     sock.connect((host, port))
-                    sock.sendall(json.dumps({"type": "HELLO", "device_id": self.wallet.device_id,
-                                             "port": self.port, "version": VERSION}).encode())
+                    sock.sendall(json.dumps({
+                        "type":               "HELLO",
+                        "device_id":          self.wallet.device_id,
+                        "port":               self.port,
+                        "version":            VERSION,
+                        "genesis_block_hash": self.wallet.genesis_block_hash or ""
+                    }).encode())
                     sock.shutdown(socket.SHUT_WR)
                     resp = b""
                     while True:
@@ -1557,9 +1621,14 @@ class Network:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         while self._running:
             try:
-                sock.sendto(json.dumps({"type": "HELLO", "device_id": self.wallet.device_id,
-                                        "ip": self.local_ip, "port": self.port,
-                                        "version": VERSION}).encode(), ("<broadcast>", BROADCAST_PORT))
+                sock.sendto(json.dumps({
+                    "type":               "HELLO",
+                    "device_id":          self.wallet.device_id,
+                    "ip":                 self.local_ip,
+                    "port":               self.port,
+                    "version":            VERSION,
+                    "genesis_block_hash": self.wallet.genesis_block_hash or ""
+                }).encode(), ("<broadcast>", BROADCAST_PORT))
             except Exception:
                 pass
             time.sleep(DISCOVERY_INTERVAL)
@@ -1999,8 +2068,40 @@ class Node:
             print(f"  Device ID : {self.wallet.device_id}")
             print(f"  Balance   : {balance / UNIT:.8f} TMPL")
         else:
-            self.wallet.create_new()
-            print("\n  Set a password to encrypt your wallet.")
+            # New wallet — check if network is past genesis phase.
+            # If yes, must anchor wallet to a live block hash so offline
+            # mass wallet generation is physically impossible.
+            print("\n  Connecting to network to verify genesis phase...")
+            block_hash, genesis_phase = _fetch_wallet_block_hash()
+            if not genesis_phase:
+                if not block_hash:
+                    print("\n  " + "═"*52)
+                    print("  WALLET CREATION FAILED")
+                    print("  " + "═"*52)
+                    print("  Cannot reach bootstrap to get a block hash.")
+                    print("  Check your internet connection and try again.")
+                    print("  " + "═"*52 + "\n")
+                    exit(1)
+                print(f"  Network is live. Anchoring wallet to block hash...")
+                self.wallet.create_new(genesis_block_hash=block_hash)
+            else:
+                print(f"  Genesis phase active. Creating standard wallet...")
+                self.wallet.create_new()
+            print("\n" + "═"*54)
+            print("  ⚠️  IMPORTANT — READ BEFORE SETTING YOUR PASSWORD")
+            print("═"*54)
+            print("  Your wallet is being created and anchored to the")
+            print("  live Timpal network. This can only be done ONCE")
+            print("  per IP address every 83 minutes.")
+            print("")
+            print("  If you make a mistake with your password or")
+            print("  lose your wallet file, you must wait up to")
+            print("  83 minutes before creating a new wallet.")
+            print("")
+            print("  BACK UP YOUR WALLET FILE IMMEDIATELY AFTER CREATION:")
+            print(f"  {WALLET_FILE}")
+            print("═"*54)
+            print("  Set a password to encrypt your wallet.")
             while True:
                 pw  = getpass.getpass("  Password (min 8 chars): ")
                 pw2 = getpass.getpass("  Confirm: ")

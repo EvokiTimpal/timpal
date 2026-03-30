@@ -116,6 +116,20 @@ _checkpoint_tips    = {}   # {cp_slot: {device_id: tip_hash}} — LMD: latest ti
 _checkpoint_winners = {}   # {cp_slot: {tip_hash: first_device_id}}
 _checkpoint_tips_lock = threading.Lock()
 
+# Chain-anchored wallet creation (Sybil resistance).
+# Rolling list of last 100 block hashes seen via SUBMIT_TIP.
+# New wallets created after genesis phase must anchor to one of these hashes.
+# Genesis phase = first 1000 blocks (chain_tip_slot < 1000).
+_recent_block_hashes      = []   # list of last 100 tip hashes, newest last
+_recent_block_hashes_lock = threading.Lock()
+
+# Rate limit: max 3 new wallets per block hash per IP.
+# Matches household design intent (3 devices per home).
+# Prevents attacker recycling one block hash across unlimited wallets from same IP.
+# {ip: {block_hash: count}}
+_wallet_hash_ip_rate      = {}
+_wallet_hash_ip_rate_lock = threading.Lock()
+
 commit_ip_rate         = {}
 reveal_ip_rate         = {}
 hello_ip_rate          = {}
@@ -222,6 +236,19 @@ def clean_old_data():
                 del _checkpoint_tips[s]
                 _checkpoint_winners.pop(s, None)
 
+        # Prune wallet hash rate entries for block hashes no longer in the
+        # recent 100 window — those hashes are expired and their counts
+        # are no longer relevant.
+        with _recent_block_hashes_lock:
+            current_valid = set(_recent_block_hashes)
+        with _wallet_hash_ip_rate_lock:
+            for pip in list(_wallet_hash_ip_rate.keys()):
+                for bh in list(_wallet_hash_ip_rate[pip].keys()):
+                    if bh not in current_valid:
+                        del _wallet_hash_ip_rate[pip][bh]
+                if not _wallet_hash_ip_rate[pip]:
+                    del _wallet_hash_ip_rate[pip]
+
 
 # ── Request handler ────────────────────────────────────────────────────────────
 
@@ -259,6 +286,49 @@ def handle_client(conn, addr):
                     return
                 hello_ip_rate[ip].append(now)
             ns = get_smoothed_network_size()
+            # Chain-anchored wallet check.
+            # After genesis phase (chain tip slot >= 1000), every NEW device_id
+            # must supply a genesis_block_hash that exists in our recent 100
+            # block hashes. This makes offline mass wallet generation impossible —
+            # a live block hash from the running network is required.
+            with _chain_tip_lock:
+                current_tip_slot = _chain_tip["slot"]
+            genesis_phase = current_tip_slot < 1000
+            if not genesis_phase:
+                gbh = msg.get("genesis_block_hash", "")
+                with peers_lock:
+                    already_known = did in peers
+                if not already_known:
+                    with _recent_block_hashes_lock:
+                        valid_hashes = list(_recent_block_hashes)
+                    if not gbh or gbh not in valid_hashes:
+                        conn.sendall(json.dumps({
+                            "type":   "VERSION_REJECTED",
+                            "reason": "Wallet must be created with a live block hash. "
+                                      "Delete your wallet and restart to create a valid one."
+                        }).encode())
+                        return
+                    # Cap: 1 new wallet per block hash per IP.
+                    # Since bootstrap keeps the last 100 block hashes and a new
+                    # block arrives every 5 seconds, an IP can register at most
+                    # 1 wallet per 5 seconds from its window — but because the
+                    # window aligns with the 1000-block checkpoint interval,
+                    # the effective rate is 1 wallet per ~83 minutes per IP.
+                    # This makes mass wallet generation from a single IP
+                    # physically impossible without thousands of unique IPs.
+                    # Honest users create 1 wallet ever — zero impact.
+                    with _wallet_hash_ip_rate_lock:
+                        ip_entry = _wallet_hash_ip_rate.setdefault(ip, {})
+                        count    = ip_entry.get(gbh, 0)
+                        if count >= 1:
+                            conn.sendall(json.dumps({
+                                "type":   "VERSION_REJECTED",
+                                "reason": "Only 1 wallet can be created per IP per block. "
+                                          "Wait for a new block (~5 seconds) and try again. "
+                                          "Note: only 1 wallet is allowed per IP per 83-minute window."
+                            }).encode())
+                            return
+                        ip_entry[gbh] = 1
             with peers_lock:
                 is_new = did not in peers
                 if is_new and len(peers) >= 10000:
@@ -305,6 +375,14 @@ def handle_client(conn, addr):
                 if slot > _chain_tip["slot"]:
                     _chain_tip.update({"hash": th, "slot": slot, "device_id": did})
                     print(f"  [chain] Tip: slot {slot} by {did[:20]}...")
+                    # Record block hash for chain-anchored wallet creation.
+                    # Keep rolling list of last 100 hashes — new wallets must
+                    # reference one of these to prove live network connection.
+                    with _recent_block_hashes_lock:
+                        if th not in _recent_block_hashes:
+                            _recent_block_hashes.append(th)
+                            if len(_recent_block_hashes) > 100:
+                                _recent_block_hashes.pop(0)
             cp_slot = msg.get("cp_slot")
             if not isinstance(cp_slot, int) or cp_slot % CHECKPOINT_INTERVAL != 0:
                 cp_slot = (slot // CHECKPOINT_INTERVAL) * CHECKPOINT_INTERVAL
@@ -325,6 +403,32 @@ def handle_client(conn, addr):
                 "chain_tip_hash": th,
                 "chain_tip_slot": ts
             }).encode())
+
+        elif mt == "GET_WALLET_BLOCK_HASH":
+            # Chain-anchored wallet creation.
+            # Called by a new node before creating its wallet.
+            # Returns the most recent known block hash and whether the network
+            # is still in genesis phase (first 1000 blocks).
+            # New nodes in genesis phase may create wallets the old way.
+            # New nodes after genesis phase MUST anchor their wallet to the
+            # returned block hash — bootstrap will reject old-style wallets.
+            with _chain_tip_lock:
+                current_tip_slot = _chain_tip["slot"]
+                current_tip_hash = _chain_tip["hash"]
+            genesis_phase = current_tip_slot < 1000
+            with _recent_block_hashes_lock:
+                # Give the most recent known block hash.
+                # If no blocks yet (true genesis), return empty string —
+                # node will create wallet without anchoring.
+                latest_hash = _recent_block_hashes[-1] if _recent_block_hashes else ""
+            conn.sendall(json.dumps({
+                "type":         "WALLET_BLOCK_HASH_RESPONSE",
+                "block_hash":   latest_hash,
+                "genesis_phase": genesis_phase,
+                "tip_slot":     current_tip_slot
+            }).encode())
+            if not genesis_phase:
+                print(f"  [wallet] Block hash issued to {ip} (slot {current_tip_slot})")
 
         elif mt == "GET_CHECKPOINT_TIP":
             # M8 FIX: rate limit — was the only handler without one

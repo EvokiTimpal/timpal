@@ -41,6 +41,7 @@ CHECKPOINT_INTERVAL    = 1000
 REVEAL_MISS_THRESHOLD  = 1   # 1 missed reveal triggers ban — closes selective reveal rotation attack
 NETWORK_SIZE_SAMPLES   = 10
 GENESIS_PREV_HASH      = "0" * 64
+MIN_IDENTITY_AGE       = 200  # slots — must match timpal.py (defense-in-depth gate at bootstrap)
 
 # ── Rate limits ────────────────────────────────────────────────────────────────
 COMMIT_RATE_LIMIT         = 3    # per slot
@@ -117,18 +118,20 @@ _checkpoint_winners = {}   # {cp_slot: {tip_hash: first_device_id}}
 _checkpoint_tips_lock = threading.Lock()
 
 # Chain-anchored wallet creation (Sybil resistance).
-# Rolling list of last 100 block hashes seen via SUBMIT_TIP.
-# New wallets created after genesis phase must anchor to one of these hashes.
-# Genesis phase = first 1000 blocks (chain_tip_slot < 1000).
-_recent_block_hashes      = []   # list of last 100 tip hashes, newest last
+_recent_block_hashes      = []
 _recent_block_hashes_lock = threading.Lock()
 
-# Rate limit: max 3 new wallets per block hash per IP.
-# Matches household design intent (3 devices per home).
-# Prevents attacker recycling one block hash across unlimited wallets from same IP.
-# {ip: {block_hash: count}}
+# Rate limit: max 1 new wallet per block hash per IP.
 _wallet_hash_ip_rate      = {}
 _wallet_hash_ip_rate_lock = threading.Lock()
+
+# Identity maturation tracking (defense-in-depth).
+# Records the first slot at which each device_id was seen via HELLO or REGISTER.
+# Used in SUBMIT_COMMIT to reject identities younger than MIN_IDENTITY_AGE.
+# Never pruned — must persist for the lifetime of the bootstrap process.
+# NOTE: This is a soft gate only. Consensus enforcement lives in timpal.py.
+_identity_first_seen = {}   # {device_id: first_seen_slot}
+_identity_lock       = threading.Lock()
 
 commit_ip_rate         = {}
 reveal_ip_rate         = {}
@@ -236,9 +239,7 @@ def clean_old_data():
                 del _checkpoint_tips[s]
                 _checkpoint_winners.pop(s, None)
 
-        # Prune wallet hash rate entries for block hashes no longer in the
-        # recent 100 window — those hashes are expired and their counts
-        # are no longer relevant.
+        # Prune wallet hash rate entries for expired block hashes.
         with _recent_block_hashes_lock:
             current_valid = set(_recent_block_hashes)
         with _wallet_hash_ip_rate_lock:
@@ -248,6 +249,10 @@ def clean_old_data():
                         del _wallet_hash_ip_rate[pip][bh]
                 if not _wallet_hash_ip_rate[pip]:
                     del _wallet_hash_ip_rate[pip]
+
+        # NOTE: _identity_first_seen is intentionally NOT pruned.
+        # Identity records must persist for the bootstrap process lifetime
+        # so maturation checks remain valid across reconnects.
 
 
 # ── Request handler ────────────────────────────────────────────────────────────
@@ -286,11 +291,6 @@ def handle_client(conn, addr):
                     return
                 hello_ip_rate[ip].append(now)
             ns = get_smoothed_network_size()
-            # Chain-anchored wallet check.
-            # After genesis phase (chain tip slot >= 1000), every NEW device_id
-            # must supply a genesis_block_hash that exists in our recent 100
-            # block hashes. This makes offline mass wallet generation impossible —
-            # a live block hash from the running network is required.
             with _chain_tip_lock:
                 current_tip_slot = _chain_tip["slot"]
             genesis_phase = current_tip_slot < 1000
@@ -308,15 +308,6 @@ def handle_client(conn, addr):
                                       "Delete your wallet and restart to create a valid one."
                         }).encode())
                         return
-                    # Cap: 1 new wallet per block hash per IP.
-                    # Since bootstrap keeps the last 100 block hashes and a new
-                    # block arrives every 5 seconds, an IP can register at most
-                    # 1 wallet per 5 seconds from its window — but because the
-                    # window aligns with the 1000-block checkpoint interval,
-                    # the effective rate is 1 wallet per ~83 minutes per IP.
-                    # This makes mass wallet generation from a single IP
-                    # physically impossible without thousands of unique IPs.
-                    # Honest users create 1 wallet ever — zero impact.
                     with _wallet_hash_ip_rate_lock:
                         ip_entry = _wallet_hash_ip_rate.setdefault(ip, {})
                         count    = ip_entry.get(gbh, 0)
@@ -340,6 +331,12 @@ def handle_client(conn, addr):
             with _chain_tip_lock:
                 th = _chain_tip["hash"]
                 ts = _chain_tip["slot"]
+            # Record identity first_seen_slot for maturation tracking.
+            # Only records if not already present — earliest slot always wins.
+            cs = get_current_slot()
+            with _identity_lock:
+                if did and did not in _identity_first_seen:
+                    _identity_first_seen[did] = cs
             conn.sendall(json.dumps({
                 "type":           "PEERS",
                 "peers":          pl,
@@ -349,6 +346,40 @@ def handle_client(conn, addr):
             }).encode())
             if is_new:
                 print(f"  [+] Node v{ver}: {did[:20]}... from {ip}:{port} | total={len(peers)} ns={ns}")
+
+        elif mt == "REGISTER":
+            # Identity registration message from a node.
+            # Bootstrap records first_seen_slot for maturation tracking.
+            # This is defense-in-depth only — consensus enforcement is in timpal.py.
+            did     = msg.get("device_id", "")
+            pub_hex = msg.get("public_key", "")
+            if not (isinstance(did, str) and len(did) == 64
+                    and all(c in "0123456789abcdef" for c in did)):
+                conn.sendall(json.dumps({"type": "ERROR", "msg": "invalid"}).encode())
+                return
+            if not isinstance(pub_hex, str) or not pub_hex:
+                conn.sendall(json.dumps({"type": "ERROR", "msg": "invalid"}).encode())
+                return
+            # Verify device_id derivation
+            try:
+                pub_bytes = bytes.fromhex(pub_hex)
+                gbh = msg.get("genesis_block_hash", "")
+                if gbh and len(gbh) == 64 and all(c in "0123456789abcdef" for c in gbh):
+                    expected_id = hashlib.sha256(pub_bytes + bytes.fromhex(gbh)).hexdigest()
+                else:
+                    expected_id = hashlib.sha256(pub_bytes).hexdigest()
+                if expected_id != did:
+                    conn.sendall(json.dumps({"type": "ERROR", "msg": "invalid id"}).encode())
+                    return
+            except Exception:
+                conn.sendall(json.dumps({"type": "ERROR", "msg": "invalid"}).encode())
+                return
+            cs = get_current_slot()
+            with _identity_lock:
+                if did not in _identity_first_seen:
+                    _identity_first_seen[did] = cs
+                    print(f"  [register] Identity: {did[:20]}... slot={cs}")
+            conn.sendall(json.dumps({"type": "REGISTER_ACK"}).encode())
 
         elif mt == "SUBMIT_TIP":
             did  = msg.get("device_id", "")
@@ -375,9 +406,6 @@ def handle_client(conn, addr):
                 if slot > _chain_tip["slot"]:
                     _chain_tip.update({"hash": th, "slot": slot, "device_id": did})
                     print(f"  [chain] Tip: slot {slot} by {did[:20]}...")
-                    # Record block hash for chain-anchored wallet creation.
-                    # Keep rolling list of last 100 hashes — new wallets must
-                    # reference one of these to prove live network connection.
                     with _recent_block_hashes_lock:
                         if th not in _recent_block_hashes:
                             _recent_block_hashes.append(th)
@@ -405,33 +433,23 @@ def handle_client(conn, addr):
             }).encode())
 
         elif mt == "GET_WALLET_BLOCK_HASH":
-            # Chain-anchored wallet creation.
-            # Called by a new node before creating its wallet.
-            # Returns the most recent known block hash and whether the network
-            # is still in genesis phase (first 1000 blocks).
-            # New nodes in genesis phase may create wallets the old way.
-            # New nodes after genesis phase MUST anchor their wallet to the
-            # returned block hash — bootstrap will reject old-style wallets.
             with _chain_tip_lock:
                 current_tip_slot = _chain_tip["slot"]
                 current_tip_hash = _chain_tip["hash"]
             genesis_phase = current_tip_slot < 1000
             with _recent_block_hashes_lock:
-                # Give the most recent known block hash.
-                # If no blocks yet (true genesis), return empty string —
-                # node will create wallet without anchoring.
                 latest_hash = _recent_block_hashes[-1] if _recent_block_hashes else ""
             conn.sendall(json.dumps({
-                "type":         "WALLET_BLOCK_HASH_RESPONSE",
-                "block_hash":   latest_hash,
+                "type":          "WALLET_BLOCK_HASH_RESPONSE",
+                "block_hash":    latest_hash,
                 "genesis_phase": genesis_phase,
-                "tip_slot":     current_tip_slot
+                "tip_slot":      current_tip_slot
             }).encode())
             if not genesis_phase:
                 print(f"  [wallet] Block hash issued to {ip} (slot {current_tip_slot})")
 
         elif mt == "GET_CHECKPOINT_TIP":
-            # M8 FIX: rate limit — was the only handler without one
+            # M8 FIX: rate limit
             now = time.time()
             with rate_lock:
                 checkpoint_tip_ip_rate.setdefault(ip, [])
@@ -491,6 +509,17 @@ def handle_client(conn, addr):
                 conn.sendall(json.dumps({
                     "type": "COMMIT_REJECTED", "reason": "ban", "ban_until": ban
                 }).encode()); return
+            # Identity maturation gate (defense-in-depth).
+            # Post-genesis phase: reject commits from identities younger than MIN_IDENTITY_AGE.
+            # Primary enforcement is at consensus level in timpal.py _add_block_locked().
+            if cs >= 1000:
+                with _identity_lock:
+                    first_seen = _identity_first_seen.get(did)
+                if first_seen is None or cs - first_seen < MIN_IDENTITY_AGE:
+                    conn.sendall(json.dumps({
+                        "type":   "COMMIT_REJECTED",
+                        "reason": "identity too young — wait for maturation"
+                    }).encode()); return
             ns = get_smoothed_network_size()
             if not is_eligible(did, slot, ns):
                 conn.sendall(json.dumps({
@@ -686,7 +715,7 @@ def _gossip_bootstrap_servers():
 def main():
     _check_genesis_time()
     print("=" * 54)
-    print("  TIMPAL Bootstrap Server v3.2")
+    print("  TIMPAL Bootstrap Server v3.3")
     print("  Peer Discovery + Eligibility-Gated Lottery + Chain Tip")
     print("=" * 54)
     print(f"  Port: {PORT} | Min version: {MIN_VERSION} | Target: {TARGET_PARTICIPANTS}/slot")

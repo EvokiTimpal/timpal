@@ -116,6 +116,7 @@ GENESIS_PREV_HASH  = "0" * 64  # prev_hash of the very first block ever
 ORPHAN_POOL_MAX    = 100
 ORPHAN_TTL_SLOTS   = MAX_SLOT_GAP * 2
 MAX_REORG_DEPTH    = 100
+MIN_IDENTITY_AGE   = 200  # slots before a registered identity can produce blocks (~16.7 min)
 
 
 def _check_genesis_time():
@@ -208,6 +209,7 @@ class Ledger:
         self._lock           = threading.RLock()
         self._spent_tx_ids_set: set = set()
         self._orphan_pool: dict = {}
+        self.identities: dict = {}   # {device_id: first_seen_slot} — persists in checkpoint
         self._load()
 
     def _load(self):
@@ -219,6 +221,7 @@ class Ledger:
                 self.checkpoints  = data.get("checkpoints", [])
                 self.chain        = data.get("chain", [])
                 self.fee_rewards  = data.get("fee_rewards", [])
+                self.identities   = data.get("identities", {})
                 self.recalculate_totals()
                 if self.checkpoints:
                     self._spent_tx_ids_set = set(self.checkpoints[-1].get("spent_tx_ids", []))
@@ -234,7 +237,8 @@ class Ledger:
                 "chain":        self.chain,
                 "fee_rewards":  self.fee_rewards,
                 "total_minted": self.total_minted,
-                "checkpoints":  self.checkpoints
+                "checkpoints":  self.checkpoints,
+                "identities":   self.identities
             }, f, indent=2)
         os.replace(tmp, LEDGER_FILE)
 
@@ -331,6 +335,60 @@ class Ledger:
             })
             self.save()
             return True
+
+    def add_registration(self, device_id: str, slot: int) -> bool:
+        """Record a new identity's first_seen_slot from block data.
+        Only records if not already present — earliest slot always wins.
+        Caller must hold self._lock or call from single-threaded context.
+        """
+        with self._lock:
+            if device_id not in self.identities:
+                self.identities[device_id] = slot
+                self.save()
+                return True
+            return False
+
+    @staticmethod
+    def _verify_registration(reg: dict) -> bool:
+        """Verify a registration entry embedded in a block.
+
+        Checks:
+          1. device_id is 64-char lowercase hex
+          2. public_key is valid hex
+          3. device_id derivation: sha256(pubkey + genesis_block_hash) or sha256(pubkey)
+          4. signature over f"{device_id}:{genesis_block_hash or ''}"
+        """
+        try:
+            did = reg.get("device_id", "")
+            pub_hex = reg.get("public_key", "")
+            sig_hex = reg.get("signature", "")
+            gbh     = reg.get("genesis_block_hash", "")
+
+            # Field validation
+            if not (isinstance(did, str) and len(did) == 64
+                    and all(c in "0123456789abcdef" for c in did)):
+                return False
+            if not isinstance(pub_hex, str) or not pub_hex:
+                return False
+            if not isinstance(sig_hex, str) or not sig_hex:
+                return False
+
+            pub_bytes = bytes.fromhex(pub_hex)
+
+            # device_id derivation check
+            if gbh and len(gbh) == 64 and all(c in "0123456789abcdef" for c in gbh):
+                expected_id = hashlib.sha256(pub_bytes + bytes.fromhex(gbh)).hexdigest()
+            else:
+                expected_id = hashlib.sha256(pub_bytes).hexdigest()
+            if expected_id != did:
+                return False
+
+            # Signature verification
+            payload = f"{did}:{gbh or ''}".encode()
+            sig_bytes = bytes.fromhex(sig_hex)
+            return Dilithium3.verify(pub_bytes, payload, sig_bytes)
+        except Exception:
+            return False
 
     # ── Internal orphan pool helpers ───────────────────────────────────────────
 
@@ -453,8 +511,35 @@ class Ledger:
         if self.total_minted + block.get("amount", 0) > TOTAL_SUPPLY:
             return False
 
+        # 9. Registration count limit (H5) — enforce at consensus
+        regs = block.get("registrations", [])
+        if not isinstance(regs, list) or len(regs) > 10:
+            return False
+
+        # 10. Identity maturation check (H1) — post-genesis phase only.
+        # Uses block["slot"] not get_current_slot() for determinism.
+        # Must run BEFORE appending the block so self-registration in the
+        # same block cannot bypass the check.
+        block_slot = block.get("slot")
+        if block_slot >= 1000:
+            first_seen = self.identities.get(winner_id)
+            if first_seen is None:
+                return False   # unknown identity — not yet registered
+            if block_slot - first_seen < MIN_IDENTITY_AGE:
+                return False   # identity too young
+
         self.chain.append(block)
         self.total_minted += block.get("amount", 0)
+
+        # 11. Process registrations AFTER block appended (H3 ordering).
+        # Registrations in this block are recorded with block_slot as
+        # first_seen_slot — deterministic across all nodes.
+        for reg in regs[:10]:
+            if Ledger._verify_registration(reg):
+                did = reg.get("device_id", "")
+                if did and did not in self.identities:
+                    self.identities[did] = block_slot
+
         self.save()
         return True
 
@@ -589,6 +674,18 @@ class Ledger:
 
             if self._attempt_reorg(valid_blocks):
                 changed = True
+
+            # Process registrations from all newly accepted blocks.
+            # Identities are recorded with the block slot they arrived in —
+            # same determinism as _add_block_locked. Only records if not present.
+            for block in valid_blocks:
+                bslot = block.get("slot", 0)
+                for reg in block.get("registrations", [])[:10]:
+                    if Ledger._verify_registration(reg):
+                        did = reg.get("device_id", "")
+                        if did and did not in self.identities:
+                            self.identities[did] = bslot
+                            changed = True
 
             if changed:
                 self._drain_orphan_pool_locked()
@@ -889,6 +986,7 @@ class Ledger:
                 "spent_tx_ids":      spent_tx_ids,
                 "chain_tip_hash":    chain_tip_hash,
                 "chain_tip_slot":    chain_tip_slot,
+                "identities":        dict(self.identities),
                 "timestamp":         int(time.time())
             }
 
@@ -988,6 +1086,11 @@ class Ledger:
             self.checkpoints.append(checkpoint)
             self._spent_tx_ids_set = set(checkpoint.get("spent_tx_ids", []))
             self.total_minted = checkpoint.get("total_minted", 0)
+            # Merge identities — always keep earliest first_seen_slot (H4).
+            for did, slot in checkpoint.get("identities", {}).items():
+                if isinstance(did, str) and isinstance(slot, int):
+                    if did not in self.identities or slot < self.identities[did]:
+                        self.identities[did] = slot
             self.save()
             return True
 
@@ -1828,6 +1931,29 @@ class Network:
                                   end="", flush=True)
                             self.broadcast({"type": "CHECKPOINT", "checkpoint": cp})
 
+            elif msg_type == "REGISTER":
+                # Identity registration gossip.
+                # Validate, store in node's pending pool, gossip once.
+                # The REGISTER becomes authoritative only when included in a block.
+                did = msg.get("device_id", "")
+                if not (isinstance(did, str) and len(did) == 64
+                        and all(c in "0123456789abcdef" for c in did)):
+                    return
+                if not Ledger._verify_registration(msg):
+                    return
+                gid = f"register:{did}"
+                with self._seen_lock:
+                    if gid in self.seen_ids:
+                        return
+                    self.seen_ids.add(gid)
+                # Store in node's pending registrations pool
+                node = self._node_ref
+                if node:
+                    with node._pending_regs_lock:
+                        if did not in self.ledger.identities and did not in node._pending_regs:
+                            node._pending_regs[did] = msg
+                threading.Thread(target=self.broadcast, args=(msg, None), daemon=True).start()
+
             elif msg_type == "LOTTERY_COMMIT":
                 # Gap 3: P2P commit gossip.
                 # Validate structure and staleness, store, then re-gossip once.
@@ -1997,10 +2123,12 @@ class Node:
         # M1 FIX: _my_tickets protected by its own lock.
         # Eliminates RuntimeError from concurrent read-in-lottery /
         # delete-in-cleanup without lock.
-        self._my_tickets      = {}
-        self._my_tickets_lock = threading.Lock()
-        self._commits         = {}
-        self._lottery_lock    = threading.Lock()
+        self._my_tickets          = {}
+        self._my_tickets_lock     = threading.Lock()
+        self._commits             = {}
+        self._lottery_lock        = threading.Lock()
+        self._pending_regs        = {}   # {device_id: reg_dict} waiting for block inclusion
+        self._pending_regs_lock   = threading.Lock()
 
     def _acquire_lock(self):
         import sys
@@ -2090,14 +2218,15 @@ class Node:
             print("\n" + "═"*54)
             print("  ⚠️  IMPORTANT — READ BEFORE SETTING YOUR PASSWORD")
             print("═"*54)
-            print("  Your wallet is being created and anchored to the")
-            print("  live Timpal network. This can only be done ONCE")
-            print("  per IP address every 83 minutes.")
-            print("")
-            print("  If you make a mistake with your password or")
-            print("  lose your wallet file, you must wait up to")
-            print("  83 minutes before creating a new wallet.")
-            print("")
+            if not genesis_phase:
+                print("  Your wallet is being created and anchored to the")
+                print("  live Timpal network. This can only be done ONCE")
+                print("  per IP address every 83 minutes.")
+                print("")
+                print("  If you make a mistake with your password or")
+                print("  lose your wallet file, you must wait up to")
+                print("  83 minutes before creating a new wallet.")
+                print("")
             print("  BACK UP YOUR WALLET FILE IMMEDIATELY AFTER CREATION:")
             print(f"  {WALLET_FILE}")
             print("═"*54)
@@ -2112,6 +2241,40 @@ class Node:
                 self.wallet.save(password=pw)
                 print("  Wallet encrypted and saved.")
                 break
+
+    def _build_register_msg(self) -> dict:
+        """Build a signed REGISTER message for this node's identity."""
+        did     = self.wallet.device_id
+        gbh     = self.wallet.genesis_block_hash or ""
+        payload = f"{did}:{gbh}".encode()
+        sig     = self.wallet.sign(payload)
+        return {
+            "type":               "REGISTER",
+            "device_id":          did,
+            "public_key":         self.wallet.get_public_key_hex(),
+            "genesis_block_hash": gbh,
+            "signature":          sig,
+            "version":            VERSION
+        }
+
+    def _send_register(self):
+        """Broadcast our REGISTER message to bootstrap and all peers.
+        Called at node startup so peers can record our identity and include
+        us in their pending registrations pool for block inclusion.
+        """
+        msg = self._build_register_msg()
+        # Add ourselves to our own pending pool — we include our own
+        # registration in the next block we produce.
+        with self._pending_regs_lock:
+            did = self.wallet.device_id
+            if did not in self.ledger.identities:
+                self._pending_regs[did] = msg
+        # Broadcast to peers
+        threading.Thread(
+            target=self.network.broadcast, args=(msg, None), daemon=True
+        ).start()
+        # Also send to bootstrap for defense-in-depth
+        self._bootstrap_submit(msg)
 
     _tx_rate      = {}
     _tx_rate_lock = threading.Lock()
@@ -2426,6 +2589,22 @@ class Node:
             return
 
         reward_id = f"reward:{time_slot}"
+
+        # Collect up to 10 pending registrations to embed in this block.
+        # Remove included entries from the pool — they will be recorded
+        # on all nodes when this block is accepted.
+        with self._pending_regs_lock:
+            regs_to_include = []
+            included_dids   = []
+            for did, reg in list(self._pending_regs.items()):
+                if did not in self.ledger.identities:
+                    regs_to_include.append(reg)
+                    included_dids.append(did)
+                if len(regs_to_include) >= 10:
+                    break
+            for did in included_dids:
+                del self._pending_regs[did]
+
         block = {
             "reward_id":      reward_id,
             "slot":           time_slot,
@@ -2438,7 +2617,8 @@ class Node:
             "vrf_sig":        winner["sig"],
             "vrf_public_key": winner["public_key"],
             "nodes":          len(active_nodes) if active_nodes else 1,
-            "type":           "block_reward"
+            "type":           "block_reward",
+            "registrations":  regs_to_include
         }
 
         if not self.ledger.add_block(block):
@@ -3059,6 +3239,7 @@ class Node:
         print("  Quantum-Resistant | Worldwide | Instant | Chain-Anchored")
         print("═"*54)
         self.network.start()
+        self._send_register()   # announce identity to peers for registration
         balance = self.ledger.get_balance(self.wallet.device_id)
         summary = self.ledger.get_summary()
         tip_hash, tip_slot = self.ledger._get_tip()

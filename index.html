@@ -233,6 +233,7 @@
         <div class="feature"><div class="feature-icon">🔐</div><div class="feature-title">Quantum-Resistant</div><div class="feature-desc">Uses Dilithium3, the NIST 2024 post-quantum standard. Future-proof against quantum computers for decades.</div></div>
         <div class="feature"><div class="feature-icon">⚡</div><div class="feature-title">Fast Finality</div><div class="feature-desc">Blocks confirmed after 6 slots (~30 seconds). No mining, no proof-of-work. Transactions settle quickly and irreversibly.</div></div>
         <div class="feature"><div class="feature-icon">🎲</div><div class="feature-title">Eligibility-Gated VRF Lottery</div><div class="feature-desc">Every 5 seconds, one node wins 1.0575 TMPL. Only ~10 nodes are eligible per slot regardless of network size. Commits and reveals flow directly between peers — the lottery runs even if bootstrap is offline. The winner is determined by an unpredictable collective target — no node can predict or manipulate the outcome.</div></div>
+        <div class="feature"><div class="feature-icon">🪪</div><div class="feature-title">On-Chain Identity Registration</div><div class="feature-desc">Every new node registers its identity on-chain via a signed REGISTER transaction embedded in a block. Only identities registered for at least 200 slots (~16.7 minutes) can produce valid blocks. Enforced at consensus — no shortcut, no bypass.</div></div>
         <div class="feature"><div class="feature-icon">🖥️</div><div class="feature-title">One Node Per Device</div><div class="feature-desc">The protocol enforces one node per physical device at the OS level. Running ten terminals gives you zero advantage.</div></div>
         <div class="feature"><div class="feature-icon">📒</div><div class="feature-title">Distributed Ledger</div><div class="feature-desc">Every node holds the complete chain. Each block is cryptographically linked to the previous one — a single, tamper-evident history anchored by integer arithmetic throughout.</div></div>
         <div class="feature"><div class="feature-icon">🌐</div><div class="feature-title">Worldwide Network</div><div class="feature-desc">Peer discovery via UDP broadcast locally and TCP bootstrap globally. Nodes find each other automatically.</div></div>
@@ -263,6 +264,7 @@
       <tr><td class="prop">Round Interval</td><td class="val">Every 5 seconds</td></tr>
       <tr><td class="prop">Distribution Period</td><td class="val">37.5 years</td></tr>
       <tr><td class="prop">Eligible Nodes Per Slot</td><td class="val">~10 (fixed target, regardless of network size)</td></tr>
+      <tr><td class="prop">Identity Maturation Period</td><td class="val">200 slots (~16.7 minutes)</td></tr>
       <tr><td class="prop">Confirmation Depth</td><td class="val">6 slots (~30 seconds)</td></tr>
       <tr><td class="prop">Checkpoint Interval</td><td class="val">Every 1,000 slots (~83 minutes)</td></tr>
       <tr><td class="prop">Transaction Fee</td><td class="val accent">0.0005 TMPL → slot winner (all eras)</td></tr>
@@ -368,6 +370,7 @@
       <a class="docs-nav-link" onclick="scrollToDoc('wallet')">Your Wallet</a>
       <div class="docs-nav-title">Protocol</div>
       <a class="docs-nav-link" onclick="scrollToDoc('how')">How it Works</a>
+      <a class="docs-nav-link" onclick="scrollToDoc('identity')">Identity Registration</a>
       <a class="docs-nav-link" onclick="scrollToDoc('vrf')">VRF Lottery</a>
       <a class="docs-nav-link" onclick="scrollToDoc('ledger')">Ledger</a>
       <a class="docs-nav-link" onclick="scrollToDoc('network')">Network</a>
@@ -394,7 +397,7 @@ python3 timpal.py</div>
         <div class="docs-h2">Running a Node</div>
         <p class="docs-p">When you start TIMPAL for the first time, it creates a quantum-resistant wallet and connects to the worldwide network automatically.</p>
         <div class="docs-callout">⚠️ Keep your Mac awake while the node is running. Use <span class="inline-code">caffeinate -i python3 timpal.py</span> on Mac to prevent sleep.</div>
-        <p class="docs-p">Your node immediately joins the VRF lottery. Every 5 seconds, one node wins 1.0575 TMPL. You don't need to do anything — just keep it running.</p>
+        <p class="docs-p">Your node broadcasts a signed identity registration to the network and waits for it to be included in a block. After 200 slots (~16.7 minutes) your identity is mature and your node begins participating in the VRF lottery automatically.</p>
         <div class="docs-callout">Only one node can run per device. If you try to open a second terminal, the protocol blocks it immediately.</div>
       </div>
       <div class="docs-section" id="doc-commands">
@@ -427,6 +430,23 @@ python3 timpal.py send &lt;address&gt; &lt;amount&gt;</div>
         <div class="docs-h2">How it Works</div>
         <p class="docs-p">TIMPAL is a chain-anchored distributed ledger. Every node holds a complete copy. There is no proof-of-work. Each reward is a block cryptographically linked to the previous one. All balances, amounts, and fees are stored as integer units (1 TMPL = 100,000,000 units) to eliminate floating-point divergence across hardware.</p>
       </div>
+      <div class="docs-section" id="doc-identity">
+        <div class="docs-h2">Identity Registration</div>
+        <p class="docs-p">Every new node broadcasts a signed <span class="inline-code">REGISTER</span> message to its peers. This message contains the node's device ID, public key, and a Dilithium3 signature proving ownership. Peers collect pending registrations and embed up to 10 of them in each block they produce.</p>
+        <p class="docs-p">When a block is accepted by the network, all registrations it contains are recorded with the block's slot number as the identity's <span class="inline-code">first_seen_slot</span>. This value is stored in the ledger's identity table and survives every checkpoint — it can never be lost or pruned.</p>
+        <div class="docs-callout">An identity must be registered on-chain for at least <strong>200 slots (~16.7 minutes)</strong> before it can produce a valid block. This is enforced at the consensus layer — every node independently rejects blocks from identities that are too young, regardless of whether they contacted the bootstrap server.</div>
+        <p class="docs-p">This design closes the instant-activation attack: an attacker cannot create a new identity and immediately use it to win slots. They must register on-chain, wait the maturation period, and only then become eligible. Identity age is chain-derived — it cannot be forged, backdated, or bypassed via P2P.</p>
+        <div class="docs-code"><span class="comment"># Identity lifecycle</span>
+Node starts → broadcasts REGISTER message to peers
+Peer includes REGISTER in next block
+Block accepted → identities[device_id] = block.slot
+After 200 slots → identity is mature → eligible for lottery
+
+<span class="comment"># Consensus rule in every node</span>
+if block.slot >= 1000:  <span class="comment"># post-genesis phase</span>
+    if winner not in identities: reject
+    if block.slot - identities[winner] &lt; 200: reject</div>
+      </div>
       <div class="docs-section" id="doc-vrf">
         <div class="docs-h2">VRF Lottery</div>
         <p class="docs-p">Every 5 seconds, one node wins 1.0575 TMPL via an eligibility-gated commit-reveal scheme. ~10 nodes participate per slot regardless of total network size.</p>
@@ -441,7 +461,7 @@ winner = min(nodes, key=lambda n: |ticket_int - target_int|)</div>
       </div>
       <div class="docs-section" id="doc-ledger">
         <div class="docs-h2">Ledger</div>
-        <p class="docs-p">Blocks at least 6 slots deep (~30 seconds) are final. The longer valid chain wins on fork. Out-of-order blocks are held in an orphan pool and attached once their parent arrives. Every 1,000 slots, a checkpoint prunes the raw history while preserving all balances. Before accepting a peer checkpoint, every node independently recomputes balances from its own chain history — a checkpoint with corrupted balances is rejected outright.</p>
+        <p class="docs-p">Blocks at least 6 slots deep (~30 seconds) are final. The longer valid chain wins on fork. Out-of-order blocks are held in an orphan pool and attached once their parent arrives. Every 1,000 slots, a checkpoint prunes the raw history while preserving all balances and the full identity table. Before accepting a peer checkpoint, every node independently recomputes balances from its own chain history — a checkpoint with corrupted balances is rejected outright.</p>
       </div>
       <div class="docs-section" id="doc-network">
         <div class="docs-h2">Network</div>
@@ -450,6 +470,7 @@ winner = min(nodes, key=lambda n: |ticket_int - target_int|)</div>
           <tr><td>Local</td><td>UDP broadcast on port 7778</td><td>Same WiFi network</td></tr>
           <tr><td>Global</td><td>TCP bootstrap at bootstrap.timpal.org:7777</td><td>Worldwide</td></tr>
           <tr><td>P2P Lottery</td><td>LOTTERY_COMMIT / LOTTERY_REVEAL direct gossip</td><td>Worldwide — no bootstrap required</td></tr>
+          <tr><td>Identity Gossip</td><td>REGISTER message direct gossip to peers</td><td>Worldwide — no bootstrap required</td></tr>
         </table>
       </div>
       <div class="docs-section" id="doc-tokenomics">
@@ -462,6 +483,7 @@ winner = min(nodes, key=lambda n: |ticket_int - target_int|)</div>
           <tr><td>Round Interval</td><td>Every 5 seconds</td></tr>
           <tr><td>Distribution Period</td><td>37.5 years</td></tr>
           <tr><td>Eligible Nodes Per Slot</td><td>~10</td></tr>
+          <tr><td>Identity Maturation</td><td>200 slots (~16.7 minutes)</td></tr>
           <tr><td>Confirmation Depth</td><td>6 slots (~30 seconds)</td></tr>
           <tr><td>Checkpoint Interval</td><td>Every 1,000 slots (~83 minutes)</td></tr>
           <tr><td>Transaction Fee</td><td>0.0005 TMPL → slot winner (all eras)</td></tr>
@@ -537,7 +559,6 @@ async function fetchExplorer() {
     document.getElementById('exp-pct').textContent = pct + '%';
     document.getElementById('exp-bar').style.width = pct + '%';
 
-    // v3.1 FIX: API returns recent_blocks (not recent_rewards)
     const rList  = document.getElementById('exp-rewards-list');
     const blocks = data.recent_blocks || [];
     if (blocks.length > 0) {

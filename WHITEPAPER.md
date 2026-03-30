@@ -2,15 +2,15 @@
 
 A Quantum-Resistant Peer-to-Peer Payment Protocol
 
-March 28, 2026 — v3.3
+March 30, 2026 — v3.3
 
 ---
 
 ## Abstract
 
-TIMPAL is a peer-to-peer payment protocol designed to function without banks, payment processors, or centralized infrastructure. It uses quantum-resistant Dilithium3 cryptography, a chain-anchored distributed ledger, an eligibility-gated commit-reveal VRF lottery, and a two-era economic model to create a fair, decentralized monetary system with a fixed supply of 250 million TMPL distributed over 37.5 years.
+TIMPAL is a peer-to-peer payment protocol designed to function without banks, payment processors, or centralized infrastructure. It uses quantum-resistant Dilithium3 cryptography, a chain-anchored distributed ledger, an eligibility-gated commit-reveal VRF lottery, on-chain identity registration with consensus-enforced maturation, and a two-era economic model to create a fair, decentralized monetary system with a fixed supply of 250 million TMPL distributed over 37.5 years.
 
-The protocol enforces one node per physical device, preventing Sybil attacks and ensuring that participation in the reward system remains fair regardless of computational resources. Every transaction costs 0.0005 TMPL, paid to the slot winner, from genesis. No pre-mine. No insider allocation. No central authority.
+The protocol enforces one node per physical device and requires every node to register its identity on-chain and wait 200 slots (~16.7 minutes) before participating in block production. Every transaction costs 0.0005 TMPL, paid to the slot winner, from genesis. No pre-mine. No insider allocation. No central authority.
 
 Genesis launched March 28, 2026 at 6:00 AM PST.
 
@@ -116,7 +116,7 @@ winner = min(verified_nodes, key=lambda d: (|ticket_int - target_int|, device_id
 
 Every node independently verifies all reveals using the committed hashes and Dilithium3 signatures, then picks the same winner using identical math. The bootstrap server stores commits and reveals but cannot influence the outcome — all verification and winner selection happens on the nodes.
 
-**Block construction.** The winning node builds a block containing the winner's identity, the reward amount, all four VRF proof fields, and — critically — the SHA-256 hash of the previous block (`prev_hash`). This links the new block to the chain. The block is added to the local chain and broadcast to all peers.
+**Block construction.** The winning node builds a block containing the winner's identity, the reward amount, all four VRF proof fields, any pending identity registrations (up to 10), and — critically — the SHA-256 hash of the previous block (`prev_hash`). This links the new block to the chain. The block is added to the local chain and broadcast to all peers.
 
 **SUBMIT_TIP.** After winning, the node also notifies the bootstrap server of the new chain tip. This allows joining nodes to immediately know how far ahead the chain is and request only the blocks they are missing.
 
@@ -124,7 +124,7 @@ Every node independently verifies all reveals using the committed hashes and Dil
 
 Selective reveal is a potential attack: a node commits in every slot, then only reveals when it has computed that it would win, gaining information about the outcome before deciding whether to participate. This is prevented by the reveal obligation.
 
-Any node that commits but does not reveal is recorded as a missed reveal. After two consecutive missed reveals, the node is banned from committing for 10 slots. During a ban, the bootstrap server rejects all commit submissions from that device ID, and the node skips those slots entirely. One missed reveal is forgiven as a legitimate network hiccup. Two consecutive misses trigger the ban.
+Any node that commits but does not reveal is recorded as a missed reveal. After one missed reveal, the node is banned from committing for 10 slots. During a ban, the bootstrap server rejects all commit submissions from that device ID, and the node skips those slots entirely.
 
 The ban counter resets to zero after a ban is served. This makes selective reveal economically unattractive: the expected gain from cherry-picking a winning slot does not outweigh the cost of the 10-slot ban that follows.
 
@@ -163,7 +163,7 @@ Each device is limited to 60 transactions per minute. This prevents spam and flo
 
 Without checkpointing, the ledger would grow impractically large over 37.5 years, making it difficult for nodes in regions with limited storage or bandwidth.
 
-Every 1,000 slots (approximately 83 minutes), every node independently creates a checkpoint. The checkpoint records the balance of every address at that moment — including all fee rewards earned up to that point — the total supply minted, the SHA-256 hash of the chain tip at the time of pruning, and cryptographic hashes of all pruned rewards, transactions, and fee rewards. The chain tip hash is stored so that blocks produced after the checkpoint can be correctly linked — a block's `prev_hash` must match the stored tip even though the block it references has been pruned.
+Every 1,000 slots (approximately 83 minutes), every node independently creates a checkpoint. The checkpoint records the balance of every address at that moment — including all fee rewards earned up to that point — the complete identity registration table, the total supply minted, the SHA-256 hash of the chain tip at the time of pruning, and cryptographic hashes of all pruned rewards, transactions, and fee rewards. The chain tip hash is stored so that blocks produced after the checkpoint can be correctly linked — a block's `prev_hash` must match the stored tip even though the block it references has been pruned.
 
 Before accepting a checkpoint received from a peer, every node independently recomputes the balance of every address from its own local chain history and rejects the checkpoint if the recomputed balances do not match. This means a checkpoint with a corrupted or manipulated balance distribution cannot be accepted by honest nodes — the local chain history is the ground truth, not the peer's claim.
 
@@ -182,6 +182,52 @@ The minimum version is a constant defined in both timpal.py and bootstrap.py. Wh
 ### 3.12 Push Authentication
 
 Every node periodically pushes its ledger data to the explorer API at timpal.org. There is no shared secret. Instead, each push is signed with the node's Dilithium3 private key. The API verifies that the signature is valid and that `sha256(public_key) == device_id` before accepting any data. A node cannot impersonate another node's push — it would require the target's private key.
+
+### 3.13 On-Chain Identity Registration and Maturation
+
+Every new node broadcasts a signed `REGISTER` message to its peers on startup. This message contains the node's device ID, public key, genesis block hash (if applicable), and a Dilithium3 signature over `f"{device_id}:{genesis_block_hash}"`. Peers validate the signature and device ID derivation, then store the registration in a pending pool.
+
+When a node wins a slot and produces a block, it embeds up to 10 pending registrations from its pool directly into the block's `registrations` field. When any node accepts that block, it records each valid registration with the block's slot number as the identity's `first_seen_slot`:
+
+```
+identities[device_id] = block.slot
+```
+
+This value is consensus-derived — it comes from the chain, not from any self-declared field or network message. It cannot be forged, backdated, or manipulated by the registering node.
+
+**Maturation rule.** Every node enforces the following check inside `_add_block_locked()`, the single function that accepts blocks into the chain:
+
+```
+if block.slot >= 1000:  # post-genesis phase only
+    first_seen = identities.get(winner_id)
+    if first_seen is None:
+        return False   # unknown identity — not registered on-chain
+    if block.slot - first_seen < MIN_IDENTITY_AGE:
+        return False   # identity too young
+```
+
+`MIN_IDENTITY_AGE = 200` slots (~16.7 minutes). This check runs before the block is appended, so self-registration in the same block cannot bypass it — a producer cannot include their own REGISTER in the same block they are winning.
+
+**Ordering invariant.** Registrations embedded in a block are processed after the block is appended to the chain. This ensures:
+
+1. The maturation check sees the identity table as it existed before this block
+2. New registrations take effect from this block's slot onward
+3. A block producer cannot register and immediately use that identity in the same block
+
+**Checkpoint persistence.** The identity table is included in every checkpoint:
+
+```
+checkpoint["identities"] = {device_id: first_seen_slot, ...}
+```
+
+When a checkpoint is applied, identities are merged using earliest-slot-wins logic. The identity table is never pruned — it grows with the number of unique nodes ever seen, which is bounded by the wallet creation rate. A node joining the network after the genesis phase receives the identity table in the first checkpoint it downloads and can immediately enforce the maturation rule for all future blocks.
+
+**Security properties.** This design provides:
+
+- **No instant activation.** A new identity must wait 200 slots after its REGISTER is included in a block before it can produce valid blocks. An attacker cannot create a wallet and immediately win slots.
+- **No bypass via P2P.** Even if an attacker skips the bootstrap server entirely and connects only via P2P gossip, their blocks will be rejected by every honest node because their `first_seen_slot` will be either absent (never registered) or too recent.
+- **Determinism.** Every honest node independently derives the same `first_seen_slot` from the same chain — there is no coordination required and no possibility of disagreement between nodes that share the same chain.
+- **Pruning compatibility.** Because identity data lives in checkpoint state rather than raw block history, it survives the checkpoint pruning cycle indefinitely.
 
 ---
 
@@ -213,6 +259,7 @@ Every node periodically pushes its ledger data to the explorer API at timpal.org
 | Round Interval | Every 5 seconds |
 | Distribution Period | 37.5 years |
 | Eligible Nodes Per Slot | ~10 (fixed target, regardless of network size) |
+| Identity Maturation Period | 200 slots (~16.7 minutes) |
 | Transaction Fee (Era 1) | 0.0005 TMPL → slot winner |
 | Transaction Fee (Era 2) | 0.0005 TMPL → slot winner |
 | Checkpoint Interval | Every 1,000 slots (~83 minutes) |
@@ -230,7 +277,12 @@ Every node periodically pushes its ledger data to the explorer API at timpal.org
 
 ### 6.1 Sybil Resistance
 
-One node per device enforced at the OS level. Additionally, the eligibility gate scales the participation threshold inversely with network size — multiplying device count multiplies infrastructure cost while expected reward per device stays constant. There is no economic incentive to run many nodes.
+Sybil resistance operates at four independent layers:
+
+1. **One node per device** enforced at the OS level via file lock.
+2. **Eligibility gate** scales the participation threshold inversely with network size — multiplying device count multiplies infrastructure cost while expected reward per device stays constant.
+3. **Chain-anchored wallet creation** (post-genesis phase): every new wallet must anchor its `device_id` to a live block hash from the running network. Offline mass wallet generation is physically impossible — the chain produces block hashes at fixed speed regardless of attacker CPU.
+4. **On-chain identity maturation**: every identity must register on-chain and wait 200 slots (~16.7 minutes) before it can produce valid blocks. This check is enforced at the consensus layer in every node — it cannot be bypassed via P2P, bootstrap, or any other path. An attacker creating many wallets must wait 200 slots per identity before any of them become useful, converting a potential burst attack into a slow, expensive, time-constrained operation.
 
 ### 6.2 Double-Spend Prevention
 
@@ -238,7 +290,7 @@ Every node validates sender balance against the full chain before accepting any 
 
 ### 6.3 Quantum Resistance
 
-Dilithium3 protects all signatures — transactions, VRF tickets, and push authentication — against both classical and quantum computer attacks.
+Dilithium3 protects all signatures — transactions, VRF tickets, identity registrations, and push authentication — against both classical and quantum computer attacks.
 
 ### 6.4 VRF Integrity
 
@@ -253,7 +305,7 @@ All four checks must pass. A block missing any VRF field is rejected outright �
 
 ### 6.5 Selective Reveal Prevention
 
-The collective target is the SHA256 of all tickets sorted and joined. It cannot be known until the reveal window closes. A node that commits cannot predict whether its ticket will win, so there is no information advantage to committing early and revealing selectively. Nodes that commit but do not reveal accumulate missed-reveal counts and are banned for 10 slots after two consecutive misses.
+The collective target is the SHA256 of all tickets sorted and joined. It cannot be known until the reveal window closes. A node that commits cannot predict whether its ticket will win, so there is no information advantage to committing early and revealing selectively. Nodes that commit but do not reveal are banned for 10 slots after one missed reveal.
 
 ### 6.6 Chain Integrity
 
@@ -280,9 +332,10 @@ It cannot:
 
 - Stop lottery operation (P2P gossip delivers commits and reveals independently of bootstrap)
 - Forge a valid VRF ticket (requires the target node's private key)
-- Force a node to accept an invalid block (every node verifies chain linkage and VRF independently)
+- Force a node to accept an invalid block (every node verifies chain linkage, VRF, and identity maturation independently)
 - Steal funds or alter balances
 - Corrupt a checkpoint (every node independently recomputes balances from local chain history before accepting)
+- Bypass identity maturation (the maturation check is enforced at the consensus layer, not at bootstrap)
 
 Community-operated bootstrap servers reduce the impact of any single server failing or misbehaving. The more servers, the more resilient the network. Bootstrap is the door to the network — not the lock.
 
@@ -302,7 +355,7 @@ Community bootstrap servers, community tools, and community applications are all
 
 TIMPAL provides what the global financial system has failed to provide: a way for any person, anywhere, to hold and send value — without asking permission.
 
-The eligibility-gated lottery ensures the reward system remains fair and efficient whether the network has 10 nodes or 10 million. The collective target prevents any node from predicting or manipulating the outcome. The reveal obligation closes the selective-reveal attack. P2P lottery gossip ensures the network continues producing blocks even if every bootstrap server goes offline. Independent checkpoint balance verification means no node can corrupt the ledger's balance history without detection. The chain spine anchors all rewards to a single, deterministic history. Chain-weight fork resolution with deterministic tie-breaking guarantees global convergence under any network partition. The two-era model ensures the network is self-sustaining forever — first through the lottery and fees, then through fees alone.
+The eligibility-gated lottery ensures the reward system remains fair and efficient whether the network has 10 nodes or 10 million. The collective target prevents any node from predicting or manipulating the outcome. The reveal obligation closes the selective-reveal attack. P2P lottery gossip ensures the network continues producing blocks even if every bootstrap server goes offline. On-chain identity registration with consensus-enforced maturation prevents instant identity activation — every new participant must establish a verifiable on-chain history before winning slots. Independent checkpoint balance verification means no node can corrupt the ledger's balance history without detection. The chain spine anchors all rewards to a single, deterministic history. Chain-weight fork resolution with deterministic tie-breaking guarantees global convergence under any network partition. The two-era model ensures the network is self-sustaining forever — first through the lottery and fees, then through fees alone.
 
 ---
 

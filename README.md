@@ -24,7 +24,7 @@ curl -O https://raw.githubusercontent.com/EvokiTimpal/timpal/main/timpal.py
 python3 timpal.py
 ```
 
-Your node starts, creates a quantum-resistant wallet, prompts you to set a password to encrypt it, connects to the worldwide network, and joins the reward lottery automatically.
+Your node starts, creates a quantum-resistant wallet, prompts you to set a password to encrypt it, connects to the worldwide network, registers your identity on-chain, and joins the reward lottery automatically after a short maturation period.
 
 ---
 
@@ -48,7 +48,8 @@ Your node starts, creates a quantum-resistant wallet, prompts you to set a passw
 - **Quantum-resistant cryptography** — Dilithium3, NIST 2024 post-quantum standard.
 - **Encrypted wallet** — Private key encrypted with AES-256-GCM and a password you set. Never stored in plaintext.
 - **~30-second finality** — Blocks confirmed after 6 slots. Transactions are final and irreversible once confirmed.
-- **Checkpoints every ~83 minutes** — Every 1,000 slots, all nodes independently create a checkpoint. Before accepting a peer checkpoint, every node independently recomputes balances from its own chain history — a corrupted checkpoint cannot be accepted. Prunes raw history while preserving all balances. Keeps the ledger lightweight forever.
+- **On-chain identity registration** — When your node starts, it broadcasts a signed REGISTER message to peers. A block producer embeds it in the next block. Your identity is then on-chain with a verifiable `first_seen_slot`. After 200 slots (~16.7 minutes) your identity is mature and you become eligible to win slots. This maturation rule is enforced at the consensus layer on every node — no bypass possible via P2P or any other path.
+- **Checkpoints every ~83 minutes** — Every 1,000 slots, all nodes independently create a checkpoint. Before accepting a peer checkpoint, every node independently recomputes balances from its own chain history — a corrupted checkpoint cannot be accepted. The full identity table is included in every checkpoint and survives pruning. Keeps the ledger lightweight forever.
 - **Eligibility-gated VRF lottery** — Every 5 seconds, one node wins 1.0575 TMPL. Only ~10 nodes are randomly eligible per slot regardless of how large the network grows, keeping participation fair and efficient at any scale. The winner is selected by a commit-reveal scheme — provably fair, no node has a permanent advantage.
 - **P2P lottery gossip** — Commits and reveals are broadcast directly between peers as well as through the bootstrap server. If bootstrap goes offline, the lottery keeps running — nodes collect lottery data from each other directly.
 - **Collective target** — The winning ticket is the one closest to a target that cannot be known until all reveals are in. No node can predict or cherry-pick the outcome.
@@ -68,6 +69,7 @@ Your node starts, creates a quantum-resistant wallet, prompts you to set a passw
 | Round interval | 5 seconds |
 | Distribution period | 37.5 years |
 | Eligible nodes per slot | ~10 (fixed target, regardless of network size) |
+| Identity maturation period | 200 slots (~16.7 minutes) |
 | Confirmation depth | 6 slots (~30 seconds) |
 | Checkpoint interval | Every 1,000 slots (~83 minutes) |
 | Transaction fee | 0.0005 TMPL → slot winner (all eras) |
@@ -110,28 +112,7 @@ curl -O https://raw.githubusercontent.com/EvokiTimpal/timpal/main/timpal.py
 python3 timpal.py
 ```
 
----
-
-## Auto-start on boot
-
-Run your node automatically every time your computer starts.
-
-**Mac:**
-```
-bash autostart_mac.sh
-```
-
-**Linux:**
-```
-bash autostart_linux.sh
-```
-
-**Windows:**
-```
-autostart_windows.bat
-```
-
-To stop auto-start, see instructions printed after running the script.
+Your identity will be registered on-chain automatically. After 200 slots (~16.7 minutes) your node is fully active and participating in the lottery.
 
 ---
 

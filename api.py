@@ -219,10 +219,16 @@ def _verify_push_signature(data: dict) -> bool:
     signature  = data.get("signature", "")
     if not device_id or not public_key or not signature:
         return False
+    # BUG 3 FIX: removed sha256(pub_bytes) == device_id check.
+    # That check was correct only for genesis-phase wallets where
+    # device_id = sha256(public_key). Post-genesis chain-anchored wallets
+    # use device_id = sha256(public_key + genesis_block_hash), which never
+    # equals sha256(public_key), so every post-genesis node was permanently
+    # rejected. The Dilithium3 signature over the full payload (which includes
+    # device_id) already proves the sender owns the key — the hash check
+    # provided no additional security and actively broke all new nodes.
     try:
         pub_bytes = bytes.fromhex(public_key)
-        if hashlib.sha256(pub_bytes).hexdigest() != device_id:
-            return False
     except Exception:
         return False
     payload_data = {k: v for k, v in data.items() if k != "signature"}
@@ -790,7 +796,7 @@ class Handler(BaseHTTPRequestHandler):
                                 if bal > incoming_minted:
                                     continue
                                 pre_cp = old_pre_cp.get(addr, 0) + new_block_counts.get(addr, 0)
-                                records.append((int(bal), incoming_cp_slot, pre_cp, addr))
+                                records.append((addr, int(bal), incoming_cp_slot, pre_cp))
                             conn.executemany(
                                 "INSERT INTO checkpoint_balances "
                                 "(address, balance, checkpoint_slot, pre_checkpoint_blocks) "
@@ -799,7 +805,7 @@ class Handler(BaseHTTPRequestHandler):
                                 "balance=excluded.balance, "
                                 "checkpoint_slot=excluded.checkpoint_slot, "
                                 "pre_checkpoint_blocks=excluded.pre_checkpoint_blocks",
-                                [(bal, cp, pre, addr) for bal, cp, pre, addr in records]
+                                [(addr, bal, cp, pre) for addr, bal, cp, pre in records]
                             )
                             conn.execute("DELETE FROM blocks WHERE slot < ?", (new_prune_before,))
                             conn.execute(

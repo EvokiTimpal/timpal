@@ -534,11 +534,26 @@ class Ledger:
         # 11. Process registrations AFTER block appended (H3 ordering).
         # Registrations in this block are recorded with block_slot as
         # first_seen_slot — deterministic across all nodes.
+        #
+        # OPTION 2 FIX: Post-genesis (slot >= 1000), only chain-anchored
+        # registrations are accepted. A chain-anchored registration has a
+        # valid 64-char hex genesis_block_hash, proving the wallet was created
+        # using a real block from the live network. Genesis-style wallets
+        # (device_id = sha256(pubkey) only, no genesis_block_hash) can be
+        # mass-created offline and injected via P2P without ever touching
+        # bootstrap — this closes that bypass.
         for reg in regs[:10]:
             if Ledger._verify_registration(reg):
                 did = reg.get("device_id", "")
-                if did and did not in self.identities:
-                    self.identities[did] = block_slot
+                if not did or did in self.identities:
+                    continue
+                # Post-genesis: require chain-anchored registration
+                if block_slot >= 1000:
+                    gbh = reg.get("genesis_block_hash", "")
+                    if not (isinstance(gbh, str) and len(gbh) == 64
+                            and all(c in "0123456789abcdef" for c in gbh)):
+                        continue
+                self.identities[did] = block_slot
 
         self.save()
         return True
@@ -652,6 +667,12 @@ class Ledger:
                     changed = True
 
             # Chain extension
+            # BUG 1a FIX: identity maturation enforced inline before append.
+            # BUG 1b FIX: registrations processed per-block only for accepted blocks.
+            #             The old separate loop over valid_blocks processed registrations
+            #             from orphaned/rejected blocks, allowing an attacker to embed
+            #             a REGISTER in a fake block and record an artificially early
+            #             first_seen_slot — a clean maturation bypass. Removed.
             for block in valid_blocks:
                 tip_hash, tip_slot = self._get_tip()
                 if block.get("prev_hash") != tip_hash:
@@ -668,24 +689,38 @@ class Ledger:
                     continue
                 if self.total_minted + block.get("amount", 0) > TOTAL_SUPPLY:
                     continue
+                # BUG 1a FIX: identity maturation check — mirrors _add_block_locked step 10.
+                # Uses block["slot"] not get_current_slot() for cross-node determinism.
+                # Must run BEFORE append so self-registration in the same block cannot
+                # bypass the check (same ordering invariant as _add_block_locked).
+                block_slot = block.get("slot")
+                if block_slot >= 1000:
+                    winner_id = block.get("winner_id", "")
+                    first_seen = self.identities.get(winner_id)
+                    if first_seen is None or block_slot - first_seen < MIN_IDENTITY_AGE:
+                        continue
                 self.chain.append(block)
                 self.total_minted += block.get("amount", 0)
                 changed = True
-
-            if self._attempt_reorg(valid_blocks):
-                changed = True
-
-            # Process registrations from all newly accepted blocks.
-            # Identities are recorded with the block slot they arrived in —
-            # same determinism as _add_block_locked. Only records if not present.
-            for block in valid_blocks:
+                # BUG 1b FIX: process registrations inline, only for accepted blocks.
+                # This also ensures registrations from block N are available when
+                # checking block N+MIN_IDENTITY_AGE later in the same merge batch.
+                # OPTION 2 FIX: post-genesis, require chain-anchored registration.
                 bslot = block.get("slot", 0)
                 for reg in block.get("registrations", [])[:10]:
                     if Ledger._verify_registration(reg):
                         did = reg.get("device_id", "")
-                        if did and did not in self.identities:
-                            self.identities[did] = bslot
-                            changed = True
+                        if not did or did in self.identities:
+                            continue
+                        if bslot >= 1000:
+                            gbh = reg.get("genesis_block_hash", "")
+                            if not (isinstance(gbh, str) and len(gbh) == 64
+                                    and all(c in "0123456789abcdef" for c in gbh)):
+                                continue
+                        self.identities[did] = bslot
+
+            if self._attempt_reorg(valid_blocks):
+                changed = True
 
             if changed:
                 self._drain_orphan_pool_locked()
@@ -786,9 +821,15 @@ class Ledger:
 
         # Validate fork blocks sequentially
         # NOTE: MAX_SLOT_GAP intentionally NOT checked during reorg (historical chains)
-        validated = []
-        prev_hash = anchor_hash
-        prev_slot = anchor_slot
+        # BUG 2a FIX: identity maturation enforced per-block using a fork-local
+        #             identity table. fork_identities starts as a copy of the current
+        #             ledger identities and accumulates registrations from each accepted
+        #             fork block in order — so a REGISTER in fork block N makes that
+        #             identity available for the maturation check of fork block N+200.
+        validated      = []
+        prev_hash      = anchor_hash
+        prev_slot      = anchor_slot
+        fork_identities = dict(self.identities)  # in-fork identity tracking
 
         for block in fork_blocks:
             pub  = block.get("vrf_public_key", "")
@@ -809,9 +850,29 @@ class Ledger:
                 break
             if slot <= prev_slot:
                 break
+            # BUG 2a FIX: identity maturation check using fork-local identity table.
+            # Uses block["slot"] for determinism — same rule as _add_block_locked.
+            if slot >= 1000:
+                first_seen = fork_identities.get(wid)
+                if first_seen is None or slot - first_seen < MIN_IDENTITY_AGE:
+                    break
             validated.append(block)
             prev_hash = compute_block_hash(block)
             prev_slot = slot
+            # Accumulate registrations from this fork block into fork_identities
+            # so subsequent fork blocks can use them for their own maturation checks.
+            # OPTION 2 FIX: post-genesis, require chain-anchored registration.
+            for reg in block.get("registrations", [])[:10]:
+                if Ledger._verify_registration(reg):
+                    did = reg.get("device_id", "")
+                    if not did or did in fork_identities:
+                        continue
+                    if slot >= 1000:
+                        gbh = reg.get("genesis_block_hash", "")
+                        if not (isinstance(gbh, str) and len(gbh) == 64
+                                and all(c in "0123456789abcdef" for c in gbh)):
+                            continue
+                    fork_identities[did] = slot
 
         if not validated:
             return False
@@ -859,6 +920,24 @@ class Ledger:
         self.chain = self.chain[:keep_count] + validated
         self.recalculate_totals()
         self._prune_invalid_transactions()
+
+        # BUG 2b FIX: record registrations from newly adopted (reorged-in) blocks.
+        # Before this fix, a successful reorg silently dropped all registrations
+        # from the fork chain, leaving winners unregistered and future blocks broken.
+        # OPTION 2 FIX: post-genesis, require chain-anchored registration.
+        for block in validated:
+            bslot = block.get("slot", 0)
+            for reg in block.get("registrations", [])[:10]:
+                if Ledger._verify_registration(reg):
+                    did = reg.get("device_id", "")
+                    if not did or did in self.identities:
+                        continue
+                    if bslot >= 1000:
+                        gbh = reg.get("genesis_block_hash", "")
+                        if not (isinstance(gbh, str) and len(gbh) == 64
+                                and all(c in "0123456789abcdef" for c in gbh)):
+                            continue
+                    self.identities[did] = bslot
 
         tip_slot   = validated[-1].get("slot", "?")
         fork_depth = (tip_slot - anchor_slot) if isinstance(tip_slot, int) else "?"
@@ -1935,12 +2014,28 @@ class Network:
                 # Identity registration gossip.
                 # Validate, store in node's pending pool, gossip once.
                 # The REGISTER becomes authoritative only when included in a block.
+                #
+                # OPTION 2 FIX: Post-genesis, only chain-anchored REGISTER messages
+                # are accepted into the pending pool. This closes the P2P bypass:
+                # an attacker with a modified client could previously create unlimited
+                # genesis-style wallets offline (device_id = sha256(pubkey), no block
+                # hash required) and inject them via REGISTER P2P, completely bypassing
+                # bootstrap's chain-anchoring requirement and per-IP rate limit.
+                # Chain-anchored wallets require a real block hash from the live network,
+                # which is a meaningful barrier to mass offline pre-creation.
                 did = msg.get("device_id", "")
                 if not (isinstance(did, str) and len(did) == 64
                         and all(c in "0123456789abcdef" for c in did)):
                     return
                 if not Ledger._verify_registration(msg):
                     return
+                # Post-genesis: reject genesis-style (non-chain-anchored) registrations.
+                cs = get_current_slot()
+                if cs >= 1000:
+                    gbh = msg.get("genesis_block_hash", "")
+                    if not (isinstance(gbh, str) and len(gbh) == 64
+                            and all(c in "0123456789abcdef" for c in gbh)):
+                        return
                 gid = f"register:{did}"
                 with self._seen_lock:
                     if gid in self.seen_ids:

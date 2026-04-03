@@ -503,14 +503,15 @@ def _mnemonic_to_entropy(phrase: str) -> bytes:
         if word not in wordlist:
             raise ValueError(f"Unknown word: {word!r}")
         combined = (combined << 11) | wordlist.index(word)
-    # Extract 128 bits entropy (drop 4 checksum bits)
+    # combined is 132 bits: 128 bits entropy + 4 bits checksum (lowest bits)
+    actual_checksum = combined & 0xF
     combined >>= 4
     entropy = combined.to_bytes(16, "big")
-    # Verify checksum
+    # Verify checksum — catches mistyped phrases that happen to use valid words
     import hashlib as _hl
-    expected_cs = _hl.sha256(entropy).digest()[0] >> 4
-    actual_combined = int.from_bytes(entropy, "big")
-    actual_combined = (actual_combined << 4) | expected_cs
+    expected_checksum = _hl.sha256(entropy).digest()[0] >> 4
+    if actual_checksum != expected_checksum:
+        raise ValueError("Checksum mismatch — check your seed phrase")
     return entropy
 
 
@@ -827,7 +828,8 @@ class Ledger:
         self.fee_rewards:    list  = []     # fee redistribution records
         self.total_minted:   int   = 0
         self.checkpoints:    list  = []
-        self.identities:     dict  = {}     # {device_id: first_seen_slot}
+        self.identities:      dict  = {}     # {device_id: first_seen_slot}
+        self.identity_pubkeys:dict  = {}     # {device_id: public_key_hex} — attestation binding
         self.anchor_hashes:  set   = set()  # {genesis_block_hash} — Layer 2 Sybil
         self.balances:       dict  = {}     # {device_id: int} permanent balance cache
         self.my_transactions:list  = []     # personal history, kept forever
@@ -852,8 +854,9 @@ class Ledger:
             self.checkpoints   = data.get("checkpoints", [])
             self.chain         = data.get("chain", [])
             self.fee_rewards   = data.get("fee_rewards", [])
-            self.identities    = data.get("identities", {})
-            self.anchor_hashes = set(data.get("anchor_hashes", []))
+            self.identities      = data.get("identities", {})
+            self.identity_pubkeys= data.get("identity_pubkeys", {})
+            self.anchor_hashes   = set(data.get("anchor_hashes", []))
             self.balances      = data.get("balances", {})
             self.my_transactions = data.get("my_transactions", [])
             self.freeze_triggered_slot     = data.get("freeze_triggered_slot")
@@ -877,8 +880,9 @@ class Ledger:
                     "fee_rewards":    self.fee_rewards,
                     "total_minted":   self.total_minted,
                     "checkpoints":    self.checkpoints,
-                    "identities":     self.identities,
-                    "anchor_hashes":  list(self.anchor_hashes),
+                    "identities":      self.identities,
+                    "identity_pubkeys":self.identity_pubkeys,
+                    "anchor_hashes":   list(self.anchor_hashes),
                     "balances":       self.balances,
                     "my_transactions":self.my_transactions,
                     "freeze_triggered_slot":     self.freeze_triggered_slot,
@@ -1046,7 +1050,11 @@ class Ledger:
 
         # Rule 6: maturation check (applies to all slots)
         first_seen = self.identities.get(wid)
-        if first_seen is None or slot - first_seen < MIN_IDENTITY_AGE:
+        if first_seen is None:
+            # Rule 5 already verified sha256(pubkey)==wid for this branch.
+            # Treat genesis wallet as registered at slot 0 so the chain can start.
+            first_seen = 0
+        if slot - first_seen < MIN_IDENTITY_AGE:
             return False
 
         # Rule 7: slot validity
@@ -1111,6 +1119,7 @@ class Ledger:
             return False
         if len(txs) > MAX_TRANSACTIONS_PER_BLOCK:
             return False
+        intra_block_debit = {}   # {sender_id: cumulative spend within this block}
         for tx_dict in txs:
             if not isinstance(tx_dict, dict):
                 return False
@@ -1126,11 +1135,13 @@ class Ledger:
                 return False
             if tx.tx_id in self._spent_bloom:
                 return False
-            # Balance check includes this block's previous txs
-            # (simplified: check sender balance at chain state before this block)
+            # Intra-block double-spend prevention: deduct prior spends from
+            # this block before checking the sender's available balance.
+            prior_debit    = intra_block_debit.get(tx.sender_id, 0)
             sender_balance = self.get_balance(tx.sender_id)
-            if sender_balance < tx.amount + tx.fee:
+            if sender_balance - prior_debit < tx.amount + tx.fee:
                 return False
+            intra_block_debit[tx.sender_id] = prior_debit + tx.amount + tx.fee
 
         # Rule 16 (block_sig): winner signs canonical block without block_sig field
         block_without_sig = {k: v for k, v in block.items() if k != "block_sig"}
@@ -1149,13 +1160,19 @@ class Ledger:
         # fees_collected is on the block itself — counted in get_balance via
         # block.get("fees_collected", 0). No separate fee_rewards entry needed.
 
+        # Self-register genesis winner if not yet in identities
+        if wid not in self.identities:
+            self.identities[wid]       = 0
+            self.identity_pubkeys[wid] = pub_hex
+
         # Process registrations — add to identities and anchor_hashes
         for reg in regs:
             if Ledger._verify_registration(reg):
                 did = reg.get("device_id", "")
                 if did and did not in self.identities:
                     gbh = reg.get("genesis_block_hash", "")
-                    self.identities[did] = slot
+                    self.identities[did]       = slot
+                    self.identity_pubkeys[did] = reg.get("public_key", "")
                     if gbh:
                         self.anchor_hashes.add(gbh)
 
@@ -1313,6 +1330,7 @@ class Ledger:
         prev_hash       = anchor_hash
         prev_slot       = anchor_slot
         fork_identities = dict(self.identities)
+        fork_pubkeys    = dict(self.identity_pubkeys)
         fork_anchors    = set(self.anchor_hashes)
 
         for block in fork_blocks:
@@ -1326,10 +1344,19 @@ class Ledger:
 
             # Maturation check using fork-local identity table
             wid = block.get("winner_id", "")
-            if slot >= 1000:
-                first_seen = fork_identities.get(wid)
-                if first_seen is None or slot - first_seen < MIN_IDENTITY_AGE:
+            first_seen_fork = fork_identities.get(wid)
+            if first_seen_fork is None:
+                # Genesis wallet path: verify sha256(pubkey)==wid before treating
+                # first_seen as 0 — prevents forged identity claims in reorg
+                try:
+                    pb = bytes.fromhex(block.get("vrf_public_key", ""))
+                    if hashlib.sha256(pb).hexdigest() != wid:
+                        break
+                    first_seen_fork = 0
+                except Exception:
                     break
+            if slot - first_seen_fork < MIN_IDENTITY_AGE:
+                break
 
             # Supply cap: block amount must equal get_block_reward at that point
             running_minted = (self.total_minted
@@ -1337,6 +1364,43 @@ class Ledger:
             expected_amt = get_block_reward(running_minted)
             if block.get("amount", -1) != expected_amt:
                 break
+
+            # Crypto verification (compete_sig, block_sig, tx signatures)
+            # An attacker MUST NOT be able to reorg with structurally-valid but
+            # unsigned blocks — this closes the critical unsigned-reorg attack.
+            reorg_pub_hex     = block.get("vrf_public_key", "")
+            reorg_compete_sig = block.get("compete_sig", "")
+            reorg_proof       = block.get("compete_proof", "")
+            reorg_block_sig   = block.get("block_sig", "")
+            if not reorg_pub_hex or not reorg_compete_sig or not reorg_proof or not reorg_block_sig:
+                break
+            try:
+                reorg_pub_bytes = bytes.fromhex(reorg_pub_hex)
+                reorg_challenge = compute_challenge(block.get("prev_hash", ""), slot)
+                if not Dilithium3.verify(reorg_pub_bytes, reorg_challenge,
+                                         bytes.fromhex(reorg_compete_sig)):
+                    break
+                if hashlib.sha256(bytes.fromhex(reorg_compete_sig)).hexdigest() != reorg_proof:
+                    break
+                reorg_bws = {k: v for k, v in block.items() if k != "block_sig"}
+                if not Dilithium3.verify(reorg_pub_bytes, canonical_block(reorg_bws),
+                                         bytes.fromhex(reorg_block_sig)):
+                    break
+            except Exception:
+                break
+            reorg_tx_ok = True
+            for tx_dict in block.get("transactions", []):
+                try:
+                    tx = Transaction.from_dict(tx_dict)
+                    if not tx.verify():
+                        reorg_tx_ok = False
+                        break
+                except Exception:
+                    reorg_tx_ok = False
+                    break
+            if not reorg_tx_ok:
+                break
+
             validated.append(block)
             prev_hash = compute_block_hash(block)
             prev_slot = slot
@@ -1352,6 +1416,7 @@ class Ledger:
                         if gbh and gbh in fork_anchors:
                             continue
                         fork_identities[did] = slot
+                        fork_pubkeys[did]    = reg.get("public_key", "")
                         if gbh:
                             fork_anchors.add(gbh)
 
@@ -1387,7 +1452,8 @@ class Ledger:
                     if did and did not in self.identities:
                         if bslot >= 1000 and not _is_valid_hex64(gbh):
                             continue
-                        self.identities[did] = bslot
+                        self.identities[did]       = bslot
+                        self.identity_pubkeys[did] = reg.get("public_key", "")
                         if gbh:
                             self.anchor_hashes.add(gbh)
 
@@ -1460,6 +1526,7 @@ class Ledger:
                 "prune_before":     prune_before,
                 "balances":         balances,
                 "identities":       dict(self.identities),
+                "identity_pubkeys": dict(self.identity_pubkeys),
                 "anchor_hashes":    list(self.anchor_hashes),
                 "total_minted":     self.total_minted,
                 "chain_tip_hash":   tip_hash,
@@ -1524,6 +1591,12 @@ class Ledger:
                 if isinstance(did, str) and isinstance(slot, int):
                     if did not in self.identities or slot < self.identities[did]:
                         self.identities[did] = slot
+
+            # Merge identity_pubkeys — do not overwrite a key we already know
+            for did, pub_hex in checkpoint.get("identity_pubkeys", {}).items():
+                if isinstance(did, str) and isinstance(pub_hex, str) and pub_hex:
+                    if did not in self.identity_pubkeys:
+                        self.identity_pubkeys[did] = pub_hex
 
             # Merge anchor_hashes
             for gbh in checkpoint.get("anchor_hashes", []):
@@ -2247,6 +2320,7 @@ class Node:
         self._compete_lock       = threading.Lock()
         # Attestation state
         self._attestations:      dict  = {}   # {block_hash: {device_id: attest_msg}}
+        self._attestation_slots: dict  = {}   # {block_hash: slot} — for pruning
         self._finalized:         set   = set()# {block_hash}
         self._attest_lock        = threading.Lock()
         # Mempool
@@ -2610,9 +2684,14 @@ class Node:
                 # Select transactions (highest fee first)
                 txs = select_transactions_for_block(self._mempool, slot)
                 fees_collected = sum(t.get("fee", 0) for t in txs)
-                # Collect pending registrations
+                # Collect pending registrations — skip entirely if freeze is active
+                # (a block with regs during freeze fails Rule 14/freeze validation)
+                freeze_now, _ = is_registration_freeze_active(self.ledger, slot)
                 with self._pending_regs_lock:
-                    regs = list(self._pending_regs.values())[:MAX_REGS_PER_BLOCK]
+                    if freeze_now:
+                        regs = []
+                    else:
+                        regs = list(self._pending_regs.values())[:MAX_REGS_PER_BLOCK]
 
             reward = get_block_reward(total_minted)
             challenge = compute_challenge(prev_hash, slot)
@@ -2657,10 +2736,9 @@ class Node:
                 for reg in regs:
                     self._pending_regs.pop(reg.get("device_id", ""), None)
 
-            # Broadcast
-            self.network.broadcast({"type": "block_reward", **block})
-            # Also broadcast as BLOCK type for handler routing
-            self.network.broadcast({"type": "BLOCK", **block})
+            # Broadcast — note: {**block, "type": "BLOCK"} not {"type":"BLOCK", **block}
+            # because block contains "type":"block_reward" and the LAST key wins
+            self.network.broadcast({**block, "type": "BLOCK"})
 
             print(f"\n  ★ Block produced! slot={slot} "
                   f"reward={reward/UNIT:.4f} TMPL "
@@ -2751,6 +2829,15 @@ class Node:
         first_seen = self.ledger.identities.get(did, 0)
         if slot - first_seen < MIN_IDENTITY_AGE:
             return
+
+        # Verify the supplied public key matches the key registered on-chain.
+        # Without this check an attacker can forge attestations for any known
+        # device_id by using their own Dilithium3 key — the sig verifies but
+        # the voter is not the real identity owner.
+        registered_pub = self.ledger.identity_pubkeys.get(did, "")
+        if registered_pub and pub_hex != registered_pub:
+            return
+
         try:
             payload   = f"attest:{block_hash}:{slot}".encode()
             pub_bytes = bytes.fromhex(pub_hex)
@@ -2762,7 +2849,8 @@ class Node:
 
         with self._attest_lock:
             if block_hash not in self._attestations:
-                self._attestations[block_hash] = {}
+                self._attestations[block_hash]      = {}
+                self._attestation_slots[block_hash] = slot  # track slot for pruning
             self._attestations[block_hash][did] = msg
 
             # Check finality
@@ -2770,9 +2858,12 @@ class Node:
                 if is_final(block_hash, slot, self.ledger, self._attestations):
                     self._finalized.add(block_hash)
                     self._last_finalized_slot = slot
-                    # Prune old attestations
-                    stale = [h for h in self._attestations
-                             if self._attestations[h].get("__slot", slot) < slot - CHECKPOINT_BUFFER]
+                    # Prune attestation dicts for blocks older than CHECKPOINT_BUFFER
+                    stale = [h for h in list(self._attestations.keys())
+                             if self._attestation_slots.get(h, slot) < slot - CHECKPOINT_BUFFER]
+                    for h in stale:
+                        del self._attestations[h]
+                        self._attestation_slots.pop(h, None)
 
     # ── Transaction ────────────────────────────────────────────────────────────
 
@@ -3027,7 +3118,8 @@ class Node:
             elif action == "send":
                 peer_id = msg.get("peer_id", "")
                 amount  = float(msg.get("amount", 0))
-                result  = self.send(peer_id, amount)
+                memo    = msg.get("memo", "")
+                result  = self.send(peer_id, amount, memo)
                 conn.sendall((json.dumps(result) + "\n").encode())
             else:
                 conn.sendall((json.dumps({"ok": False, "error": "unknown action"}) + "\n").encode())
@@ -3041,7 +3133,7 @@ class Node:
 
     # ── Send TMPL ──────────────────────────────────────────────────────────────
 
-    def send(self, recipient_id: str, amount_tmpl: float) -> dict:
+    def send(self, recipient_id: str, amount_tmpl: float, memo: str = "") -> dict:
         """Send TMPL to recipient. Returns {ok, error}."""
         if not _is_valid_hex64(recipient_id):
             return {"ok": False, "error": "invalid address"}
@@ -3061,6 +3153,7 @@ class Node:
             sender_pubkey= self.wallet.get_public_key_hex(),
             amount       = amount_units,
             fee          = fee,
+            memo         = memo,
             slot         = current_slot,
             timestamp    = time.time()
         )
@@ -3172,7 +3265,7 @@ class Node:
                         print("  Invalid amount.\n")
                         continue
                     memo = input("  Memo (optional, max 128 chars): ").strip()[:128]
-                    result = self.send(recipient, amount)
+                    result = self.send(recipient, amount, memo)
                     if not result["ok"]:
                         print(f"  Error: {result['error']}\n")
                 finally:

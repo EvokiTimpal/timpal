@@ -17,6 +17,7 @@ v4.0 changes from v3.3:
   - Tiered fee model: calculate_fee() for display, not flat MIN_TX_FEE
   - CONFIRMATION_DEPTH = 3 (30 second finality)
   - snapshots table records freeze_active per slot
+  - LEDGER_PUSH rejected if node version < MIN_VERSION (blocks old nodes)
 """
 
 import json
@@ -50,6 +51,7 @@ TX_FEE_RATE        = 0.001
 TX_FEE_MIN         = 10_000
 TX_FEE_MAX         = 1_000_000
 TIMESTAMP_TOLERANCE= 30
+MIN_VERSION        = "4.0"   # pushes from older nodes are rejected outright
 
 DB_PATH  = os.path.expanduser("~/.timpal_explorer.db")
 _db_lock = threading.Lock()
@@ -71,6 +73,14 @@ _last_update      = 0
 _post_rate      = {}
 _post_rate_lock = threading.Lock()
 POST_RATE_LIMIT = 5
+
+
+def _ver(v: str) -> tuple:
+    """Parse version string into comparable tuple. Returns (0,0) on error."""
+    try:
+        return tuple(int(x) for x in str(v).split("."))
+    except Exception:
+        return (0, 0)
 
 
 def _calculate_fee(amount: int) -> int:
@@ -382,7 +392,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(200, {
                     "network_healthy":       not freeze_active,
                     "registration_freeze":   freeze_status,
-                    "total_nodes":           0,  # filled from stats cache
+                    "total_nodes":           0,
                     "chain_tip_slot":        tip_slot,
                     "finalized_slot":        max(-1, tip_slot - CONFIRMATION_DEPTH),
                     "era":                   2 if era2 else 1,
@@ -603,6 +613,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": "unknown type"})
                 return
 
+            # Version check — reject pushes from nodes below MIN_VERSION.
+            # This prevents old nodes (any version before 4.0) from ever
+            # writing stale or incompatible data into the explorer DB.
+            push_version = data.get("version", "0.0")
+            if _ver(push_version) < _ver(MIN_VERSION):
+                self._send_json(400, {
+                    "error": f"node version {push_version} below minimum {MIN_VERSION} — update required"
+                })
+                return
+
             if not _verify_push_signature(data):
                 self._send_json(401, {"error": "invalid signature"})
                 return
@@ -624,13 +644,13 @@ class Handler(BaseHTTPRequestHandler):
                 and isinstance(t.get("tx_id"), str)
             ]
 
-            incoming_tip_hash  = data.get("chain_tip_hash")
-            incoming_tip_slot  = data.get("chain_tip_slot")
-            incoming_minted    = data.get("total_minted", 0)
-            incoming_height    = data.get("chain_height", 0)
+            incoming_tip_hash   = data.get("chain_tip_hash")
+            incoming_tip_slot   = data.get("chain_tip_slot")
+            incoming_minted     = data.get("total_minted", 0)
+            incoming_height     = data.get("chain_height", 0)
             incoming_cp_balances= data.get("checkpoint_balances", {})
-            incoming_cp_slot   = data.get("checkpoint_slot", 0)
-            freeze_status      = data.get("registration_freeze", {})
+            incoming_cp_slot    = data.get("checkpoint_slot", 0)
+            freeze_status       = data.get("registration_freeze", {})
 
             if incoming_tip_hash is not None and not _is_valid_hex64(incoming_tip_hash):
                 self._send_json(400, {"error": "invalid chain_tip_hash"})
@@ -736,7 +756,6 @@ class Handler(BaseHTTPRequestHandler):
                         if incoming_cp_slot > cur_cp_slot:
                             new_prune_before = max(0, incoming_cp_slot - CHECKPOINT_BUFFER)
 
-                            # Cap: no single address can hold more than total_minted
                             cp_balance_sum = sum(
                                 v for v in incoming_cp_balances.values()
                                 if isinstance(v, int) and not isinstance(v, bool)
@@ -819,7 +838,7 @@ if __name__ == "__main__":
     threading.Thread(target=_clean_post_rate, daemon=True).start()
     print("TIMPAL Explorer API v4.0 running on port 7781")
     print(f"Database: {DB_PATH}")
-    print("Auth    : Dilithium3 push signature")
+    print(f"Auth    : Dilithium3 push signature | Min version: {MIN_VERSION}")
     print("Endpoints: /api /api/address /api/block /api/tx /api/status")
     server = ThreadingHTTPServer(("0.0.0.0", 7781), Handler)
     server.serve_forever()

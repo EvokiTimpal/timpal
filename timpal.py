@@ -3051,6 +3051,7 @@ class Node:
 
             payload_data = {
                 "type":               "LEDGER_PUSH",
+                "version":            VERSION,
                 "device_id":          self.wallet.device_id,
                 "public_key":         self.wallet.get_public_key_hex(),
                 "blocks":             blocks,

@@ -7,23 +7,34 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Mono:wght@300;400;500&family=Barlow:wght@300;400;500;600&display=swap" rel="stylesheet">
 <style>
+  /* ── Light mode (default) ── */
   :root {
+    --bg:#f5f7fc;--bg2:#edf0f7;--bg3:#e2e6f0;--border:#cdd3e4;
+    --accent:#c47f0a;--accent2:#a86b08;--text:#1a1f2e;--text2:#4a5168;
+    --text3:#8a93ab;--green:#1a8c4e;--red:#c0392b;--white:#0d1119;
+  }
+  /* ── Dark mode ── */
+  body.dark {
     --bg:#07090f;--bg2:#0d1119;--bg3:#141926;--border:#1e2535;
     --accent:#f5a623;--accent2:#e8941a;--text:#d8dce8;--text2:#7a8299;
     --text3:#4a5168;--green:#2ecc71;--red:#e74c3c;--white:#f0f0f0;
   }
   *{margin:0;padding:0;box-sizing:border-box}
   html{scroll-behavior:smooth}
-  body{background:var(--bg);color:var(--text);font-family:'Barlow',sans-serif;min-height:100vh;overflow-x:hidden}
-  body::before{content:'';position:fixed;inset:0;background-image:linear-gradient(rgba(245,166,35,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(245,166,35,.03) 1px,transparent 1px);background-size:60px 60px;pointer-events:none;z-index:0}
-  nav{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(7,9,15,.92);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;padding:0 40px;height:60px}
+  body{background:var(--bg);color:var(--text);font-family:'Barlow',sans-serif;min-height:100vh;overflow-x:hidden;transition:background .2s,color .2s}
+  body::before{content:'';position:fixed;inset:0;background-image:linear-gradient(rgba(196,127,10,.04) 1px,transparent 1px),linear-gradient(90deg,rgba(196,127,10,.04) 1px,transparent 1px);background-size:60px 60px;pointer-events:none;z-index:0}
+  body.dark::before{background-image:linear-gradient(rgba(245,166,35,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(245,166,35,.03) 1px,transparent 1px)}
+  nav{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(245,247,252,.95);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;padding:0 40px;height:60px;transition:background .2s}
+  body.dark nav{background:rgba(7,9,15,.92)}
   .nav-logo{font-family:'Bebas Neue',sans-serif;font-size:28px;letter-spacing:3px;color:var(--accent);cursor:pointer}
   .nav-links{display:flex;gap:4px}
   .nav-link{font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text2);padding:8px 16px;border:1px solid transparent;border-radius:4px;cursor:pointer;transition:all .2s;letter-spacing:1px;text-transform:uppercase}
   .nav-link:hover{color:var(--text);border-color:var(--border)}
   .nav-link.active{color:var(--accent);border-color:var(--accent);background:rgba(245,166,35,.06)}
   .nav-status{display:flex;align-items:center;gap:8px;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text2)}
-  .status-dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse 2s infinite}
+  .theme-toggle{background:var(--bg2);border:1px solid var(--border);color:var(--text2);padding:6px 12px;border-radius:4px;cursor:pointer;font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:1px;transition:all .2s;margin-left:8px}
+  .theme-toggle:hover{color:var(--text);border-color:var(--text3)}
+  .status-dot{width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 8px var(--accent);animation:pulse 2s infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
   .page{display:none;padding-top:60px;min-height:100vh;position:relative;z-index:1}
   .page.active{display:block}
@@ -80,6 +91,8 @@
   .era-card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px}
   .era-card.era1::before{background:var(--accent)}
   .era-card.era2::before{background:var(--green)}
+  body.dark .era-card.era1::before{background:#f5a623}
+  body.dark .era-card.era2::before{background:#2ecc71}
   .era-badge{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:2px;text-transform:uppercase;margin-bottom:12px}
   .era-card.era1 .era-badge{color:var(--accent)}
   .era-card.era2 .era-badge{color:var(--green)}
@@ -141,7 +154,8 @@
   .docs-table td{padding:12px 16px;border-bottom:1px solid var(--border);color:var(--text);font-family:'IBM Plex Mono',monospace;font-size:12px}
   .docs-table tr:last-child td{border-bottom:none}
   .docs-table tr:nth-child(even) td{background:var(--bg2)}
-  .docs-callout{background:rgba(245,166,35,.06);border:1px solid rgba(245,166,35,.2);border-left:3px solid var(--accent);border-radius:4px;padding:16px 20px;margin:20px 0;font-size:14px;color:var(--text);line-height:1.6}
+  .docs-callout{background:rgba(196,127,10,.06);border:1px solid rgba(196,127,10,.2);border-left:3px solid var(--accent);border-radius:4px;padding:16px 20px;margin:20px 0;font-size:14px;color:var(--text);line-height:1.6}
+  body.dark .docs-callout{background:rgba(245,166,35,.06);border-color:rgba(245,166,35,.2)}
   .inline-code{font-family:'IBM Plex Mono',monospace;font-size:12px;background:var(--bg3);border:1px solid var(--border);padding:2px 6px;border-radius:3px;color:var(--accent)}
 
   @media(max-width:768px){
@@ -171,7 +185,7 @@
     <div class="nav-link" onclick="showPage('docs')">Docs</div>
     <div class="nav-link" onclick="window.open('https://github.com/EvokiTimpal/timpal','_blank')">GitHub ↗</div>
   </div>
-  <div class="nav-status"><div class="status-dot"></div><span>NETWORK LIVE</span></div>
+  <div class="nav-status"><div class="status-dot"></div><span>PRE-LAUNCH</span><button class="theme-toggle" id="theme-btn" onclick="toggleTheme()">☾ DARK</button></div>
 </nav>
 
 <!-- HOME -->
@@ -180,7 +194,7 @@
     <div class="hero-eyebrow">Peer-to-peer payment protocol · Est. March 21, 2026</div>
     <div class="hero-title">MONEY<br><span>WITHOUT</span><br>MASTERS</div>
     <div class="hero-subtitle">Quantum-Resistant · Worldwide · Instant · Open</div>
-    <div class="hero-desc">No banks. No central control. No company. Just people sending value directly to each other.</div>
+    <div class="hero-desc">Every node has the same chance of winning — from day one to year thirty-seven. No mining rigs. No staking. No advantage for early entrants. Built on post-quantum cryptography that the rest of the industry is not ready for.</div>
     <div class="hero-actions">
       <button class="btn-primary" onclick="showPage('docs')">Get Started</button>
       <a class="btn-secondary" href="https://github.com/EvokiTimpal/timpal" target="_blank">View on GitHub</a>
@@ -189,10 +203,10 @@
   </div>
 
   <div class="stats-bar">
-    <div class="stat-item"><div class="stat-label">Network Status</div><div class="stat-value accent">● LIVE</div></div>
-    <div class="stat-item"><div class="stat-label">Total Supply</div><div class="stat-value">250,000,000 TMPL</div></div>
-    <div class="stat-item"><div class="stat-label">Reward Interval</div><div class="stat-value">5 seconds</div></div>
-    <div class="stat-item"><div class="stat-label">Transaction Fee</div><div class="stat-value accent">0.0005 TMPL</div></div>
+    <div class="stat-item"><div class="stat-label">Network Status</div><div class="stat-value accent">◎ PRE-LAUNCH</div></div>
+    <div class="stat-item"><div class="stat-label">Total Supply</div><div class="stat-value">125,000,000 TMPL</div></div>
+    <div class="stat-item"><div class="stat-label">Reward Interval</div><div class="stat-value">10 seconds</div></div>
+    <div class="stat-item"><div class="stat-label">Transaction Fee</div><div class="stat-value accent">0.1% of amount</div></div>
     <div class="stat-item"><div class="stat-label">Cryptography</div><div class="stat-value">Dilithium3</div></div>
   </div>
 
@@ -204,7 +218,7 @@
         <div class="qs-num">1</div>
         <div class="qs-content">
           <div class="qs-title">Install dependencies</div>
-          <div class="qs-code"><span>pip3 install dilithium-py cryptography</span><button class="copy-btn" onclick="copyCode(this,'pip3 install dilithium-py cryptography')">copy</button></div>
+          <div class="qs-code"><span>pip3 install dilithium-py cryptography pycryptodome mnemonic</span><button class="copy-btn" onclick="copyCode(this,'pip3 install dilithium-py cryptography pycryptodome mnemonic')">copy</button></div>
         </div>
       </div>
       <div class="qs-step">
@@ -230,13 +244,13 @@
       <div class="section-label">Protocol</div>
       <div class="section-title">How it works</div>
       <div class="features">
-        <div class="feature"><div class="feature-icon">🔐</div><div class="feature-title">Quantum-Resistant</div><div class="feature-desc">Uses Dilithium3, the NIST 2024 post-quantum standard. Future-proof against quantum computers for decades.</div></div>
-        <div class="feature"><div class="feature-icon">⚡</div><div class="feature-title">Fast Finality</div><div class="feature-desc">Blocks confirmed after 6 slots (~30 seconds). No mining, no proof-of-work. Transactions settle quickly and irreversibly.</div></div>
-        <div class="feature"><div class="feature-icon">🎲</div><div class="feature-title">Eligibility-Gated VRF Lottery</div><div class="feature-desc">Every 5 seconds, one node wins 1.0575 TMPL. Only ~10 nodes are eligible per slot regardless of network size. Commits and reveals flow directly between peers — the lottery runs even if bootstrap is offline. The winner is determined by an unpredictable collective target — no node can predict or manipulate the outcome.</div></div>
-        <div class="feature"><div class="feature-icon">🪪</div><div class="feature-title">On-Chain Identity Registration</div><div class="feature-desc">Every new node registers its identity on-chain via a signed REGISTER transaction embedded in a block. Only identities registered for at least 200 slots (~16.7 minutes) can produce valid blocks. Enforced at consensus — no shortcut, no bypass.</div></div>
+        <div class="feature"><div class="feature-icon">🔐</div><div class="feature-title">Quantum-Resistant from Day One</div><div class="feature-desc">Bitcoin and Ethereum wallets use ECDSA — cryptography that quantum computers will break. TIMPAL uses Dilithium3, the NIST 2024 post-quantum standard, as its only cryptographic primitive. Every wallet, every signature, every transaction is resistant to quantum attack from the moment it is created. There is no fallback. There is no migration path needed.</div></div>
+        <div class="feature"><div class="feature-icon">⚡</div><div class="feature-title">Cryptographic Finality</div><div class="feature-desc">A block is final when more than 2/3 of all mature identities have signed it with Dilithium3 attestations (~30 seconds). A finalized block cannot be reversed under any circumstances short of breaking Dilithium3.</div></div>
+        <div class="feature"><div class="feature-icon">🎲</div><div class="feature-title">Equal Chance for Every Node</div><div class="feature-desc">Every 10 seconds, one node wins 1.0575 TMPL. A node that started today has the exact same statistical chance as one that has been running since genesis — by design, enforced at the protocol level. No mining hardware. No staking. No capital requirement. ~10 competitors are selected per slot via a deterministic lottery regardless of network size. The winner is decided by cryptographic proof, not by who owns the most.</div></div>
+        <div class="feature"><div class="feature-icon">🪪</div><div class="feature-title">On-Chain Identity Registration</div><div class="feature-desc">Every new node registers its identity on-chain via a signed REGISTER message embedded in a block. Only identities registered for at least 200 slots (~33 minutes) can produce valid blocks. Enforced at consensus — no shortcut, no bypass.</div></div>
         <div class="feature"><div class="feature-icon">🖥️</div><div class="feature-title">One Node Per Device</div><div class="feature-desc">The protocol enforces one node per physical device at the OS level. Running ten terminals gives you zero advantage.</div></div>
         <div class="feature"><div class="feature-icon">📒</div><div class="feature-title">Distributed Ledger</div><div class="feature-desc">Every node holds the complete chain. Each block is cryptographically linked to the previous one — a single, tamper-evident history anchored by integer arithmetic throughout.</div></div>
-        <div class="feature"><div class="feature-icon">🌐</div><div class="feature-title">Worldwide Network</div><div class="feature-desc">Peer discovery via UDP broadcast locally and TCP bootstrap globally. Nodes find each other automatically.</div></div>
+        <div class="feature"><div class="feature-icon">🌐</div><div class="feature-title">Worldwide Network</div><div class="feature-desc">Peer discovery via UDP broadcast locally and TCP bootstrap globally. Nodes find each other automatically. The network keeps producing blocks even if bootstrap goes offline.</div></div>
       </div>
     </div>
   </div>
@@ -246,28 +260,28 @@
     <div class="section-title">Two-Era Model</div>
     <div class="era-grid">
       <div class="era-card era1">
-        <div class="era-badge">Era 1 · Now → Year 37.5</div>
+        <div class="era-badge">Era 1 · Now → Year ~37.5</div>
         <div class="era-title">Distribution</div>
-        <div class="era-desc">Nodes earn through the VRF lottery: 1.0575 TMPL every 5 seconds. Every transaction costs 0.0005 TMPL, paid to the slot winner. 250 million TMPL distributed over 37.5 years. No pre-mine. No insider allocation. Zero.</div>
+        <div class="era-desc">Nodes earn through the VRF lottery: 1.0575 TMPL every 10 seconds. Every transaction costs 0.1% of the send amount (min 0.0001 TMPL, max 0.01 TMPL), paid to the slot winner. 125 million TMPL distributed over ~37.5 years. No pre-mine. No insider allocation. Zero.</div>
       </div>
       <div class="era-card era2">
-        <div class="era-badge">Era 2 · Year 37.5 onwards</div>
+        <div class="era-badge">Era 2 · Year ~37.5 onwards</div>
         <div class="era-title">Sustaining</div>
-        <div class="era-desc">Lottery rewards stop — supply is fixed forever at 250 million TMPL. Transactions still cost 0.0005 TMPL, paid to the slot winner. The network sustains itself indefinitely through fees alone.</div>
+        <div class="era-desc">Lottery rewards stop — supply is fixed forever at 125 million TMPL. Transactions still carry a 0.1% fee paid to the slot winner. The network sustains itself indefinitely through fees alone.</div>
       </div>
     </div>
     <table class="token-table">
       <tr><th>Property</th><th>Value</th></tr>
-      <tr><td class="prop">Total Supply</td><td class="val">250,000,000 TMPL</td></tr>
+      <tr><td class="prop">Total Supply</td><td class="val">125,000,000 TMPL</td></tr>
       <tr><td class="prop">Smallest Unit</td><td class="val">0.00000001 TMPL (1 unit = 10⁻⁸ TMPL)</td></tr>
       <tr><td class="prop">Reward Per Round</td><td class="val accent">1.0575 TMPL</td></tr>
-      <tr><td class="prop">Round Interval</td><td class="val">Every 5 seconds</td></tr>
-      <tr><td class="prop">Distribution Period</td><td class="val">37.5 years</td></tr>
+      <tr><td class="prop">Round Interval</td><td class="val">Every 10 seconds</td></tr>
+      <tr><td class="prop">Distribution Period</td><td class="val">~37.5 years</td></tr>
       <tr><td class="prop">Eligible Nodes Per Slot</td><td class="val">~10 (fixed target, regardless of network size)</td></tr>
-      <tr><td class="prop">Identity Maturation Period</td><td class="val">200 slots (~16.7 minutes)</td></tr>
-      <tr><td class="prop">Confirmation Depth</td><td class="val">6 slots (~30 seconds)</td></tr>
-      <tr><td class="prop">Checkpoint Interval</td><td class="val">Every 1,000 slots (~83 minutes)</td></tr>
-      <tr><td class="prop">Transaction Fee</td><td class="val accent">0.0005 TMPL → slot winner (all eras)</td></tr>
+      <tr><td class="prop">Identity Maturation Period</td><td class="val">200 slots (~33 minutes)</td></tr>
+      <tr><td class="prop">Confirmation Depth</td><td class="val">3 slots (~30 seconds)</td></tr>
+      <tr><td class="prop">Checkpoint Interval</td><td class="val">Every 1,000 slots (~2.8 hours)</td></tr>
+      <tr><td class="prop">Transaction Fee</td><td class="val accent">0.1% of amount (min 0.0001, max 0.01 TMPL) → slot winner</td></tr>
       <tr><td class="prop">Pre-mine</td><td class="val green">None</td></tr>
       <tr><td class="prop">Insider Allocation</td><td class="val green">None</td></tr>
     </table>
@@ -372,6 +386,7 @@
       <a class="docs-nav-link" onclick="scrollToDoc('how')">How it Works</a>
       <a class="docs-nav-link" onclick="scrollToDoc('identity')">Identity Registration</a>
       <a class="docs-nav-link" onclick="scrollToDoc('vrf')">VRF Lottery</a>
+      <a class="docs-nav-link" onclick="scrollToDoc('finality')">Finality</a>
       <a class="docs-nav-link" onclick="scrollToDoc('ledger')">Ledger</a>
       <a class="docs-nav-link" onclick="scrollToDoc('network')">Network</a>
       <div class="docs-nav-title">Economics</div>
@@ -383,8 +398,8 @@
         <div class="docs-h1">Documentation</div>
         <div class="docs-h2">Installation</div>
         <p class="docs-p">TIMPAL runs on Mac, Linux, and Windows. You need Python 3.8 or newer.</p>
-        <div class="docs-code"><span class="comment"># Step 1 — Install the quantum cryptography library</span>
-pip3 install dilithium-py cryptography
+        <div class="docs-code"><span class="comment"># Step 1 — Install all dependencies</span>
+pip3 install dilithium-py cryptography pycryptodome mnemonic
 
 <span class="comment"># Step 2 — Download the protocol</span>
 curl -O https://raw.githubusercontent.com/EvokiTimpal/timpal/main/timpal.py
@@ -395,9 +410,9 @@ python3 timpal.py</div>
       </div>
       <div class="docs-section" id="doc-running">
         <div class="docs-h2">Running a Node</div>
-        <p class="docs-p">When you start TIMPAL for the first time, it creates a quantum-resistant wallet and connects to the worldwide network automatically.</p>
+        <p class="docs-p">When you start TIMPAL for the first time, it generates a 12-word recovery phrase you must write down, creates a quantum-resistant wallet, and connects to the worldwide network automatically.</p>
         <div class="docs-callout">⚠️ Keep your Mac awake while the node is running. Use <span class="inline-code">caffeinate -i python3 timpal.py</span> on Mac to prevent sleep.</div>
-        <p class="docs-p">Your node broadcasts a signed identity registration to the network and waits for it to be included in a block. After 200 slots (~16.7 minutes) your identity is mature and your node begins participating in the VRF lottery automatically.</p>
+        <p class="docs-p">Your node broadcasts a signed identity registration to the network and waits for it to be included in a block. After 200 slots (~33 minutes) your identity is mature and your node begins competing in the VRF lottery automatically.</p>
         <div class="docs-callout">Only one node can run per device. If you try to open a second terminal, the protocol blocks it immediately.</div>
       </div>
       <div class="docs-section" id="doc-commands">
@@ -408,7 +423,7 @@ python3 timpal.py</div>
           <tr><td>balance</td><td>Show your TMPL balance and full wallet address</td></tr>
           <tr><td>chain</td><td>Chain height, tip hash, orphan count, and recent confirmed blocks</td></tr>
           <tr><td>peers</td><td>List online nodes currently connected to you</td></tr>
-          <tr><td>send</td><td>Send TMPL interactively (select peer from list)</td></tr>
+          <tr><td>send</td><td>Send TMPL interactively</td></tr>
           <tr><td>history</td><td>Your last rewards and transactions</td></tr>
           <tr><td>network</td><td>Your node and network stats</td></tr>
           <tr><td>quit</td><td>Shut down your node cleanly</td></tr>
@@ -424,7 +439,7 @@ python3 timpal.py send &lt;address&gt; &lt;amount&gt;</div>
         <div class="docs-h2">Your Wallet</div>
         <p class="docs-p">Your wallet is stored in one file:</p>
         <div class="docs-code">~/.timpal_wallet.json</div>
-        <div class="docs-callout">⚠️ Back this file up immediately. It contains your private key. If you delete it, your TMPL is gone forever.</div>
+        <div class="docs-callout">⚠️ Back this file up immediately. It contains your encrypted private key. Also store your 12-word recovery phrase on paper in a safe place — it is the only way to recover your wallet if you lose the file. If you lose both, your TMPL is gone forever.</div>
       </div>
       <div class="docs-section" id="doc-how">
         <div class="docs-h2">How it Works</div>
@@ -434,8 +449,7 @@ python3 timpal.py send &lt;address&gt; &lt;amount&gt;</div>
         <div class="docs-h2">Identity Registration</div>
         <p class="docs-p">Every new node broadcasts a signed <span class="inline-code">REGISTER</span> message to its peers. This message contains the node's device ID, public key, and a Dilithium3 signature proving ownership. Peers collect pending registrations and embed up to 10 of them in each block they produce.</p>
         <p class="docs-p">When a block is accepted by the network, all registrations it contains are recorded with the block's slot number as the identity's <span class="inline-code">first_seen_slot</span>. This value is stored in the ledger's identity table and survives every checkpoint — it can never be lost or pruned.</p>
-        <div class="docs-callout">An identity must be registered on-chain for at least <strong>200 slots (~16.7 minutes)</strong> before it can produce a valid block. This is enforced at the consensus layer — every node independently rejects blocks from identities that are too young, regardless of whether they contacted the bootstrap server.</div>
-        <p class="docs-p">This design closes the instant-activation attack: an attacker cannot create a new identity and immediately use it to win slots. They must register on-chain, wait the maturation period, and only then become eligible. Identity age is chain-derived — it cannot be forged, backdated, or bypassed via P2P.</p>
+        <div class="docs-callout">An identity must be registered on-chain for at least <strong>200 slots (~33 minutes)</strong> before it can produce a valid block. This is enforced at the consensus layer — every node independently rejects blocks from identities that are too young.</div>
         <div class="docs-code"><span class="comment"># Identity lifecycle</span>
 Node starts → broadcasts REGISTER message to peers
 Peer includes REGISTER in next block
@@ -449,19 +463,29 @@ if block.slot >= 1000:  <span class="comment"># post-genesis phase</span>
       </div>
       <div class="docs-section" id="doc-vrf">
         <div class="docs-h2">VRF Lottery</div>
-        <p class="docs-p">Every 5 seconds, one node wins 1.0575 TMPL via an eligibility-gated commit-reveal scheme. ~10 nodes participate per slot regardless of total network size.</p>
-        <div class="docs-code"><span class="comment"># Sign the slot number, hash to get ticket</span>
-sig    = Dilithium3.sign(private_key, str(slot))
-ticket = SHA256(sig)
-commit = SHA256(ticket + device_id + slot)
+        <p class="docs-p">Every 10 seconds, one node wins 1.0575 TMPL via a compete-based scheme. ~10 nodes are selected per slot regardless of total network size.</p>
+        <div class="docs-code"><span class="comment"># Competitor selection — deterministic, unpredictable until prev block arrives</span>
+score(device_id) = sha256(f"{device_id}:{prev_block_hash}:{slot}")
+competitors = 10 identities with lowest score
 
-<span class="comment"># After all reveals: collective target determines winner</span>
-target = SHA256(sorted_tickets_joined)
-winner = min(nodes, key=lambda n: |ticket_int - target_int|)</div>
+<span class="comment"># Each selected node signs the slot challenge</span>
+challenge    = sha256(f"challenge:{prev_block_hash}:{slot}")
+compete_sig  = Dilithium3.sign(private_key, challenge)
+compete_proof = sha256(compete_sig)
+
+<span class="comment"># Winner = competitor with lowest proof hash</span>
+winner = min(verified_competitors, key=lambda c: c["proof"])</div>
+        <p class="docs-p">Every node independently verifies each COMPETE message and applies the identical tiebreak rule. All honest nodes agree on the same winner without any coordination.</p>
+      </div>
+      <div class="docs-section" id="doc-finality">
+        <div class="docs-h2">Finality</div>
+        <p class="docs-p">After accepting a new block, every mature node produces a Dilithium3 attestation over <span class="inline-code">f"attest:{block_hash}:{slot}"</span> and broadcasts it to peers. A block is cryptographically final when more than 2/3 of all mature identities have attested it.</p>
+        <div class="docs-callout">A finalized block cannot be reorged under any circumstances short of breaking Dilithium3. This is a stronger guarantee than probabilistic finality — it requires an attacker to control more than 1/3 of all registered mature identities.</div>
+        <p class="docs-p">Each attestation is bound to the public key registered on-chain for that identity. An attacker cannot forge an attestation for another node without its private key.</p>
       </div>
       <div class="docs-section" id="doc-ledger">
         <div class="docs-h2">Ledger</div>
-        <p class="docs-p">Blocks at least 6 slots deep (~30 seconds) are final. The longer valid chain wins on fork. Out-of-order blocks are held in an orphan pool and attached once their parent arrives. Every 1,000 slots, a checkpoint prunes the raw history while preserving all balances and the full identity table. Before accepting a peer checkpoint, every node independently recomputes balances from its own chain history — a checkpoint with corrupted balances is rejected outright.</p>
+        <p class="docs-p">Blocks achieve cryptographic finality at ~30 seconds via the attestation mechanism. The longer valid chain wins on fork. Out-of-order blocks are held in an orphan pool and attached once their parent arrives. Every 1,000 slots (~2.8 hours), a checkpoint prunes the raw history while preserving all balances and the full identity table. Before accepting a peer checkpoint, every node independently recomputes balances from its own chain history — a checkpoint with corrupted balances is rejected outright.</p>
       </div>
       <div class="docs-section" id="doc-network">
         <div class="docs-h2">Network</div>
@@ -469,7 +493,8 @@ winner = min(nodes, key=lambda n: |ticket_int - target_int|)</div>
           <tr><th>Method</th><th>How</th><th>Range</th></tr>
           <tr><td>Local</td><td>UDP broadcast on port 7778</td><td>Same WiFi network</td></tr>
           <tr><td>Global</td><td>TCP bootstrap at bootstrap.timpal.org:7777</td><td>Worldwide</td></tr>
-          <tr><td>P2P Lottery</td><td>LOTTERY_COMMIT / LOTTERY_REVEAL direct gossip</td><td>Worldwide — no bootstrap required</td></tr>
+          <tr><td>Compete messages</td><td>Direct P2P gossip between peers</td><td>Worldwide — no bootstrap required</td></tr>
+          <tr><td>Attestations</td><td>Direct P2P gossip between peers</td><td>Worldwide — no bootstrap required</td></tr>
           <tr><td>Identity Gossip</td><td>REGISTER message direct gossip to peers</td><td>Worldwide — no bootstrap required</td></tr>
         </table>
       </div>
@@ -477,24 +502,24 @@ winner = min(nodes, key=lambda n: |ticket_int - target_int|)</div>
         <div class="docs-h2">Tokenomics</div>
         <table class="docs-table">
           <tr><th>Property</th><th>Value</th></tr>
-          <tr><td>Total Supply</td><td>250,000,000 TMPL</td></tr>
+          <tr><td>Total Supply</td><td>125,000,000 TMPL</td></tr>
           <tr><td>Smallest Unit</td><td>0.00000001 TMPL</td></tr>
           <tr><td>Reward Per Round</td><td>1.0575 TMPL</td></tr>
-          <tr><td>Round Interval</td><td>Every 5 seconds</td></tr>
-          <tr><td>Distribution Period</td><td>37.5 years</td></tr>
+          <tr><td>Round Interval</td><td>Every 10 seconds</td></tr>
+          <tr><td>Distribution Period</td><td>~37.5 years</td></tr>
           <tr><td>Eligible Nodes Per Slot</td><td>~10</td></tr>
-          <tr><td>Identity Maturation</td><td>200 slots (~16.7 minutes)</td></tr>
-          <tr><td>Confirmation Depth</td><td>6 slots (~30 seconds)</td></tr>
-          <tr><td>Checkpoint Interval</td><td>Every 1,000 slots (~83 minutes)</td></tr>
-          <tr><td>Transaction Fee</td><td>0.0005 TMPL → slot winner (all eras)</td></tr>
+          <tr><td>Identity Maturation</td><td>200 slots (~33 minutes)</td></tr>
+          <tr><td>Confirmation Depth</td><td>3 slots (~30 seconds)</td></tr>
+          <tr><td>Checkpoint Interval</td><td>Every 1,000 slots (~2.8 hours)</td></tr>
+          <tr><td>Transaction Fee</td><td>0.1% of amount (min 0.0001 TMPL, max 0.01 TMPL) → slot winner</td></tr>
           <tr><td>Pre-mine</td><td>None</td></tr>
           <tr><td>Insider Allocation</td><td>None</td></tr>
         </table>
       </div>
       <div class="docs-section" id="doc-eras">
         <div class="docs-h2">Two Eras</div>
-        <p class="docs-p"><strong style="color:var(--accent)">Era 1 — Distribution (Years 0 to 37.5):</strong> Every transaction costs 0.0005 TMPL, paid to the slot winner. Nodes also earn through the VRF lottery. 250 million TMPL distributed over 37.5 years. No pre-mine.</p>
-        <p class="docs-p"><strong style="color:var(--green)">Era 2 — Sustaining (Year 37.5 onwards):</strong> Lottery rewards stop. Supply is fixed at 250 million forever. Transactions still cost 0.0005 TMPL paid to the slot winner. Network self-sustaining indefinitely through fees alone.</p>
+        <p class="docs-p"><strong style="color:var(--accent)">Era 1 — Distribution (Years 0 to ~37.5):</strong> Every transaction carries a fee of 0.1% of the send amount (minimum 0.0001 TMPL, maximum 0.01 TMPL), paid to the slot winner. Nodes also earn through the VRF lottery: 1.0575 TMPL every 10 seconds. 125 million TMPL distributed over ~37.5 years. No pre-mine.</p>
+        <p class="docs-p"><strong style="color:var(--green)">Era 2 — Sustaining (Year ~37.5 onwards):</strong> Lottery rewards stop. Supply is fixed at 125 million forever. Transactions still carry a 0.1% fee paid to the slot winner. Network self-sustaining indefinitely through fees alone.</p>
         <p class="docs-p">The transition is automatic. No upgrade required. No vote.</p>
       </div>
     </div>
@@ -503,7 +528,23 @@ winner = min(nodes, key=lambda n: |ticket_int - target_int|)</div>
 
 <script>
 const API = 'https://timpal.org/api';
+const TOTAL_SUPPLY = 125_000_000;
 let explorerRunning = false;
+
+// ── Theme ──────────────────────────────────────────────────────────────────
+function toggleTheme() {
+  const isDark = document.body.classList.toggle('dark');
+  document.getElementById('theme-btn').textContent = isDark ? '☀ LIGHT' : '☾ DARK';
+  localStorage.setItem('timpal_theme', isDark ? 'dark' : 'light');
+}
+(function initTheme() {
+  const saved = localStorage.getItem('timpal_theme');
+  if (saved === 'dark') {
+    document.body.classList.add('dark');
+    const btn = document.getElementById('theme-btn');
+    if (btn) btn.textContent = '☀ LIGHT';
+  }
+})();
 
 function showPage(name) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
@@ -544,9 +585,8 @@ async function fetchExplorer() {
   try {
     const resp = await fetch(API);
     const data = await resp.json();
-    const TOTAL = 250_000_000;
     const minted = data.total_minted || 0;
-    const pct = (minted / TOTAL * 100).toFixed(6);
+    const pct = (minted / TOTAL_SUPPLY * 100).toFixed(6);
 
     _set('exp-minted',   minted.toLocaleString(undefined,{minimumFractionDigits:4,maximumFractionDigits:4})+' TMPL');
     _set('exp-remaining',(data.remaining||0).toLocaleString(undefined,{maximumFractionDigits:0})+' TMPL');

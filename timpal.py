@@ -1516,9 +1516,20 @@ class Ledger:
             # Remove zero or negative balances
             balances = {k: v for k, v in balances.items() if isinstance(v, int) and v > 0}
 
-            c_verify  = [b for b in self.chain if b.get("slot", 0) >= prune_before]
-            t_verify  = [t for t in self.transactions if (t.get("slot") or 0) >= prune_before]
-            fr_verify = [fr for fr in self.fee_rewards if fr.get("time_slot", 0) >= prune_before]
+            # H1: explicit sort guarantees deterministic hash regardless of insertion order.
+            # H5: upper bound < checkpoint_slot matches apply_checkpoint's window exactly.
+            c_verify  = sorted(
+                [b  for b  in self.chain        if prune_before <= b.get("slot", 0)       < checkpoint_slot],
+                key=lambda b: b.get("slot", 0)
+            )
+            t_verify  = sorted(
+                [t  for t  in self.transactions  if prune_before <= (t.get("slot") or 0)  < checkpoint_slot],
+                key=lambda t: (t.get("slot", 0), t.get("tx_id", ""))
+            )
+            fr_verify = sorted(
+                [fr for fr in self.fee_rewards   if prune_before <= fr.get("time_slot", 0) < checkpoint_slot],
+                key=lambda fr: (fr.get("time_slot", 0), fr.get("winner_id", ""))
+            )
 
             # Spent tx IDs — take a sample from bloom filter (we persist the full filter)
             cp = {
@@ -1565,9 +1576,19 @@ class Ledger:
                     return False
 
             # Verify integrity hashes where we have local data
-            c_verify  = [b  for b  in self.chain        if prune_before <= b.get("slot",       0) < cp_slot]
-            t_verify  = [t  for t  in self.transactions if prune_before <= (t.get("slot") or 0) < cp_slot]
-            fr_verify = [fr for fr in self.fee_rewards  if prune_before <= fr.get("time_slot", 0) < cp_slot]
+            # H1: explicit sort must match create_checkpoint's sort order exactly.
+            c_verify  = sorted(
+                [b  for b  in self.chain        if prune_before <= b.get("slot",       0) < cp_slot],
+                key=lambda b: b.get("slot", 0)
+            )
+            t_verify  = sorted(
+                [t  for t  in self.transactions  if prune_before <= (t.get("slot") or 0) < cp_slot],
+                key=lambda t: (t.get("slot", 0), t.get("tx_id", ""))
+            )
+            fr_verify = sorted(
+                [fr for fr in self.fee_rewards   if prune_before <= fr.get("time_slot", 0) < cp_slot],
+                key=lambda fr: (fr.get("time_slot", 0), fr.get("winner_id", ""))
+            )
 
             if c_verify:
                 if self._compute_hash(c_verify) != checkpoint.get("chain_hash", ""):

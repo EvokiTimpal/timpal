@@ -614,8 +614,6 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             # Version check — reject pushes from nodes below MIN_VERSION.
-            # This prevents old nodes (any version before 4.0) from ever
-            # writing stale or incompatible data into the explorer DB.
             push_version = data.get("version", "0.0")
             if _ver(push_version) < _ver(MIN_VERSION):
                 self._send_json(400, {
@@ -756,12 +754,23 @@ class Handler(BaseHTTPRequestHandler):
                         if incoming_cp_slot > cur_cp_slot:
                             new_prune_before = max(0, incoming_cp_slot - CHECKPOINT_BUFFER)
 
+                            # FIX 7: verify checkpoint balances are self-consistent.
+                            # (1) Total sum must not exceed total_minted.
+                            # (2) No single address balance may exceed total_minted —
+                            #     this catches per-address inflation that is masked by
+                            #     an equal deflation elsewhere (sum-neutral attack).
                             cp_balance_sum = sum(
                                 v for v in incoming_cp_balances.values()
                                 if isinstance(v, int) and not isinstance(v, bool)
                             )
                             if cp_balance_sum > incoming_minted:
                                 self._send_json(400, {"error": "checkpoint balances exceed total_minted"})
+                                return
+                            if any(
+                                isinstance(v, int) and not isinstance(v, bool) and v > incoming_minted
+                                for v in incoming_cp_balances.values()
+                            ):
+                                self._send_json(400, {"error": "single balance exceeds total_minted"})
                                 return
 
                             new_block_counts = {r[0]: r[1] for r in conn.execute(

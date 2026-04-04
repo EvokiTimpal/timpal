@@ -216,14 +216,19 @@ def handle_client(conn, addr):
                 conn.sendall(json.dumps({"type": "ERROR", "msg": "invalid host"}).encode())
                 return
 
-            # Rate limit (skip if already registered from same IP)
-            known_ips = set()
+            # FIX 6: Resolve known server hostnames OUTSIDE bs_lock to avoid
+            # blocking DNS calls while holding the lock (could stall all requests
+            # for seconds when DNS is slow or BS_MAX_SERVERS entries are present).
             with bs_lock:
-                for v in bootstrap_servers.values():
-                    try:
-                        known_ips.add(socket.gethostbyname(v["host"]))
-                    except Exception:
-                        known_ips.add(v["host"])
+                known_hosts = [v["host"] for v in bootstrap_servers.values()]
+            known_ips = set()
+            for host in known_hosts:
+                try:
+                    known_ips.add(socket.gethostbyname(host))
+                except Exception:
+                    known_ips.add(host)
+
+            # Rate limit (skip if already registered from same IP)
             if ip not in known_ips:
                 with rate_lock:
                     bs_ip_rate.setdefault(ip, [])

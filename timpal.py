@@ -207,12 +207,13 @@ def get_block_reward(total_minted: int) -> int:
     """Return correct block reward given current total_minted.
 
     Every block pays exactly REWARD_PER_ROUND except the final block
-    of Era 1, which pays exactly the remaining supply (0.23825 TMPL).
+    of Era 1, which pays exactly the remaining supply (0.7325 TMPL).
     Returns 0 if Era 2 has already begun (total_minted >= TOTAL_SUPPLY).
 
     This prevents the permanent Era 1 stall caused by non-integer division:
       12,500,000,000,000,000 / 105,750,000 = 118,203,309.692...
-    The remainder (23,825,000 units) would never be awarded without this function.
+    The remainder (73,250,000 units = 0.7325 TMPL) would never be awarded
+    without this function.
     """
     remaining = TOTAL_SUPPLY - total_minted
     if remaining <= 0:
@@ -1174,10 +1175,7 @@ class Ledger:
             return False
 
         # Rule 12: per-producer registration count
-        producer_regs = [r for r in regs
-                         if r.get("device_id") == wid or
-                         hashlib.sha256(bytes.fromhex(r.get("public_key", "00"))).hexdigest() == wid]
-        # Count registrations whose public key matches winner's public key
+        # Count registrations whose public key matches winner's public key.
         winner_regs = 0
         for r in regs:
             try:
@@ -1573,6 +1571,51 @@ class Ledger:
             json.dumps(entries, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
 
+    def _recompute_balances_locked(self, prune_before: int) -> dict:
+        """Independently recompute balances for all addresses up to prune_before.
+
+        Starts from the most recent checkpoint's balance snapshot (or zero),
+        then applies every block reward, fee reward, and transaction in the
+        rolling window where slot < prune_before.
+
+        Called by apply_checkpoint to verify that the peer's balance snapshot
+        is consistent with our independently verified chain history.
+        Caller must hold self._lock.
+        """
+        # Start from previous checkpoint balances (the last one we accepted)
+        if self.checkpoints:
+            balances = dict(self.checkpoints[-1].get("balances", {}))
+        else:
+            balances = {}
+
+        # Apply block rewards and fees for blocks strictly before prune_before
+        for block in self.chain:
+            s   = block.get("slot", 0)
+            wid = block.get("winner_id", "")
+            if s < prune_before and wid:
+                balances[wid] = balances.get(wid, 0) + block.get("amount", 0)
+                balances[wid] = balances.get(wid, 0) + block.get("fees_collected", 0)
+
+        # Apply fee_rewards for records strictly before prune_before
+        for fr in self.fee_rewards:
+            if fr.get("time_slot", 0) < prune_before:
+                wid = fr.get("winner_id", "")
+                if wid:
+                    balances[wid] = balances.get(wid, 0) + fr.get("amount", 0)
+
+        # Apply transactions strictly before prune_before
+        for tx in self.transactions:
+            if (tx.get("slot") or 0) < prune_before:
+                r = tx.get("recipient_id", "")
+                s = tx.get("sender_id", "")
+                if r:
+                    balances[r] = balances.get(r, 0) + tx.get("amount", 0)
+                if s:
+                    balances[s] = balances.get(s, 0) - tx.get("amount", 0) - tx.get("fee", 0)
+
+        # Strip zero / negative entries — matches create_checkpoint filter
+        return {k: v for k, v in balances.items() if isinstance(v, int) and v > 0}
+
     def create_checkpoint(self, checkpoint_slot: int) -> dict:
         """Create a checkpoint at checkpoint_slot.
 
@@ -1710,6 +1753,19 @@ class Ledger:
                 if self._compute_hash(t_verify) != checkpoint.get("txs_hash", ""):
                     return False
                 if self._compute_hash(fr_verify) != checkpoint.get("fee_rewards_hash", ""):
+                    return False
+
+                # Balance verification — recompute from our own chain history and
+                # compare against the peer's balance snapshot.  The hash checks
+                # above prove the raw block/tx data is correct; this step proves
+                # the balance arithmetic is also correct.  A peer who crafts valid
+                # hashes but inflated balances is rejected here.
+                recomputed = self._recompute_balances_locked(prune_before)
+                peer_bals  = {k: v for k, v in checkpoint.get("balances", {}).items()
+                              if isinstance(v, int) and not isinstance(v, bool) and v > 0}
+                if recomputed != peer_bals:
+                    print(f"\n  [apply_checkpoint] balance mismatch at slot {cp_slot} — rejected\n  > ",
+                          end="", flush=True)
                     return False
 
             # Prune
@@ -2213,7 +2269,7 @@ class Network:
                     pid = msg.get("device_id")
                     if _ver(msg.get("version", "0.0")) < _ver(MIN_VERSION):
                         continue
-                    if pid and pid != self.wallet.device_id:
+                    if pid and (not self.wallet or pid != self.wallet.device_id):
                         with self._peers_lock:
                             is_new = pid not in self.peers
                             self.peers[pid] = {

@@ -1483,6 +1483,7 @@ class Ledger:
                 if hashlib.sha256(bytes.fromhex(reorg_compete_sig)).hexdigest() != reorg_proof:
                     break
                 reorg_bws = {k: v for k, v in block.items() if k != "block_sig"}
+                reorg_bws["type"] = "block_reward"   # normalize: network gossips type="BLOCK" but sig was over type="block_reward"
                 if not Dilithium3.verify(reorg_pub_bytes, canonical_block(reorg_bws),
                                          bytes.fromhex(reorg_block_sig)):
                     break
@@ -2653,7 +2654,6 @@ class Node:
             # in below (see _broadcast_loop, _bootstrap_connect, _hello_peers,
             # _handle_incoming HELLO/HELLO_ACK).
             self.network.start()
-            print(f"  Listening on port {self.network.port}")
             time.sleep(3)
             self.network._sync_ledger()
             time.sleep(2)

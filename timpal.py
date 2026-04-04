@@ -62,6 +62,8 @@ CONFIRMATION_DEPTH = 3      # blocks for finality = 30 seconds
 # ── Identity constants ─────────────────────────────────────────────────────────
 
 MIN_IDENTITY_AGE     = 200  # slots before identity can compete (~33 min)
+IDENTITY_ACTIVITY_WINDOW = 8_640  # slots (~24 hours) — inactive identity excluded from lottery
+IDENTITY_GRACE_PERIOD    = 300    # slots after first_seen before decay clock starts (MIN_IDENTITY_AGE + 100)
 MAX_REGS_PER_BLOCK   = 10   # global registration cap per block
 MAX_REGS_PER_PRODUCER = 2   # per winner registration cap per block
 
@@ -247,8 +249,9 @@ def calculate_fee(amount: int) -> int:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def select_competitors(identities: dict, prev_block_hash: str,
-                       slot: int, n: int = TARGET_COMPETITORS) -> list:
-    """Select n competitors for this slot from all registered mature identities.
+                       slot: int, n: int = TARGET_COMPETITORS,
+                       identity_last_attest: dict = None) -> list:
+    """Select n competitors for this slot from all registered mature active identities.
 
     Selection is:
     - Deterministic: every node gets the same result from the same inputs
@@ -256,13 +259,27 @@ def select_competitors(identities: dict, prev_block_hash: str,
     - Fair: uniform SHA256 scoring gives every eligible identity equal probability
     - Verifiable: any node can reproduce this from chain data alone
 
-    Security: an attacker controlling K of N identities has K/N probability of
-    selection — cannot be improved without controlling prev_block_hash itself.
+    Activity filter (identity decay): identities inactive for more than
+    IDENTITY_ACTIVITY_WINDOW slots are excluded from selection. Grace period
+    of IDENTITY_GRACE_PERIOD slots after first_seen before the decay clock starts.
+    An attacker must keep every fake identity running continuously to retain
+    its lottery power — dormant accumulated identities are worthless.
+
+    Security: an attacker controlling K of N active identities has K/N probability
+    of selection — cannot be improved without controlling prev_block_hash itself.
     """
-    eligible = [
-        did for did, first_seen in identities.items()
-        if slot - first_seen >= MIN_IDENTITY_AGE
-    ]
+    eligible = []
+    for did, first_seen in identities.items():
+        if slot - first_seen < MIN_IDENTITY_AGE:
+            continue
+        if identity_last_attest is not None:
+            # Grace period: decay clock does not start until IDENTITY_GRACE_PERIOD
+            # slots after first_seen — gives new nodes time to start attesting.
+            if slot > first_seen + IDENTITY_GRACE_PERIOD:
+                last_attest = identity_last_attest.get(did, first_seen)
+                if slot - last_attest > IDENTITY_ACTIVITY_WINDOW:
+                    continue  # inactive — excluded from lottery
+        eligible.append(did)
     if not eligible:
         return []
     scored = sorted(
@@ -921,6 +938,7 @@ class Ledger:
         self.checkpoints:    list  = []
         self.identities:      dict  = {}     # {device_id: first_seen_slot}
         self.identity_pubkeys:dict  = {}     # {device_id: public_key_hex} — attestation binding
+        self.identity_last_attest:dict = {}  # {device_id: last_attest_slot} — activity decay
         self.anchor_hashes:  set   = set()  # {genesis_block_hash} — Layer 2 Sybil
         self.balances:       dict  = {}     # {device_id: int} permanent balance cache
         self.my_transactions:list  = []     # personal history, kept forever
@@ -948,6 +966,7 @@ class Ledger:
             self.fee_rewards   = data.get("fee_rewards", [])
             self.identities      = data.get("identities", {})
             self.identity_pubkeys= data.get("identity_pubkeys", {})
+            self.identity_last_attest = data.get("identity_last_attest", {})
             self.anchor_hashes   = set(data.get("anchor_hashes", []))
             self.balances      = data.get("balances", {})
             self.my_transactions = data.get("my_transactions", [])
@@ -975,6 +994,7 @@ class Ledger:
                     "checkpoints":    self.checkpoints,
                     "identities":      self.identities,
                     "identity_pubkeys":self.identity_pubkeys,
+                    "identity_last_attest": self.identity_last_attest,
                     "anchor_hashes":   list(self.anchor_hashes),
                     "balances":       self.balances,
                     "my_transactions":self.my_transactions,
@@ -1251,6 +1271,9 @@ class Ledger:
         # All 17 rules passed — accept the block
         self.chain.append(block)
         self.total_minted += amount
+
+        # Block production is proof of activity — update decay clock for winner
+        self.identity_last_attest[wid] = slot
 
         # fees_collected is on the block itself — counted in get_balance via
         # block.get("fees_collected", 0). No separate fee_rewards entry needed.
@@ -1684,6 +1707,7 @@ class Ledger:
                 "balances":         balances,
                 "identities":       dict(self.identities),
                 "identity_pubkeys": dict(self.identity_pubkeys),
+                "identity_last_attest": dict(self.identity_last_attest),
                 "anchor_hashes":    list(self.anchor_hashes),
                 "total_minted":     self.total_minted,
                 "chain_tip_hash":   tip_hash,
@@ -1787,6 +1811,12 @@ class Ledger:
                 if isinstance(did, str) and isinstance(pub_hex, str) and pub_hex:
                     if did not in self.identity_pubkeys:
                         self.identity_pubkeys[did] = pub_hex
+
+            # Merge identity_last_attest — take the most recent slot per identity
+            for did, last_slot in checkpoint.get("identity_last_attest", {}).items():
+                if isinstance(did, str) and isinstance(last_slot, int) and not isinstance(last_slot, bool):
+                    if last_slot > self.identity_last_attest.get(did, 0):
+                        self.identity_last_attest[did] = last_slot
 
             # Merge anchor_hashes
             for gbh in checkpoint.get("anchor_hashes", []):
@@ -2857,11 +2887,13 @@ class Node:
                 # thread — iterating identities outside the lock risks RuntimeError.
                 with self.ledger._lock:
                     tip_hash, tip_slot = self.ledger._get_tip()
-                    identities_snapshot = dict(self.ledger.identities)
+                    identities_snapshot   = dict(self.ledger.identities)
+                    last_attest_snapshot  = dict(self.ledger.identity_last_attest)
 
                 # Am I selected this slot?
                 selected = select_competitors(
-                    identities_snapshot, tip_hash, current_slot
+                    identities_snapshot, tip_hash, current_slot,
+                    identity_last_attest=last_attest_snapshot
                 )
 
                 if self.wallet.device_id in selected:
@@ -2918,7 +2950,8 @@ class Node:
         # Validate COMPETE
         with self.ledger._lock:
             tip_hash, _ = self.ledger._get_tip()
-            selected = select_competitors(self.ledger.identities, tip_hash, slot)
+            selected = select_competitors(self.ledger.identities, tip_hash, slot,
+                                          identity_last_attest=self.ledger.identity_last_attest)
 
         if did not in selected:
             return
@@ -3151,6 +3184,9 @@ class Node:
                 return
         except Exception:
             return
+
+        # Attestation is proof of activity — update decay clock for this identity
+        self.ledger.identity_last_attest[did] = slot
 
         with self._attest_lock:
             if block_hash not in self._attestations:

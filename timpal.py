@@ -99,7 +99,12 @@ MAX_SLOT_GAP           = 30
 SYNC_RATE_WINDOW       = 30
 BROADCAST_PORT         = 7778
 NODE_PORT_RANGE_START  = 7779
-MAX_P2P_MESSAGE_SIZE   = 10_000_000   # 10MB DoS protection
+MAX_P2P_MESSAGE_SIZE   = 10_000_000   # 10MB DoS protection — regular P2P messages
+MAX_SYNC_MESSAGE_SIZE  = 100_000_000  # 100MB — SYNC responses can contain full block history
+IP_BAN_SECONDS         = 60           # seconds to ban IP after sending oversized message
+BLOCK_RATE_LIMIT       = 3            # max BLOCK msgs per IP per slot window (10s)
+COMPETE_RATE_LIMIT     = 12           # max COMPETE msgs per IP per slot (TARGET_COMPETITORS + 2)
+ATTEST_RATE_LIMIT      = 500          # max ATTEST msgs per IP per slot window
 MAX_MEMPOOL_TX_PER_SENDER = 10
 
 # ── Chain constants ────────────────────────────────────────────────────────────
@@ -402,18 +407,20 @@ class SpentBloomFilter:
 # PART 6 — REGISTRATION FREEZE
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _avg_regs_per_slot(ledger, from_slot: int, to_slot: int) -> float:
-    """Count average registrations per slot in the given window from chain data."""
+def _avg_regs_per_slot(chain: list, from_slot: int, to_slot: int) -> float:
+    """Count average registrations per slot in the given window from chain data.
+    Accepts a chain list directly so callers can pass a lock-safe snapshot."""
     span = max(1, to_slot - from_slot)
     count = 0
-    for block in ledger.chain:
+    for block in chain:
         s = block.get("slot", 0)
         if from_slot <= s < to_slot:
             count += len(block.get("registrations", []))
     return count / span
 
 
-def is_registration_freeze_active(ledger, current_slot: int) -> tuple:
+def is_registration_freeze_active(ledger, current_slot: int,
+                                   chain: list = None) -> tuple:
     """Check whether registration freeze is active.
 
     Returns (freeze_active: bool, status: dict)
@@ -422,14 +429,19 @@ def is_registration_freeze_active(ledger, current_slot: int) -> tuple:
     Recent:   avg regs/slot over [current_slot - 100,  current_slot)
     Freeze triggers when recent > baseline * FREEZE_RATE_MULTIPLIER
     Freeze lifts after FREEZE_COOLDOWN_SLOTS consecutive normal slots.
+
+    chain: optional pre-snapshotted chain list. Pass a snapshot when calling
+    without ledger._lock held (e.g. _freeze_monitor). Pass None when
+    ledger._lock is already held — ledger.chain is then accessed directly.
     """
+    chain_data = chain if chain is not None else ledger.chain
     baseline = _avg_regs_per_slot(
-        ledger,
+        chain_data,
         current_slot - FREEZE_BASELINE_WINDOW,
         current_slot - FREEZE_DETECTION_WINDOW
     )
     recent = _avg_regs_per_slot(
-        ledger,
+        chain_data,
         current_slot - FREEZE_DETECTION_WINDOW,
         current_slot
     )
@@ -526,15 +538,20 @@ def derive_keys_from_seed(seed_phrase: str) -> tuple:
     """Deterministically derive Dilithium3 keypair from seed phrase.
     Same phrase always produces same keys. Uses set_drbg_seed (requires pycryptodome).
     """
+    # ValueError from _mnemonic_to_entropy (bad phrase) propagates directly —
+    # that is a user error, not a missing dependency.
+    seed_bytes   = _mnemonic_to_entropy(seed_phrase)
+    key_material = hashlib.sha512(
+        b"timpal-dilithium3-v4:" + seed_bytes
+    ).digest()[:48]  # set_drbg_seed requires exactly 48 bytes
     try:
-        seed_bytes   = _mnemonic_to_entropy(seed_phrase)
-        key_material = hashlib.sha512(
-            b"timpal-dilithium3-v4:" + seed_bytes
-        ).digest()[:48]  # set_drbg_seed requires exactly 48 bytes
         Dilithium3.set_drbg_seed(key_material)
         pk, sk = Dilithium3.keygen()
         return pk, sk
-    except Warning as w:
+    except Exception as w:
+        # L2: catch any Exception (AttributeError, TypeError, Warning, etc.)
+        # not just Warning — pycryptodome may raise different types depending
+        # on version when set_drbg_seed is unavailable.
         raise RuntimeError(
             "pycryptodome required for wallet recovery.\n"
             "  Run: pip3 install pycryptodome"
@@ -800,6 +817,79 @@ def can_add_to_mempool(sender_id: str, mempool: dict) -> bool:
     return pending < MAX_MEMPOOL_TX_PER_SENDER
 
 
+# ── Payment URI (spec Part 13B) ───────────────────────────────────────────────
+
+def generate_payment_uri(device_id: str, amount: float = None,
+                          memo: str = None, label: str = None) -> str:
+    """Generate a Timpal payment URI per spec Part 13B.
+
+    Format: timpal:<device_id>?amount=<tmpl>&memo=<text>&label=<name>
+
+    All query parameters are optional. amount is in TMPL (decimal).
+    memo is the signed payment reference (max 128 chars).
+    label is a display hint only — never included in the transaction.
+
+    Examples:
+        generate_payment_uri("4a7f...")
+        → "timpal:4a7f..."
+
+        generate_payment_uri("4a7f...", amount=4.50, memo="Table7", label="Cafe")
+        → "timpal:4a7f...?amount=4.5&memo=Table7&label=Cafe"
+    """
+    import urllib.parse
+    if not _is_valid_hex64(device_id):
+        raise ValueError(f"Invalid device_id: must be 64 lowercase hex chars")
+    params = {}
+    if amount is not None:
+        if not isinstance(amount, (int, float)) or amount <= 0:
+            raise ValueError("amount must be a positive number")
+        params["amount"] = f"{float(amount):g}"
+    if memo is not None:
+        params["memo"] = str(memo)[:128]
+    if label is not None:
+        params["label"] = str(label)
+    uri = f"timpal:{device_id}"
+    if params:
+        uri += "?" + urllib.parse.urlencode(params)
+    return uri
+
+
+def parse_payment_uri(uri: str) -> dict:
+    """Parse a Timpal payment URI per spec Part 13B.
+
+    Returns dict with keys: device_id (str), amount (float|None),
+    memo (str|None), label (str|None).
+
+    Raises ValueError if the URI is malformed or device_id is invalid.
+    """
+    import urllib.parse
+    if not isinstance(uri, str):
+        raise ValueError("URI must be a string")
+    uri = uri.strip()
+    if not uri.startswith("timpal:"):
+        raise ValueError("URI must start with 'timpal:'")
+    rest = uri[len("timpal:"):]
+    if "?" in rest:
+        device_id, query = rest.split("?", 1)
+    else:
+        device_id, query = rest, ""
+    device_id = device_id.strip().lower()
+    if not _is_valid_hex64(device_id):
+        raise ValueError(f"Invalid device_id in URI: {device_id!r}")
+    params = urllib.parse.parse_qs(query, keep_blank_values=False)
+    amount = None
+    if "amount" in params:
+        try:
+            amount = float(params["amount"][0])
+            if amount <= 0:
+                raise ValueError("amount must be positive")
+        except (ValueError, TypeError):
+            raise ValueError(f"Invalid amount in URI: {params['amount'][0]!r}")
+    memo  = params["memo"][0][:128]  if "memo"  in params else None
+    label = params["label"][0]       if "label" in params else None
+    return {"device_id": device_id, "amount": amount, "memo": memo, "label": label}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # PART 9 — LEDGER
 # ══════════════════════════════════════════════════════════════════════════════
@@ -840,6 +930,7 @@ class Ledger:
         self.freeze_triggered_slot:    int  = None
         self.freeze_last_abnormal_slot:int  = 0
         self.freeze_normal_streak:     int  = 0
+        self.last_finalized_slot:      int  = -1   # reorg barrier: no reorg past this slot
         self._load()
 
     # ── Persistence ────────────────────────────────────────────────────────────
@@ -862,6 +953,7 @@ class Ledger:
             self.freeze_triggered_slot     = data.get("freeze_triggered_slot")
             self.freeze_last_abnormal_slot = data.get("freeze_last_abnormal_slot", 0)
             self.freeze_normal_streak      = data.get("freeze_normal_streak", 0)
+            self.last_finalized_slot       = data.get("last_finalized_slot", -1)
             bloom_data = data.get("spent_bloom")
             if bloom_data:
                 self._spent_bloom = SpentBloomFilter.from_dict(bloom_data)
@@ -888,6 +980,7 @@ class Ledger:
                     "freeze_triggered_slot":     self.freeze_triggered_slot,
                     "freeze_last_abnormal_slot": self.freeze_last_abnormal_slot,
                     "freeze_normal_streak":      self.freeze_normal_streak,
+                    "last_finalized_slot":        self.last_finalized_slot,
                     "spent_bloom":    self._spent_bloom.to_dict()
                 }, f, indent=2)
             os.replace(tmp, LEDGER_FILE)
@@ -1002,10 +1095,10 @@ class Ledger:
         selected = select_competitors(self.identities, prev_hash_for_selection, slot)
         if wid not in selected and len(self.identities) >= TARGET_COMPETITORS:
             # Allow when fewer than TARGET_COMPETITORS mature identities exist
-            # (early network, all eligible nodes compete)
+            # (early network — all eligible nodes compete, not just the top 10)
             mature = [d for d, fs in self.identities.items()
                       if slot - fs >= MIN_IDENTITY_AGE]
-            if len(mature) >= TARGET_COMPETITORS and wid not in selected:
+            if len(mature) >= TARGET_COMPETITORS:
                 return False
 
         # Rule 2: challenge must match compute_challenge(prev_hash, slot)
@@ -1143,8 +1236,12 @@ class Ledger:
                 return False
             intra_block_debit[tx.sender_id] = prior_debit + tx.amount + tx.fee
 
-        # Rule 16 (block_sig): winner signs canonical block without block_sig field
+        # Rule 16 (block_sig): winner signs canonical block without block_sig field.
+        # Normalize "type" to "block_reward": the network gossips blocks with
+        # type="BLOCK" but the producer signed over type="block_reward".
+        # Without this normalization every gossiped block fails sig verification.
         block_without_sig = {k: v for k, v in block.items() if k != "block_sig"}
+        block_without_sig["type"] = "block_reward"
         try:
             block_payload = canonical_block(block_without_sig)
             block_sig_bytes = bytes.fromhex(block_sig)
@@ -1324,6 +1421,11 @@ class Ledger:
             tip_slot_now = self.chain[-1].get("slot", 0)
             if tip_slot_now - anchor_slot > MAX_REORG_DEPTH:
                 return False
+
+        # Finality barrier: never reorg past a finalized block.
+        # A finalized block carries >2/3 Dilithium3 attestations — irreversible.
+        if anchor_slot <= self.last_finalized_slot:
+            return False
 
         # Validate fork blocks against a fork-local identity table
         validated       = []
@@ -1546,7 +1648,10 @@ class Ledger:
                 "txs_hash":         self._compute_hash(t_verify),
                 "fee_rewards_hash": self._compute_hash(fr_verify),
                 "kept_minted":      sum(b.get("amount", 0) for b in c_verify),
-                "version":          VERSION
+                "version":          VERSION,
+                # MISSING 6: include bloom filter so a receiving node inherits
+                # spent-tx knowledge and cannot replay recently-confirmed tx IDs.
+                "spent_bloom":      self._spent_bloom.to_dict()
             }
 
             # Apply checkpoint — prune old data
@@ -1568,6 +1673,13 @@ class Ledger:
             prune_before = checkpoint.get("prune_before", 0)
 
             if cp_slot <= 0 or cp_slot % CHECKPOINT_INTERVAL != 0:
+                return False
+
+            # C1: prune_before must equal exactly max(0, cp_slot - CHECKPOINT_BUFFER).
+            # Any other value makes the verification window either empty (attacker
+            # bypasses hash checks and wipes our chain) or wrong (hash mismatch).
+            expected_prune = max(0, cp_slot - CHECKPOINT_BUFFER)
+            if prune_before != expected_prune:
                 return False
 
             if self.checkpoints:
@@ -1624,6 +1736,16 @@ class Ledger:
                 if isinstance(gbh, str):
                     self.anchor_hashes.add(gbh)
 
+            # MISSING 6: restore bloom filter from checkpoint.
+            # Without this, a node applying a peer checkpoint has no knowledge
+            # of spent tx IDs from before the checkpoint — replay attack window.
+            bloom_data = checkpoint.get("spent_bloom")
+            if bloom_data and isinstance(bloom_data, dict):
+                try:
+                    self._spent_bloom = SpentBloomFilter.from_dict(bloom_data)
+                except Exception:
+                    pass  # keep existing filter — never crash on checkpoint apply
+
             self.save()
             return True
 
@@ -1663,6 +1785,14 @@ class Network:
         self._sync_rate_lock = threading.Lock()
         self._block_rate= {}        # {ip: [timestamps]}
         self._block_rate_lock = threading.Lock()
+        # MISSING 2: IP ban tracking — populated when an IP sends an oversized message
+        self._banned_ips     = {}   # {ip: ban_expiry_timestamp}
+        self._ban_lock       = threading.Lock()
+        # MISSING 3: per-IP rate tracking for COMPETE and ATTEST
+        self._compete_rate        = {}   # {ip: [timestamps]}
+        self._compete_rate_lock   = threading.Lock()
+        self._attest_rate         = {}   # {ip: [timestamps]}
+        self._attest_rate_lock    = threading.Lock()
         self._peer_cache_file = PEERS_FILE
 
     def _get_local_ip(self) -> str:
@@ -1812,8 +1942,26 @@ class Network:
             except Exception:
                 continue
 
-    def _recv_full(self, conn) -> bytes:
-        """Receive a complete message. Hard limit MAX_P2P_MESSAGE_SIZE."""
+    def _check_msg_rate(self, rate_dict: dict, lock,
+                        ip: str, limit: int, window: float) -> bool:
+        """Return True if this IP is within the rate limit, False if exceeded.
+        Prunes expired timestamps in the same pass — no separate cleanup needed."""
+        now    = time.time()
+        cutoff = now - window
+        with lock:
+            ts = [t for t in rate_dict.get(ip, []) if t > cutoff]
+            if len(ts) >= limit:
+                return False
+            ts.append(now)
+            rate_dict[ip] = ts
+        return True
+
+    def _recv_full(self, conn, ban_ip: str = None) -> bytes:
+        """Receive a complete message. Hard limit MAX_P2P_MESSAGE_SIZE.
+
+        MISSING 2: if the message exceeds the limit and ban_ip is provided,
+        that IP is banned for IP_BAN_SECONDS — the attacker pays a cost for
+        every oversized flood attempt."""
         data = b""
         while True:
             chunk = conn.recv(65536)
@@ -1821,18 +1969,29 @@ class Network:
                 break
             data += chunk
             if len(data) > MAX_P2P_MESSAGE_SIZE:
+                if ban_ip:
+                    with self._ban_lock:
+                        self._banned_ips[ban_ip] = time.time() + IP_BAN_SECONDS
                 return b""   # drop — DoS protection
         return data
 
     def _handle_incoming(self, conn, addr):
         try:
             conn.settimeout(10.0)
-            data = self._recv_full(conn)
+            sender_ip = addr[0]
+
+            # MISSING 2: reject banned IPs before reading any data.
+            # An IP is banned when it sends an oversized message (DoS attempt).
+            now = time.time()
+            with self._ban_lock:
+                if now < self._banned_ips.get(sender_ip, 0):
+                    return
+
+            data = self._recv_full(conn, ban_ip=sender_ip)
             if not data:
                 return
             msg      = json.loads(data.decode())
             msg_type = msg.get("type")
-            sender_ip= addr[0]
 
             if msg_type == "HELLO":
                 pid = msg.get("device_id")
@@ -1842,7 +2001,7 @@ class Network:
                         "reason": "Update from https://github.com/EvokiTimpal/timpal"
                     }).encode())
                     return
-                if pid and pid != self.wallet.device_id:
+                if pid and (not self.wallet or pid != self.wallet.device_id):
                     with self._peers_lock:
                         if pid not in self.peers and len(self.peers) >= MAX_PEERS:
                             oldest = min(self.peers, key=lambda k: self.peers[k]["last_seen"])
@@ -1852,19 +2011,25 @@ class Network:
                             "port":      msg.get("port", NODE_PORT_RANGE_START),
                             "last_seen": time.time()
                         }
-                    conn.sendall(json.dumps({
-                        "type":      "HELLO_ACK",
-                        "device_id": self.wallet.device_id
-                    }).encode())
+                    if self.wallet:
+                        conn.sendall(json.dumps({
+                            "type":      "HELLO_ACK",
+                            "device_id": self.wallet.device_id
+                        }).encode())
 
             elif msg_type == "HELLO_ACK":
                 pid = msg.get("device_id")
-                if pid and pid != self.wallet.device_id:
+                if pid and self.wallet and pid != self.wallet.device_id:
                     with self._peers_lock:
                         if pid in self.peers:
                             self.peers[pid]["last_seen"] = time.time()
 
             elif msg_type == "BLOCK":
+                # MISSING 3: max BLOCK_RATE_LIMIT BLOCK messages per IP per slot window.
+                # A legitimate peer sends at most 1-2 blocks per slot.
+                if not self._check_msg_rate(self._block_rate, self._block_rate_lock,
+                                            sender_ip, BLOCK_RATE_LIMIT, REWARD_INTERVAL):
+                    return
                 slot = msg.get("slot")
                 wid  = msg.get("winner_id", "")
                 msg_id = f"block:{slot}:{wid}"
@@ -1876,6 +2041,11 @@ class Network:
                 self.broadcast(msg, exclude_id=None)
 
             elif msg_type == "ATTEST":
+                # MISSING 3: max ATTEST_RATE_LIMIT attestations per IP per slot window.
+                # Legitimate nodes produce one attestation per block per node.
+                if not self._check_msg_rate(self._attest_rate, self._attest_rate_lock,
+                                            sender_ip, ATTEST_RATE_LIMIT, REWARD_INTERVAL):
+                    return
                 block_hash = msg.get("block_hash", "")
                 did        = msg.get("device_id", "")
                 slot       = msg.get("slot", 0)
@@ -1888,6 +2058,11 @@ class Network:
                 self.broadcast(msg, exclude_id=None)
 
             elif msg_type == "COMPETE":
+                # MISSING 3: max COMPETE_RATE_LIMIT COMPETE messages per IP per slot window.
+                # Only TARGET_COMPETITORS (10) nodes compete per slot — 12 is the hard cap.
+                if not self._check_msg_rate(self._compete_rate, self._compete_rate_lock,
+                                            sender_ip, COMPETE_RATE_LIMIT, REWARD_INTERVAL):
+                    return
                 slot   = msg.get("slot")
                 did    = msg.get("device_id", "")
                 msg_id = f"compete:{slot}:{did}"
@@ -2000,6 +2175,9 @@ class Network:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         while self._running:
             try:
+                if not self.wallet:   # L1: skip broadcast until wallet is set
+                    time.sleep(1)
+                    continue
                 sock.sendto(json.dumps({
                     "type":               "HELLO",
                     "device_id":          self.wallet.device_id,
@@ -2067,6 +2245,9 @@ class Network:
                 pass
 
         while self._running:
+            if not self.wallet:   # L1: skip until wallet is set
+                time.sleep(1)
+                continue
             for host, port in list(self._bootstrap_servers):
                 try:
                     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -2131,6 +2312,8 @@ class Network:
 
     def _hello_peers(self):
         """Send HELLO to all known peers to confirm they are reachable."""
+        if not self.wallet:   # L1: skip until wallet is set
+            return
         with self._peers_lock:
             targets = list(self.peers.items())
         for pid, peer in targets:
@@ -2191,13 +2374,17 @@ class Network:
                     "chain_recent_hashes":recent_hashes
                 }).encode())
                 sock.shutdown(socket.SHUT_WR)
+                # M3: use MAX_SYNC_MESSAGE_SIZE (100MB) for sync responses.
+                # A response with 50 blocks × 500 txs can exceed the 10MB
+                # DoS limit used for regular gossip. Sync is a trusted pull
+                # operation — the larger limit is safe and necessary.
                 data = b""
                 while True:
                     chunk = sock.recv(65536)
                     if not chunk:
                         break
                     data += chunk
-                    if len(data) > MAX_P2P_MESSAGE_SIZE:
+                    if len(data) > MAX_SYNC_MESSAGE_SIZE:
                         break
                 sock.close()
                 msg = json.loads(data.decode())
@@ -2205,11 +2392,16 @@ class Network:
                 if msg.get("type") == "SYNC_RESPONSE":
                     if msg.get("checkpoint"):
                         cp = msg["checkpoint"]
+                        # H1: correct can_verify window is [prune_before, cp_slot).
+                        # Old code used slot < prune_before (blocks BEFORE the window)
+                        # which never overlaps with what apply_checkpoint checks.
+                        pb = cp.get("prune_before", 0)
+                        cs = cp.get("slot", 0)
                         # Apply checkpoint — requires peer confirmation if we can't verify locally
                         with self.ledger._lock:
                             can_verify = bool(
                                 [b for b in self.ledger.chain
-                                 if b.get("slot", cp.get("prune_before", 0)) < cp.get("prune_before", 0)]
+                                 if pb <= b.get("slot", 0) < cs]
                             )
                         ledger_empty = not self.ledger.chain and not self.ledger.checkpoints
                         if ledger_empty or can_verify:
@@ -2356,6 +2548,9 @@ class Node:
         self._control_token      = self._make_control_token()
         self._sending            = False
         self._last_finalized_slot = -1
+        # M2: guard against two threads racing to produce a block for the same slot
+        self._producing_slots:       set  = set()
+        self._producing_slots_lock       = threading.Lock()
 
     @staticmethod
     def _make_control_token() -> str:
@@ -2392,10 +2587,22 @@ class Node:
             exit(1)
 
         # Step 3+: Connect to peers
-        # Network starts in background; wallet creation may need a block hash
         self.network = Network(wallet=None, ledger=self.ledger, node_ref=self)
+        new_wallet_node = not os.path.exists(WALLET_FILE)
 
-        # Step 4-5: Load or create wallet
+        if new_wallet_node:
+            # L1: for new-wallet startup, start network first so the freeze
+            # check in _load_or_create_wallet() has real chain data.
+            # All network threads guard against wallet=None until it is wired
+            # in below (see _broadcast_loop, _bootstrap_connect, _hello_peers,
+            # _handle_incoming HELLO/HELLO_ACK).
+            self.network.start()
+            print(f"  Listening on port {self.network.port}")
+            time.sleep(3)
+            self.network._sync_ledger()
+            time.sleep(2)
+
+        # Step 4-5: Load or create wallet (freeze check uses real data for new wallets)
         self._load_or_create_wallet()
 
         # Wire up network with loaded wallet
@@ -2403,18 +2610,19 @@ class Node:
         self._my_device_id  = self.wallet.device_id
 
         # Step 6: Ledger already loaded in __init__
-        # Step 8-11: Start network threads
-        self.network.start()
+        # Step 8-11: Start network threads (already started above for new wallets)
+        if not new_wallet_node:
+            self.network.start()
         print(f"  Listening on port {self.network.port}")
 
         # Wait briefly for peer connections before lottery
-        time.sleep(3)
-        if not self.network.get_online_peers():
-            print("  Waiting for peers...")
-
-        # Sync ledger before participating
-        self.network._sync_ledger()
-        time.sleep(2)
+        if not new_wallet_node:
+            time.sleep(3)
+            if not self.network.get_online_peers():
+                print("  Waiting for peers...")
+            # Sync ledger before participating
+            self.network._sync_ledger()
+            time.sleep(2)
 
         # Steps 13: Broadcast our REGISTER message
         reg_msg = self.wallet._make_registration_message()
@@ -2588,13 +2796,16 @@ class Node:
                     continue
                 last_slot = current_slot
 
-                # Get prev_block_hash
+                # M4: snapshot tip and identities together inside ledger._lock.
+                # _add_block_locked modifies ledger.identities from the network
+                # thread — iterating identities outside the lock risks RuntimeError.
                 with self.ledger._lock:
                     tip_hash, tip_slot = self.ledger._get_tip()
+                    identities_snapshot = dict(self.ledger.identities)
 
                 # Am I selected this slot?
                 selected = select_competitors(
-                    self.ledger.identities, tip_hash, current_slot
+                    identities_snapshot, tip_hash, current_slot
                 )
 
                 if self.wallet.device_id in selected:
@@ -2694,16 +2905,33 @@ class Node:
         if winner_msg["device_id"] != self.wallet.device_id:
             return  # Someone else won
 
-        # Produce the block
-        self._produce_block(slot, prev_hash, winner_msg)
+        # M2: prevent duplicate block production if two threads race here.
+        # The lottery thread and the network handler both call _try_produce_block.
+        # Only the first one through the gate proceeds; the second returns immediately.
+        with self._producing_slots_lock:
+            if slot in self._producing_slots:
+                return
+            self._producing_slots.add(slot)
+        try:
+            self._produce_block(slot, prev_hash, winner_msg)
+        finally:
+            with self._producing_slots_lock:
+                self._producing_slots.discard(slot)
 
     def _produce_block(self, slot: int, prev_hash: str, compete_msg: dict):
         """Construct, sign, and broadcast a new block."""
         try:
+            # M1: snapshot mempool before acquiring ledger._lock.
+            # _on_transaction_received modifies _mempool under _mempool_lock
+            # without holding ledger._lock — iterating the live dict inside
+            # select_transactions_for_block risks RuntimeError.
+            with self._mempool_lock:
+                mempool_snapshot = dict(self._mempool)
+
             with self.ledger._lock:
                 total_minted = self.ledger.total_minted
-                # Select transactions (highest fee first)
-                txs = select_transactions_for_block(self._mempool, slot)
+                # Select transactions from snapshot (no lock ordering conflict)
+                txs = select_transactions_for_block(mempool_snapshot, slot)
                 fees_collected = sum(t.get("fee", 0) for t in txs)
                 # Collect pending registrations — skip entirely if freeze is active
                 # (a block with regs during freeze fails Rule 14/freeze validation)
@@ -2879,6 +3107,9 @@ class Node:
                 if is_final(block_hash, slot, self.ledger, self._attestations):
                     self._finalized.add(block_hash)
                     self._last_finalized_slot = slot
+                    # Propagate to ledger so _attempt_reorg enforces the barrier
+                    if slot > self.ledger.last_finalized_slot:
+                        self.ledger.last_finalized_slot = slot
                     # Prune attestation dicts for blocks older than CHECKPOINT_BUFFER
                     stale = [h for h in list(self._attestations.keys())
                              if self._attestation_slots.get(h, slot) < slot - CHECKPOINT_BUFFER]
@@ -2952,8 +3183,14 @@ class Node:
         while self._running:
             time.sleep(REWARD_INTERVAL)
             current_slot = get_current_slot()
+            # M5: snapshot chain under lock before calling is_registration_freeze_active.
+            # _add_block_locked modifies ledger.chain from the network thread without
+            # holding _freeze_monitor's context — iterating without the lock risks
+            # RuntimeError: dictionary changed size during iteration.
+            with self.ledger._lock:
+                chain_snapshot = list(self.ledger.chain)
             freeze_active, status = is_registration_freeze_active(
-                self.ledger, current_slot
+                self.ledger, current_slot, chain=chain_snapshot
             )
             was_active = getattr(self.ledger, "_last_freeze_active", False)
 
@@ -3006,6 +3243,17 @@ class Node:
             time.sleep(60)
             current_slot = get_current_slot()
             self.network._cleanup_seen_ids(current_slot)
+            # L4: prune attestation memory regardless of finality.
+            # Pruning inside _on_attest_received only runs on finalization.
+            # Under network partition (< 3 nodes) blocks may never finalize —
+            # this sweep bounds _attestations unconditionally.
+            cutoff = current_slot - CHECKPOINT_BUFFER
+            with self._attest_lock:
+                stale = [h for h, s in list(self._attestation_slots.items())
+                         if s < cutoff]
+                for h in stale:
+                    self._attestations.pop(h, None)
+                    self._attestation_slots.pop(h, None)
 
     # ── Explorer push ──────────────────────────────────────────────────────────
 
@@ -3030,7 +3278,7 @@ class Node:
         try:
             with self.ledger._lock:
                 tip_hash, tip_slot = self.ledger._get_tip()
-                blocks       = list(self.ledger.chain[-50:])
+                blocks       = [dict(b) for b in self.ledger.chain[-50:]]
                 transactions = list(self.ledger.transactions[-200:])
                 total_minted = self.ledger.total_minted
                 cp_slot      = 0
@@ -3401,6 +3649,26 @@ if __name__ == "__main__":
     if len(sys.argv) >= 2 and sys.argv[1] == "--recover":
         _recover_wallet()
         sys.exit(0)
+
+    elif len(sys.argv) >= 2 and sys.argv[1] == "--peer":
+        # MISSING 5: --peer <ip:port> — manual peer entry per spec Part 4.3.
+        # Allows connecting without DNS or bootstrap when both are unavailable.
+        # Network.__init__ copies BOOTSTRAP_SERVERS, so inserting here is enough.
+        if len(sys.argv) < 3:
+            print("Usage: python3 timpal.py --peer <ip:port>")
+            sys.exit(1)
+        peer_arg = sys.argv[2].strip()
+        try:
+            peer_host, peer_port_str = peer_arg.rsplit(":", 1)
+            peer_port = int(peer_port_str)
+            if not (1024 <= peer_port <= 65535):
+                raise ValueError("port out of range")
+        except (ValueError, AttributeError):
+            print(f"Invalid peer address: {peer_arg!r}  (expected ip:port)")
+            sys.exit(1)
+        BOOTSTRAP_SERVERS.insert(0, (peer_host, peer_port))
+        node = Node()
+        node.start()
 
     elif len(sys.argv) >= 2 and sys.argv[1] == "send":
         if len(sys.argv) < 4:

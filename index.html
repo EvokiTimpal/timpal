@@ -639,14 +639,6 @@ function _set(id, val) {
   if (el) el.textContent = val;
 }
 
-  el.innerHTML = arr.map(n =>
-    `<div class="explorer-row" onclick="showAddressDetail('${n.id}')">
-       <span class="row-id" title="${n.id}">${(n.id_short||n.id.slice(0,20)+'...')}</span>
-       <span style="font-family:monospace;font-size:12px;color:var(--accent)">${n.rewards} blocks</span>
-       <span style="font-family:monospace;font-size:11px;color:var(--text3)">${n.pct}%</span>
-     </div>`
-  ).join('');
-}
 
 async function explorerSearch() {
   const q   = (document.getElementById('exp-search').value || '').trim();

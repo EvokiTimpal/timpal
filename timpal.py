@@ -950,6 +950,7 @@ class Ledger:
         self.freeze_last_abnormal_slot:int  = 0
         self.freeze_normal_streak:     int  = 0
         self.last_finalized_slot:      int  = -1   # reorg barrier: no reorg past this slot
+        self._finalized_hashes:        set  = set() # {block_hash} — finalized by >2/3 attestations
         self._load()
 
     # ── Persistence ────────────────────────────────────────────────────────────
@@ -1110,17 +1111,24 @@ class Ledger:
         if _ver(ver) < _ver(MIN_VERSION):
             return False
 
-        # Rule 1: winner_id must be in select_competitors for this slot
+        # Rule 1: winner_id must be the single deterministic winner for this slot.
+        # After slot 1000 only one winner is valid — the identity with the lowest
+        # SHA256(device_id + prev_hash + slot) score among all mature identities.
+        # Before slot 1000 (genesis phase) any mature identity may produce.
         tip_hash, tip_slot = self._get_tip()
         prev_hash_for_selection = block.get("prev_hash", GENESIS_PREV_HASH)
-        selected = select_competitors(self.identities, prev_hash_for_selection, slot)
-        if wid not in selected and len(self.identities) >= TARGET_COMPETITORS:
-            # Allow when fewer than TARGET_COMPETITORS mature identities exist
-            # (early network — all eligible nodes compete, not just the top 10)
+        if slot >= 1000:
             mature = [d for d, fs in self.identities.items()
                       if slot - fs >= MIN_IDENTITY_AGE]
-            if len(mature) >= TARGET_COMPETITORS:
-                return False
+            if mature:
+                winner = min(
+                    mature,
+                    key=lambda did: hashlib.sha256(
+                        f"{did}:{prev_hash_for_selection}:{slot}".encode()
+                    ).hexdigest()
+                )
+                if wid != winner:
+                    return False
 
         # Rule 2: challenge must match compute_challenge(prev_hash, slot)
         expected_challenge = compute_challenge(prev_hash_for_selection, slot).hex()
@@ -1180,11 +1188,22 @@ class Ledger:
         if prev != tip_hash:
             return False
 
-        # Rule 9: no duplicate slot
+        # Rule 9: parent block must be finalized before next block is valid.
+        # After slot 1000 the chain cannot advance past an unfinalized tip —
+        # this prevents equivocation from propagating before attestations resolve it.
+        if slot >= 1000 and self.chain:
+            parent_block = self.chain[-1]
+            parent_hash  = compute_block_hash(parent_block)
+            parent_slot  = parent_block.get("slot", 0)
+            if parent_slot > self.last_finalized_slot:
+                if parent_hash not in self._finalized_hashes:
+                    return False
+
+        # Rule 10: no duplicate slot
         if any(b.get("slot") == slot for b in self.chain):
             return False
 
-        # Rule 10: supply cap — block amount must exactly equal get_block_reward
+        # Rule 11: supply cap — block amount must exactly equal get_block_reward
         expected_reward = get_block_reward(self.total_minted)
         if amount != expected_reward:
             return False
@@ -1254,7 +1273,14 @@ class Ledger:
                 return False
             intra_block_debit[tx.sender_id] = prior_debit + tx.amount + tx.fee
 
-        # Rule 16 (block_sig): winner signs canonical block without block_sig field.
+        # Rule 16 (fees_collected): must equal sum of actual transaction fees.
+        # A winner cannot claim fees they did not earn — enforced after genesis.
+        if slot >= 1000:
+            expected_fees = sum(tx_dict.get("fee", 0) for tx_dict in txs)
+            if block.get("fees_collected", 0) != expected_fees:
+                return False
+
+        # Rule 17 (block_sig): winner signs canonical block without block_sig field.
         # Normalize "type" to "block_reward": the network gossips blocks with
         # type="BLOCK" but the producer signed over type="block_reward".
         # Without this normalization every gossiped block fails sig verification.
@@ -2890,14 +2916,29 @@ class Node:
                     identities_snapshot   = dict(self.ledger.identities)
                     last_attest_snapshot  = dict(self.ledger.identity_last_attest)
 
-                # Am I selected this slot?
-                selected = select_competitors(
-                    identities_snapshot, tip_hash, current_slot,
-                    identity_last_attest=last_attest_snapshot
-                )
-
-                if self.wallet.device_id in selected:
-                    self._compete(current_slot, tip_hash)
+                # Am I the winner this slot?
+                # After slot 1000: single deterministic winner.
+                # Before slot 1000 (genesis): use existing compete-based selection.
+                if current_slot >= 1000:
+                    mature = [d for d, fs in identities_snapshot.items()
+                              if current_slot - fs >= MIN_IDENTITY_AGE]
+                    if mature:
+                        winner = min(
+                            mature,
+                            key=lambda did: hashlib.sha256(
+                                f"{did}:{tip_hash}:{current_slot}".encode()
+                            ).hexdigest()
+                        )
+                        if winner == self.wallet.device_id:
+                            self._compete(current_slot, tip_hash)
+                    # else: no mature identities yet — nobody produces
+                else:
+                    selected = select_competitors(
+                        identities_snapshot, tip_hash, current_slot,
+                        identity_last_attest=last_attest_snapshot
+                    )
+                    if self.wallet.device_id in selected:
+                        self._compete(current_slot, tip_hash)
 
                 # Wait for COMPETE_TO_BLOCK_TIMEOUT then advance
                 slot_deadline = GENESIS_TIME + (current_slot + 1) * REWARD_INTERVAL
@@ -3202,6 +3243,8 @@ class Node:
                     # Propagate to ledger so _attempt_reorg enforces the barrier
                     if slot > self.ledger.last_finalized_slot:
                         self.ledger.last_finalized_slot = slot
+                    # Propagate to ledger finalized hashes for parent check
+                    self.ledger._finalized_hashes.add(block_hash)
                     # Prune attestation dicts for blocks older than CHECKPOINT_BUFFER
                     stale = [h for h in list(self._attestations.keys())
                              if self._attestation_slots.get(h, slot) < slot - CHECKPOINT_BUFFER]

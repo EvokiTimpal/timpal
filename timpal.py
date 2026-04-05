@@ -3613,7 +3613,7 @@ class Node:
     # ── CLI ────────────────────────────────────────────────────────────────────
 
     def _cli(self):
-        print(f"\n  Ready. Type a command (balance / chain / peers / send / history / network / quit)\n")
+        print(f"\n  Ready. Type a command (balance / chain / peers / send / receive / history / network / quit)\n")
         while self._running:
             try:
                 raw = input("  > ").strip().lower()
@@ -3710,6 +3710,51 @@ class Node:
                 finally:
                     self._sending = False
 
+            elif raw.startswith("receive"):
+                # Syntax: receive | receive 4.50 | receive 4.50 memo-text
+                parts  = raw.split(None, 2)
+                amount = None
+                memo   = None
+                if len(parts) >= 2:
+                    try:
+                        amount = float(parts[1])
+                        if amount <= 0:
+                            print("  Amount must be greater than 0.\n")
+                            continue
+                    except ValueError:
+                        print("  Invalid amount.\n")
+                        continue
+                if len(parts) >= 3:
+                    memo = parts[2][:128]
+                uri = generate_payment_uri(
+                    self.wallet.device_id,
+                    amount = amount,
+                    memo   = memo,
+                    label  = None
+                )
+                try:
+                    import qrcode
+                    qr = qrcode.QRCode(
+                        version          = None,
+                        error_correction = qrcode.constants.ERROR_CORRECT_M,
+                        box_size         = 1,
+                        border           = 2,
+                    )
+                    qr.add_data(uri)
+                    qr.make(fit=True)
+                    print()
+                    qr.print_ascii(invert=True)
+                    print()
+                except ImportError:
+                    print("\n  [!] qrcode library not installed.")
+                    print("  Run: pip3 install qrcode\n")
+                print(f"  Address : {self.wallet.device_id}")
+                if amount:
+                    print(f"  Amount  : {amount:.8f} TMPL")
+                if memo:
+                    print(f"  Memo    : {memo}")
+                print(f"  URI     : {uri}\n")
+
             elif raw == "history":
                 my_id = self.wallet.device_id
                 with self.ledger._lock:
@@ -3740,7 +3785,7 @@ class Node:
                 break
 
             else:
-                print(f"\n  Commands: balance | chain | peers | send | history | network | quit\n")
+                print(f"\n  Commands: balance | chain | peers | send | receive | history | network | quit\n")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

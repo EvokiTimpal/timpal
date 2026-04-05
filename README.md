@@ -11,7 +11,7 @@ It is also built for the threat the rest of the industry is pretending does not 
 
 **Step 1 — Install dependencies:**
 ```
-pip3 install dilithium-py cryptography pycryptodome mnemonic
+pip3 install dilithium-py cryptography pycryptodome mnemonic qrcode
 ```
 
 **Step 2 — Download TIMPAL:**
@@ -28,6 +28,70 @@ Your node starts, creates a quantum-resistant wallet, shows you a 12-word recove
 
 ---
 
+## Running a node on a server (recommended)
+
+A server node runs 24/7, never sleeps, never misses a slot, and earns consistently. This is the recommended setup for anyone serious about participating in the network.
+
+**Requirements**
+- Ubuntu 20.04 or newer
+- At least 1GB RAM
+- Python 3.8 or newer
+
+**Step 1 — Connect to your server**
+```bash
+ssh root@YOUR_SERVER_IP
+```
+
+**Step 2 — Install dependencies**
+```bash
+apt update && apt upgrade -y
+apt install -y python3 python3-pip git screen
+pip3 install dilithium-py cryptography pycryptodome mnemonic qrcode --break-system-packages
+```
+
+**Step 3 — Download Timpal**
+```bash
+git clone https://github.com/EvokiTimpal/timpal.git
+cd timpal
+```
+
+**Step 4 — Start your node in a screen session**
+```bash
+screen -S timpal
+python3 timpal.py
+```
+
+Your node creates a wallet automatically on first run. Write down the 12-word recovery phrase — it is the only way to recover your wallet if the server is lost.
+
+**Step 5 — Detach from screen (node keeps running)**
+```
+Press Ctrl+A then D
+```
+
+**Step 6 — Come back to your node at any time**
+```bash
+screen -r timpal
+```
+
+**Useful server commands**
+```bash
+# Check if your node is running
+screen -ls
+
+# Stop your node
+screen -r timpal
+# Then press Ctrl+C
+
+# Update to latest version
+cd timpal
+git pull
+# Restart your node after updating
+```
+
+A server node stays in the active identity pool continuously, earns block rewards every time it wins a slot, and never falls dormant. The identity activity window is 24 hours — a server node never gets anywhere near that threshold.
+
+---
+
 ## Commands
 
 | Command | What it does |
@@ -36,6 +100,9 @@ Your node starts, creates a quantum-resistant wallet, shows you a 12-word recove
 | `chain` | Chain height, tip hash, and recent confirmed blocks |
 | `peers` | Online nodes currently connected to you |
 | `send` | Send TMPL to an address |
+| `receive` | Show your address as a QR code for anyone to pay you |
+| `receive 4.50` | Show a QR code with amount pre-filled |
+| `receive 4.50 Invoice-1234` | Show a QR code with amount and memo pre-filled |
 | `history` | Your transaction and reward history |
 | `network` | Global network statistics |
 | `quit` | Shut down your node cleanly |
@@ -80,6 +147,7 @@ Your node starts, creates a quantum-resistant wallet, shows you a 12-word recove
 
 - Python 3.8+
 - Mac, Linux, Windows
+- Dependencies: `dilithium-py cryptography pycryptodome mnemonic qrcode`
 
 ---
 
@@ -120,14 +188,26 @@ python3 timpal.py send c9da12e12fcb8782dbf7660a... 10.0
 
 ## Keeping your node running
 
+**On a server (recommended)** — use screen so the node keeps running when you disconnect:
+```bash
+screen -S timpal
+python3 timpal.py
+# Press Ctrl+A then D to detach — node keeps running
+screen -r timpal  # to return
 ```
-# Mac — prevent sleep while node is running
-caffeinate -i python3 timpal.py
 
-# Linux — run in a persistent screen session
+**On Mac** — prevent sleep while the node is running:
+```bash
+caffeinate -i python3 timpal.py
+```
+
+**On Linux desktop**:
+```bash
 screen -S timpal
 python3 timpal.py
 ```
+
+A server node running 24/7 earns significantly more than a laptop node that sleeps. The identity activity window is 24 hours — if your node is offline for more than 24 hours it becomes dormant and is temporarily excluded from the lottery until it comes back online and starts attesting again.
 
 ---
 

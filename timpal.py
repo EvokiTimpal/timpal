@@ -1009,6 +1009,9 @@ class Ledger:
             self.freeze_last_abnormal_slot = data.get("freeze_last_abnormal_slot", 0)
             self.freeze_normal_streak      = data.get("freeze_normal_streak", 0)
             self.last_finalized_slot       = data.get("last_finalized_slot", -1)
+            for _b in self.chain:
+                if _b.get("slot", 0) <= self.last_finalized_slot:
+                    self._finalized_hashes.add(compute_block_hash(_b))
             bloom_data = data.get("spent_bloom")
             if bloom_data:
                 self._spent_bloom = SpentBloomFilter.from_dict(bloom_data)

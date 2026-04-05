@@ -312,23 +312,57 @@ def solve_challenge(private_key: bytes, challenge: bytes) -> tuple:
 # PART 4 — FINALITY
 # ══════════════════════════════════════════════════════════════════════════════
 
+def get_active_mature_identities(ledger, slot: int) -> set:
+    """Return only mature identities that are still active (not dormant).
+
+    Mirrors the activity filter in select_competitors exactly.
+    Used by both lottery winner selection and finality computation.
+
+    An identity is active if:
+    - It has been registered for at least MIN_IDENTITY_AGE slots, AND
+    - It has attested within the last IDENTITY_ACTIVITY_WINDOW slots
+      (grace period of IDENTITY_GRACE_PERIOD slots applies after first_seen).
+
+    Dormant Sybil identities that stop attesting are excluded after
+    IDENTITY_ACTIVITY_WINDOW slots. This prevents a gradual Sybil attacker
+    from inflating the finality denominator with inactive identities and
+    permanently stalling the chain by withholding attestations.
+    """
+    active = set()
+    for did, first_seen in ledger.identities.items():
+        if slot - first_seen < MIN_IDENTITY_AGE:
+            continue
+        if slot > first_seen + IDENTITY_GRACE_PERIOD:
+            last_attest = ledger.identity_last_attest.get(did, first_seen)
+            if slot - last_attest > IDENTITY_ACTIVITY_WINDOW:
+                continue  # dormant — excluded from finality quorum
+        active.add(did)
+    return active
+
+
 def is_final(block_hash: str, slot: int, ledger, attestations: dict) -> bool:
-    """A block is cryptographically final when >2/3 of all mature identities attest.
+    """A block is cryptographically final when >2/3 of active mature identities attest.
 
     attestations = {block_hash: {device_id: attestation_dict}}
 
-    Finality is not probabilistic. It requires Dilithium3 signatures from
-    a supermajority of all registered mature identities. A finalized block
-    cannot be reorged under any circumstances short of breaking Dilithium3.
+    Uses active mature identities only — dormant identities are excluded from
+    the denominator. This prevents a gradual Sybil attack where an attacker
+    accumulates dormant identities to inflate the quorum denominator and
+    permanently stall finality by withholding attestations.
+
+    Finality self-heals: if an attacker stops attesting, their identities
+    drop out of the active set after IDENTITY_ACTIVITY_WINDOW slots,
+    reducing the denominator back to the honest active majority.
+
+    A finalized block cannot be reorged under any circumstances short of
+    breaking Dilithium3.
     """
-    mature = {
-        did for did, first_seen in ledger.identities.items()
-        if slot - first_seen >= MIN_IDENTITY_AGE
-    }
-    total    = len(mature)
-    attested = len(attestations.get(block_hash, {}))
+    active_mature = get_active_mature_identities(ledger, slot)
+    total         = len(active_mature)
     if total == 0:
         return False
+    attested = sum(1 for did in attestations.get(block_hash, {})
+                   if did in active_mature)
     return attested / total > ATTESTATION_THRESHOLD
 
 

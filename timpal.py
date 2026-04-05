@@ -3710,22 +3710,20 @@ class Node:
                 finally:
                     self._sending = False
 
-            elif raw.startswith("receive"):
-                # Syntax: receive | receive 4.50 | receive 4.50 memo-text
-                parts  = raw.split(None, 2)
+            elif raw == "receive":
                 amount = None
                 memo   = None
-                if len(parts) >= 2:
+                amount_str = input("  Amount in TMPL (press Enter to skip): ").strip()
+                if amount_str:
                     try:
-                        amount = float(parts[1])
+                        amount = float(amount_str)
                         if amount <= 0:
                             print("  Amount must be greater than 0.\n")
                             continue
                     except ValueError:
                         print("  Invalid amount.\n")
                         continue
-                if len(parts) >= 3:
-                    memo = parts[2][:128]
+                    memo = input("  Memo (optional, press Enter to skip): ").strip()[:128] or None
                 uri = generate_payment_uri(
                     self.wallet.device_id,
                     amount = amount,

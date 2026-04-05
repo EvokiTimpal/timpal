@@ -100,9 +100,7 @@ A server node stays in the active identity pool continuously, earns block reward
 | `chain` | Chain height, tip hash, and recent confirmed blocks |
 | `peers` | Online nodes currently connected to you |
 | `send` | Send TMPL to an address |
-| `receive` | Show your address as a QR code for anyone to pay you |
-| `receive 4.50` | Show a QR code with amount pre-filled |
-| `receive 4.50 Invoice-1234` | Show a QR code with amount and memo pre-filled |
+| `receive` | Show your address as a QR code — optionally enter amount and memo |
 | `history` | Your transaction and reward history |
 | `network` | Global network statistics |
 | `quit` | Shut down your node cleanly |

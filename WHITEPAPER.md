@@ -41,7 +41,7 @@ TIMPAL answers each of those problems directly.
 The result is a network where any person with a Mac, Windows, or Linux computer can participate on equal terms — earning rewards through the lottery, sending TMPL to anyone on the network, and holding value in a wallet that does not depend on the continued irrelevance of quantum computing.
 
 ```
-pip3 install dilithium-py cryptography pycryptodome mnemonic
+pip3 install dilithium-py cryptography pycryptodome mnemonic qrcode
 curl -O https://raw.githubusercontent.com/EvokiTimpal/timpal/main/timpal.py
 python3 timpal.py
 ```
@@ -233,9 +233,31 @@ if block.slot >= 1000:  # post-genesis phase
 - **No bypass via P2P.** Blocks from identities whose `first_seen_slot` is too recent are rejected by every honest node, regardless of how the block was received.
 - **Pruning compatibility.** Identity data lives in checkpoint state and survives the checkpoint pruning cycle indefinitely.
 
+### 3.14 Payment URI Standard
+
+TIMPAL defines a standard URI format for payment requests:
+
+```
+timpal:<device_id>?amount=<tmpl>&memo=<text>&label=<n>
+```
+
+The `device_id` is the recipient's 64-character hex address. `amount` is in TMPL (decimal). `memo` is an optional signed payment reference included in the transaction payload (max 128 characters). `label` is a display-only hint for the recipient's name — it is never included in the transaction or its signature.
+
+Any node can generate a payment request URI and display it as a QR code directly in the terminal using the `receive` command:
+
+```
+> receive              — show address QR code only
+> receive 4.50         — QR code with amount pre-filled
+> receive 4.50 Inv-123 — QR code with amount and memo pre-filled
+```
+
+A customer scans the QR code and their wallet pre-fills the recipient address, amount, and memo automatically. This eliminates manual address entry and the risk of copy-paste errors — critical for merchant adoption.
+
+The URI standard is fixed at the protocol level and does not change. Any wallet, mobile app, or point-of-sale system built on TIMPAL uses the same format, making QR codes interoperable across all implementations.
+
 ---
 
-## 4. Two-Era Economic Model
+
 
 **Era 1 — Distribution (Years 0 to ~37.5)**
 

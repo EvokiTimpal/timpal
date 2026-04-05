@@ -375,6 +375,7 @@ TYPE html>
       <div class="docs-nav-title">Getting Started</div>
       <a class="docs-nav-link active" onclick="scrollToDoc('install')">Installation</a>
       <a class="docs-nav-link" onclick="scrollToDoc('running')">Running a Node</a>
+      <a class="docs-nav-link" onclick="scrollToDoc('running')">Running on a Server</a>
       <a class="docs-nav-link" onclick="scrollToDoc('commands')">Commands</a>
       <a class="docs-nav-link" onclick="scrollToDoc('wallet')">Your Wallet</a>
       <div class="docs-nav-title">Protocol</div>
@@ -394,7 +395,7 @@ TYPE html>
         <div class="docs-h2">Installation</div>
         <p class="docs-p">TIMPAL runs on Mac, Linux, and Windows. You need Python 3.8 or newer.</p>
         <div class="docs-code"><span class="comment"># Step 1 — Install all dependencies</span>
-pip3 install dilithium-py cryptography pycryptodome mnemonic
+pip3 install dilithium-py cryptography pycryptodome mnemonic qrcode
 
 <span class="comment"># Step 2 — Download the protocol</span>
 curl -O https://raw.githubusercontent.com/EvokiTimpal/timpal/main/timpal.py
@@ -409,6 +410,30 @@ python3 timpal.py</div>
         <div class="docs-callout">⚠️ Keep your Mac awake while the node is running. Use <span class="inline-code">caffeinate -i python3 timpal.py</span> on Mac to prevent sleep.</div>
         <p class="docs-p">Your node broadcasts a signed identity registration to the network and waits for it to be included in a block. After 200 slots (~33 minutes) your identity is mature and your node begins competing in the VRF lottery automatically.</p>
         <div class="docs-callout">Only one node can run per device. If you try to open a second terminal, the protocol blocks it immediately.</div>
+        <div class="docs-h2" style="margin-top:2rem">Running a Node on a Server</div>
+        <p class="docs-p">A server node runs 24/7, never sleeps, never misses a slot, and earns consistently. This is the recommended setup for anyone serious about participating in the network.</p>
+        <div class="docs-code"><span class="comment"># Connect to your server</span>
+ssh root@YOUR_SERVER_IP
+
+<span class="comment"># Install dependencies</span>
+apt update && apt upgrade -y
+apt install -y python3 python3-pip git screen
+pip3 install dilithium-py cryptography pycryptodome mnemonic qrcode --break-system-packages
+
+<span class="comment"># Download Timpal</span>
+git clone https://github.com/EvokiTimpal/timpal.git
+cd timpal
+
+<span class="comment"># Start node in a persistent screen session</span>
+screen -S timpal
+python3 timpal.py
+
+<span class="comment"># Detach — node keeps running when you disconnect</span>
+Press Ctrl+A then D
+
+<span class="comment"># Return to your node at any time</span>
+screen -r timpal</div>
+        <p class="docs-p">A server node stays in the active identity pool continuously, earns block rewards every time it wins a slot, and never goes dormant. The identity activity window is 24 hours — a server running 24/7 never comes close to that threshold.</p>
       </div>
       <div class="docs-section" id="doc-commands">
         <div class="docs-h2">Commands</div>
@@ -419,6 +444,9 @@ python3 timpal.py</div>
           <tr><td>chain</td><td>Chain height, tip hash, orphan count, and recent confirmed blocks</td></tr>
           <tr><td>peers</td><td>List online nodes currently connected to you</td></tr>
           <tr><td>send</td><td>Send TMPL interactively</td></tr>
+          <tr><td>receive</td><td>Show your address as a QR code for anyone to pay you</td></tr>
+          <tr><td>receive 4.50</td><td>QR code with amount pre-filled</td></tr>
+          <tr><td>receive 4.50 Invoice-1234</td><td>QR code with amount and memo pre-filled</td></tr>
           <tr><td>history</td><td>Your last rewards and transactions</td></tr>
           <tr><td>network</td><td>Your node and network stats</td></tr>
           <tr><td>quit</td><td>Shut down your node cleanly</td></tr>

@@ -114,7 +114,7 @@ A server node stays in the active identity pool continuously, earns block reward
 - **Encrypted wallet with seed phrase recovery** — Private key encrypted with AES-256-GCM and a password you set. Never stored in plaintext. Recoverable via your 12-word BIP39 seed phrase.
 - **Attestation-based cryptographic finality** — A block is final when more than 2/3 of all mature identities have signed it with Dilithium3 attestations. A finalized block cannot be reversed under any circumstances short of breaking Dilithium3.
 - **On-chain identity registration** — When your node starts, it broadcasts a signed REGISTER message to peers. A block producer embeds it in the next block. Your identity is then on-chain with a verifiable `first_seen_slot`. After 200 slots (~33 minutes) your identity is mature and your node becomes eligible to compete in the lottery. This maturation rule is enforced at the consensus layer on every node — no bypass is possible via P2P or any other path.
-- **Deterministic VRF lottery** — Every 10 seconds, one node wins 1.0575 TMPL. Each slot, a single winner is selected deterministically: every mature identity is scored by `sha256(device_id + prev_block_hash + slot)` and the node with the lowest score wins. The winner is unpredictable until the previous block arrives, but instantly verifiable by every node. No coordination required.
+- **Compete-based VRF lottery** — Every 10 seconds, one node wins 1.0575 TMPL. Each slot, ~10 nodes are selected deterministically using the previous block's hash — unpredictable until the previous block arrives. Each selected node signs a challenge and broadcasts a COMPETE message. The winner is the competitor whose proof hash is lowest — cryptographically fair, independently verifiable by every node.
 - **Checkpoints every ~2.8 hours** — Every 1,000 slots, all nodes independently create a checkpoint. Before accepting a peer checkpoint, every node independently recomputes balances from its own chain history — a corrupted checkpoint cannot be accepted. The full identity table is preserved in every checkpoint and survives pruning. Keeps the ledger lightweight forever.
 - **Fork resolution** — Heaviest valid chain wins. Weight is block count minus slot-gap penalties. Equal-weight forks resolve deterministically by tip hash. All nodes converge to the same chain regardless of arrival order.
 - **One node per device** — Enforced by the protocol at the OS level. Running multiple terminals gives zero advantage.
@@ -131,7 +131,7 @@ A server node stays in the active identity pool continuously, earns block reward
 | Reward per round | 1.0575 TMPL |
 | Round interval | 10 seconds |
 | Distribution period | ~37.5 years |
-| Winner per slot | 1 (deterministic — lowest sha256 score wins) |
+| Eligible nodes per slot | ~10 (fixed target, regardless of network size) |
 | Identity maturation period | 200 slots (~33 minutes) |
 | Confirmation depth | 3 slots (~30 seconds) |
 | Checkpoint interval | Every 1,000 slots (~2.8 hours) |

@@ -8,7 +8,7 @@ April 2026 — v4.0
 
 ## Abstract
 
-TIMPAL is a peer-to-peer payment protocol designed to function without banks, payment processors, or centralized infrastructure. It uses quantum-resistant Dilithium3 cryptography, a chain-anchored distributed ledger, a compete-based VRF lottery with deterministic competitor selection, attestation-based cryptographic finality, on-chain identity registration with consensus-enforced maturation, and a two-era economic model to create a fair, decentralized monetary system with a fixed supply of 125 million TMPL distributed over approximately 37.5 years.
+TIMPAL is a peer-to-peer payment protocol designed to function without banks, payment processors, or centralized infrastructure. It uses quantum-resistant Dilithium3 cryptography, a chain-anchored distributed ledger, a deterministic single-winner lottery, attestation-based cryptographic finality, on-chain identity registration with consensus-enforced maturation, and a two-era economic model to create a fair, decentralized monetary system with a fixed supply of 125 million TMPL distributed over approximately 37.5 years.
 
 The protocol enforces one node per physical device and requires every node to register its identity on-chain and wait 200 slots (~33 minutes) before participating in block production. Transaction fees are 0.1% of the send amount (minimum 0.0001 TMPL, maximum 0.01 TMPL), paid to the slot winner, from genesis. No pre-mine. No insider allocation. No central authority.
 
@@ -32,9 +32,9 @@ These are not problems that can be fixed with an update. They are the result of 
 
 TIMPAL answers each of those problems directly.
 
-**On the equal playing field.** The protocol selects approximately 10 competitors per slot using a deterministic lottery seeded by the previous block's hash. That selection is mathematically fair — every registered mature identity has equal probability of being chosen, regardless of how long they have been running, how many coins they hold, or when they joined. A node started today does not compete at a disadvantage against a node that has been running for three years. The odds are identical. There is no staking mechanism. There is no mining difficulty that rewards those with more hardware. The only requirement is a computer, an internet connection, and time — and those are equal for everyone.
+**On the equal playing field.** The protocol selects a single winner per slot using a deterministic lottery seeded by the previous block's hash. That selection is mathematically fair — every registered mature identity has equal probability of winning, regardless of how long they have been running, how many coins they hold, or when they joined. A node started today does not compete at a disadvantage against a node that has been running for three years. The odds are identical. There is no staking mechanism. There is no mining difficulty that rewards those with more hardware. The only requirement is a computer, an internet connection, and time — and those are equal for everyone.
 
-**On the permanent advantage problem.** Existing networks reward early entrants with positions of structural dominance that compound indefinitely. TIMPAL's competitor selection is based on two things only: which identities are currently registered and mature on-chain, and the hash of the previous block. How long a node has been running does not affect its selection odds. How many rewards it has previously earned does not affect its selection odds. Every registered mature node competes on the same terms in every slot, whether it joined at genesis or joined yesterday. Early participation earns early rewards — but it does not purchase a permanent advantage over everyone who comes after.
+**On the permanent advantage problem.** Existing networks reward early entrants with positions of structural dominance that compound indefinitely. TIMPAL's winner selection is based on two things only: which identities are currently registered, mature, and active on-chain, and the hash of the previous block. How long a node has been running does not affect its winning odds. How many rewards it has previously earned does not affect its winning odds. Every registered mature active node competes on the same terms in every slot, whether it joined at genesis or joined yesterday. Early participation earns early rewards — but it does not purchase a permanent advantage over everyone who comes after.
 
 **On the quantum threat.** TIMPAL uses Dilithium3 as its sole cryptographic primitive — the post-quantum digital signature standard selected by NIST in 2024. There is no ECDSA anywhere in the protocol. Every wallet, every transaction signature, every block proof, and every attestation is built on cryptography that quantum computers cannot break with any known algorithm. This was not added as a feature after the fact. It is the foundation the protocol was built on from the first line of code.
 
@@ -66,7 +66,7 @@ Double-spend prevention is enforced by validating each sender's balance against 
 
 TIMPAL uses Dilithium3, selected as a post-quantum digital signature standard by NIST in 2024. Every device generates a unique Dilithium3 key pair on first launch. There is no ECDSA, RSA, or any classically vulnerable algorithm anywhere in the protocol.
 
-This means every TIMPAL wallet is quantum-resistant from the moment it is created. A quantum computer cannot derive a private key from a public key, a wallet address, or anything broadcast on-chain. The private key never leaves the device. All transactions, VRF compete messages, attestations, block signatures, and push authentication are signed with Dilithium3 and verifiable against both quantum and classical attacks.
+This means every TIMPAL wallet is quantum-resistant from the moment it is created. A quantum computer cannot derive a private key from a public key, a wallet address, or anything broadcast on-chain. The private key never leaves the device. All transactions, winner proofs, attestations, block signatures, and push authentication are signed with Dilithium3 and verifiable against both quantum and classical attacks.
 
 This is not an upgrade path or a migration layer on top of legacy cryptography — it is the only cryptographic primitive the protocol uses. There is no fallback to ECDSA under any condition.
 
@@ -83,56 +83,48 @@ On first run, the node generates a 12-word BIP39 recovery phrase from 128 bits o
 
 Once connected, nodes communicate directly peer-to-peer. The bootstrap server serves only as a peer directory. Its role in the protocol is strictly limited: it accepts five message types (HELLO, PING, GET_PEERS, REGISTER_BOOTSTRAP, GET_BOOTSTRAP_SERVERS) and handles nothing else. Community-operated bootstrap servers are welcome — the more servers, the more resilient the network.
 
-### 3.5 Compete-Based VRF Lottery
+### 3.5 Deterministic Single-Winner Lottery
 
-Every 10 seconds, one node wins 1.0575 TMPL. The lottery uses deterministic competitor selection and a challenge-response scheme to ensure fairness and verifiability at any network size.
+Every 10 seconds, one node wins 1.0575 TMPL. The lottery uses deterministic single-winner selection to ensure one valid block producer per slot — no equivocation, no competing blocks.
 
-**Competitor selection.** At the start of each slot, every node independently selects ~10 eligible competitors using:
+**Winner selection.** At the start of each slot, every node independently computes the same single winner:
 
 ```
 score(device_id) = sha256(f"{device_id}:{prev_block_hash}:{slot}")
-competitors = 10 lowest-scoring eligible identities
+winner           = identity with the lowest score among all mature active identities
 ```
 
-Selection requires the previous block's hash, which cannot be known until that block arrives. This makes the competitor set for slot N unpredictable before slot N-1 is final. An attacker controlling K of N identities has K/N probability of selection — this cannot be improved without controlling the previous block hash itself.
+Selection requires the previous block's hash, which cannot be known until that block arrives. This makes the winner for slot N unpredictable before slot N-1 is final. An attacker controlling K of N active identities has K/N probability of winning — this cannot be improved without controlling the previous block hash itself.
 
-**Challenge.** A single challenge is derived from the same inputs:
+**Challenge.** A challenge is derived from the same inputs:
 
 ```
 challenge = sha256(f"challenge:{prev_block_hash}:{slot}")
 ```
 
-All competitors face the same challenge. It cannot be pre-computed because it depends on the previous block hash.
+The challenge cannot be pre-computed because it depends on the previous block hash. The winner must be online to solve it.
 
-**Compete phase.** Each selected node signs the challenge with its Dilithium3 private key and derives a proof:
+**Winner proof.** The winning node signs the challenge with its Dilithium3 private key:
 
 ```
-compete_sig  = Dilithium3.sign(private_key, challenge)
+compete_sig   = Dilithium3.sign(private_key, challenge)
 compete_proof = sha256(compete_sig)
 ```
 
-The node broadcasts a `COMPETE` message containing `device_id`, `public_key`, `signature`, and `proof` to all peers.
+This proves the winner was online at the moment the previous block arrived. An offline node cannot produce a valid compete_sig because the challenge was unknown until that moment.
 
-**Winner selection.** The winner is the competitor whose `compete_proof` is lexicographically lowest:
-
-```
-winner = min(verified_competitors, key=lambda c: c["proof"])
-```
-
-Every node independently verifies each COMPETE message — checking that the sender is in the selected set, that the Dilithium3 signature is valid over the challenge, and that `sha256(signature) == proof` — then applies the identical tiebreak rule. All honest nodes agree on the same winner.
-
-**Block construction.** The winning node builds a block containing `winner_id`, `compete_sig`, `compete_proof`, `reward_amount`, pending transactions (up to 500), pending identity registrations (up to 10), and the `prev_hash`. The winning node then signs the entire canonical block with its Dilithium3 key (`block_sig`). The block is added to the local chain and broadcast to all peers.
+**Block construction.** The winning node builds a block containing `winner_id`, `compete_sig`, `compete_proof`, `reward_amount`, `fees_collected`, pending transactions (up to 500), pending identity registrations (up to 10), and the `prev_hash`. The winning node then signs the entire canonical block with its Dilithium3 key (`block_sig`). The block is added to the local chain and broadcast to all peers.
 
 **Verification.** Every node that receives a block independently verifies:
 
-1. `winner_id` is in `select_competitors(identities, prev_block_hash, slot)`
-2. `challenge = sha256(f"challenge:{prev_block_hash}:{slot}")`
+1. `winner_id` is the deterministic winner: `min(mature_active, key=lambda d: sha256(f"{d}:{prev_hash}:{slot}"))`
+2. `challenge == sha256(f"challenge:{prev_block_hash}:{slot}")`
 3. `Dilithium3.verify(public_key, challenge, compete_sig)` passes
 4. `sha256(compete_sig) == compete_proof`
-5. `winner_id` derives correctly from `public_key` (and `genesis_block_hash` for post-genesis wallets)
+5. `winner_id` derives correctly from `public_key`
 6. `Dilithium3.verify(public_key, canonical_block_without_sig, block_sig)` passes
 
-All six checks must pass. A block failing any check is rejected outright.
+All six checks must pass. A block failing any check is rejected outright. Only one valid block can exist per slot — deterministic selection makes equivocation impossible.
 
 ### 3.6 One Node Per Device
 
@@ -140,12 +132,12 @@ An OS-level file lock prevents more than one node running per device. Any second
 
 ### 3.7 Fork Choice and Chain Convergence
 
-**Normal extension.** When a node receives a new block, it validates all six compete rules, checks that `prev_hash` matches the current chain tip, and appends the block. This is the common case.
+**Normal extension.** When a node receives a new block, it validates all six winner verification rules, checks that `prev_hash` matches the current chain tip, and appends the block. This is the common case.
 
 **Fork detection and reorg.** When a node receives blocks that do not connect to its current tip, the protocol detects a fork and attempts a chain reorganization:
 
 1. Find the fork point where the incoming chain branches from the local chain.
-2. Walk forward from that fork point, performing full cryptographic verification on every incoming block sequentially — compete signature, block signature, all transaction signatures, chain linkage, slot ordering, supply cap.
+2. Walk forward from that fork point, performing full cryptographic verification on every incoming block sequentially — winner proof, block signature, all transaction signatures, chain linkage, slot ordering, supply cap.
 3. Compare the weight of the incoming tail to the local tail from the fork point.
 
 **Fork choice rule.** The heavier chain wins. Weight is block count minus a penalty for slot gaps greater than 1. On equal weight, the chain whose tip hash is numerically lower wins. This rule is deterministic and order-independent — every node arrives at the same decision regardless of which chain it saw first.
@@ -262,7 +254,7 @@ The URI standard is fixed at the protocol level and does not change. Any wallet,
 **Era 1 — Distribution (Years 0 to ~37.5)**
 
 - Every transaction carries a fee of 0.1% of the send amount (minimum 0.0001 TMPL, maximum 0.01 TMPL), paid to the slot winner
-- Nodes earn through the compete-based lottery: 1.0575 TMPL every 10 seconds
+- Nodes earn through the deterministic single-winner lottery: 1.0575 TMPL every 10 seconds
 - Total of 125,000,000 TMPL minted over approximately 37.5 years
 - No pre-mine, no insider allocation, no founder rewards
 
@@ -286,7 +278,7 @@ The transition is automatic. No upgrade required. No vote.
 | Reward Per Round (Era 1) | 1.0575 TMPL |
 | Round Interval | Every 10 seconds |
 | Distribution Period | ~37.5 years |
-| Eligible Nodes Per Slot | ~10 (fixed target, regardless of network size) |
+| Eligible Nodes Per Slot | 1 deterministic winner per slot |
 | Identity Maturation Period | 200 slots (~33 minutes) |
 | Transaction Fee | 0.1% of amount (min 0.0001 TMPL, max 0.01 TMPL) → slot winner |
 | Checkpoint Interval | Every 1,000 slots (~2.8 hours) |
@@ -307,7 +299,7 @@ The transition is automatic. No upgrade required. No vote.
 Sybil resistance operates at four independent layers:
 
 1. **One node per device** enforced at the OS level via file lock.
-2. **Deterministic competitor selection** scales inversely with network size — the selected fraction shrinks as the network grows, so multiplying device count multiplies infrastructure cost while expected reward per device stays constant.
+2. **Deterministic single-winner selection** — only one valid block producer exists per slot. An attacker controlling K of N active identities has K/N probability of winning — expected reward per identity stays constant regardless of total network size.
 3. **Chain-anchored wallet creation** (post-genesis phase): every new wallet must anchor its `device_id` to a live block hash from the running network via `sha256(public_key + block_hash)`. Offline mass wallet generation is physically impossible — the chain produces block hashes at fixed speed regardless of attacker CPU.
 4. **On-chain identity maturation**: every identity must register on-chain and wait 200 slots (~33 minutes) before it can produce valid blocks. This check is enforced at the consensus layer in every node — it cannot be bypassed via P2P, bootstrap, or any other path.
 
@@ -319,9 +311,9 @@ Every node validates sender balance against the full chain before accepting any 
 
 Dilithium3 protects all signatures — transactions, VRF compete messages, attestations, identity registrations, and push authentication — against both classical and quantum computer attacks.
 
-### 6.4 VRF Integrity
+### 6.4 Winner Proof Integrity
 
-Every block carries a compete_sig derived from the winner's Dilithium3 private key signing the slot challenge. Any node can independently verify the winner by confirming all six compete rules described in §3.5. A block missing any VRF field is rejected outright.
+Every block carries a `compete_sig` derived from the winner's Dilithium3 private key signing the slot challenge. Any node can independently verify the winner by confirming all six winner verification rules described in §3.5. A block missing any proof field is rejected outright.
 
 ### 6.5 Attestation Security
 
@@ -343,7 +335,7 @@ Private keys are encrypted at rest with AES-256-GCM. The encryption key is deriv
 
 The bootstrap server is a peer directory. It cannot:
 
-- Influence the lottery (competitor selection is deterministic from chain data, not from bootstrap)
+- Influence the lottery (winner selection is deterministic from chain data, not from bootstrap)
 - Force a node to accept an invalid block (every node verifies chain linkage, VRF, and identity maturation independently)
 - Steal funds or alter balances
 - Corrupt a checkpoint (every node independently recomputes balances from local chain history before accepting)
@@ -365,7 +357,7 @@ Community bootstrap servers, community tools, and community applications are all
 
 TIMPAL provides what the global financial system has failed to provide: a way for any person, anywhere, to hold and send value — without asking permission.
 
-The compete-based lottery ensures fairness whether the network has 10 nodes or 10 million. Deterministic competitor selection using the previous block's hash makes the lottery unpredictable until the last moment and independently verifiable by every node. Attestation-based finality provides cryptographic — not probabilistic — irreversibility, backed by Dilithium3 signatures from a supermajority of registered identities. On-chain identity registration with consensus-enforced maturation prevents instant identity activation. Independent checkpoint balance verification means no node can corrupt the ledger's balance history without detection. Intra-block double-spend tracking closes the multi-transaction balance drain attack. The two-era model ensures the network is self-sustaining forever — first through the lottery and fees, then through fees alone.
+The deterministic single-winner lottery ensures fairness whether the network has 10 nodes or 10 million. Winner selection using the previous block's hash makes the lottery unpredictable until the last moment and independently verifiable by every node — exactly one valid winner per slot, no equivocation possible. Attestation-based finality provides cryptographic — not probabilistic — irreversibility, backed by Dilithium3 signatures from a supermajority of active registered identities. On-chain identity registration with consensus-enforced maturation prevents instant identity activation. Independent checkpoint balance verification means no node can corrupt the ledger's balance history without detection. Intra-block double-spend tracking closes the multi-transaction balance drain attack. The two-era model ensures the network is self-sustaining forever — first through the lottery and fees, then through fees alone.
 
 ---
 

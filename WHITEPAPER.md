@@ -58,7 +58,7 @@ TIMPAL uses a chain-anchored distributed ledger. Every node holds a complete cop
 
 The chain gives the protocol global ordering and partition recovery. When two nodes that were disconnected reconnect, their chains are compared. The heavier chain wins — weight is computed as the number of blocks minus a penalty for slot gaps greater than 1, so a dense chain always beats a sparse one. On equal weight, the chain with the lower tip hash wins — a deterministic rule that produces identical outcomes on every node regardless of which chain arrived first.
 
-Blocks at least 3 slots deep (~30 seconds) achieve cryptographic finality via the attestation mechanism described in §3.8. This is the protocol's finality boundary — a block carrying a supermajority attestation cannot be reversed under any circumstances.
+Blocks at least 5 slots deep (~50 seconds) achieve cryptographic finality via the attestation mechanism described in §3.8. This is the protocol's finality boundary — a block carrying a supermajority attestation cannot be reversed under any circumstances.
 
 Double-spend prevention is enforced by validating each sender's balance against the full chain before accepting any transaction. Intra-block double-spend is prevented by tracking each sender's cumulative debit across all transactions within the same block. Every ~2.8 hours the network automatically creates a checkpoint — a cryptographically verified snapshot of all balances — and prunes the raw history before it. Nodes only need to store data since the last checkpoint, keeping the ledger lightweight forever.
 
@@ -72,7 +72,7 @@ This is not an upgrade path or a migration layer on top of legacy cryptography �
 
 ### 3.3 Wallet Encryption and Recovery
 
-The private key is encrypted at rest using AES-256-GCM. The encryption key is derived from a user-supplied password using scrypt (N=131072, r=8, p=1) with a randomly generated 32-byte salt. A random 12-byte nonce is used for each save. The plaintext private key is never written to disk.
+The private key is encrypted at rest using AES-256-GCM. The encryption key is derived from a user-supplied password using scrypt (N=131072, r=8, p=1) with a randomly generated 32-byte salt. A random 12-byte nonce is used for each save. The plaintext private key is never written to disk. A minimum passphrase length of 20 characters is enforced at wallet creation.
 
 On first run, the node generates a 12-word BIP39 recovery phrase from 128 bits of entropy. The user must type all 12 words back in full before the wallet is saved — there is no way to skip this step. The same phrase can be used to deterministically recover the Dilithium3 keypair on a new device. The security of the wallet is bounded by the strength of both the password and the physical security of the written phrase.
 
@@ -284,7 +284,7 @@ The transition is automatic. No upgrade required. No vote.
 | Checkpoint Interval | Every 1,000 slots (~2.8 hours) |
 | Pre-mine | None |
 | Insider Allocation | None |
-| Confirmation Depth | 3 slots (~30 seconds) |
+| Confirmation Depth | 5 slots (~50 seconds) |
 
 **Verification:**
 1.0575 TMPL × 6 rounds/min × 60 × 24 × 365 = 3,334,932 TMPL/year

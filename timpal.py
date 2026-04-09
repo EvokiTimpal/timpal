@@ -50,6 +50,8 @@ UNIT             = 100_000_000          # 1 TMPL = 10^8 units
 TOTAL_SUPPLY     = 12_500_000_000_000_000   # 125,000,000 TMPL
 REWARD_PER_ROUND = 105_750_000          # 1.0575 TMPL per block
 
+MIN_PASSPHRASE_LENGTH = 20   # minimum wallet password length
+
 TX_FEE_RATE = 0.001     # 0.1% of transaction amount
 TX_FEE_MIN  = 10_000    # 0.0001 TMPL minimum fee
 TX_FEE_MAX  = 1_000_000 # 0.01  TMPL maximum fee
@@ -57,7 +59,7 @@ TX_FEE_MAX  = 1_000_000 # 0.01  TMPL maximum fee
 # ── Timing constants ───────────────────────────────────────────────────────────
 
 REWARD_INTERVAL    = 10.0   # seconds per slot
-CONFIRMATION_DEPTH = 3      # blocks for finality = 30 seconds
+CONFIRMATION_DEPTH = 5      # blocks for finality = 50 seconds
 
 # ── Identity constants ─────────────────────────────────────────────────────────
 
@@ -100,6 +102,13 @@ MAX_FUTURE_SLOTS       = 3
 MAX_SLOT_GAP           = 30
 SYNC_RATE_WINDOW       = 30
 BROADCAST_PORT         = 7778
+
+# ── Global rate limit constants ────────────────────────────────────────────────
+# Per-IP limits are already enforced. These global per-slot caps prevent
+# coordinated floods from many IPs overwhelming the node simultaneously.
+MAX_GLOBAL_ATTEST_PER_SLOT  = 5000   # max attestations accepted per slot across all IPs
+MAX_GLOBAL_COMPETE_PER_SLOT =  100   # max compete messages accepted per slot
+MAX_GLOBAL_TX_PER_SLOT      = 1000   # max transactions accepted per slot
 NODE_PORT_RANGE_START  = 7779
 MAX_P2P_MESSAGE_SIZE   = 10_000_000   # 10MB DoS protection — regular P2P messages
 MAX_SYNC_MESSAGE_SIZE  = 100_000_000  # 100MB — SYNC responses can contain full block history
@@ -126,6 +135,15 @@ CONTROL_TOKEN  = os.path.join(os.path.expanduser("~"), ".timpal_control.token")
 # ── Bootstrap servers ──────────────────────────────────────────────────────────
 
 BOOTSTRAP_SERVERS = [("5.78.187.91", 7777)]
+
+# ── Bootstrap operator signing key (TODO post-launch) ─────────────────────────
+# TODO: Generate a real Dilithium3 keypair for the bootstrap operator and replace
+# this placeholder before enabling signed bootstrap registration enforcement.
+# Until then, REGISTER_BOOTSTRAP is accepted from any peer (current behavior).
+# When ready: set BOOTSTRAP_OPERATOR_PUBKEY to the operator's public key hex and
+# enforce Dilithium3.verify(signature, message, BOOTSTRAP_OPERATOR_PUBKEY) in
+# bootstrap.py handle_register_bootstrap().
+BOOTSTRAP_OPERATOR_PUBKEY = None  # placeholder — set before enabling signed registration
 DNS_SEEDS         = ["dns.timpal.org"]
 
 # ── Explorer push targets ──────────────────────────────────────────────────────
@@ -197,6 +215,31 @@ def _check_clock_drift():
             print(f"\n  ⚠️  WARNING: Clock drift detected: {drift:.1f} seconds")
             print(f"  This may cause block validation failures.")
             print(f"  Sync your system clock immediately.\n")
+    except Exception:
+        pass
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PART 1B — SECURITY EVENT LOGGING
+# ══════════════════════════════════════════════════════════════════════════════
+
+import logging as _logging
+_sec_logger = _logging.getLogger("timpal.security")
+_sec_logger.setLevel(_logging.WARNING)
+_sec_handler = _logging.FileHandler(
+    os.path.join(os.path.expanduser("~"), ".timpal_security.log"),
+    encoding="utf-8"
+)
+_sec_handler.setFormatter(_logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+_sec_logger.addHandler(_sec_handler)
+
+
+def _sec_log(event: str, detail: str = ""):
+    """Log a security-relevant event to ~/.timpal_security.log.
+    Covers: rejected blocks, invalid signatures, flood drops, reorg attempts,
+    failed checkpoints, and banned IPs. Silent on error — never crashes the node."""
+    try:
+        _sec_logger.warning(f"{event} | {detail}")
     except Exception:
         pass
 
@@ -1009,9 +1052,6 @@ class Ledger:
             self.freeze_last_abnormal_slot = data.get("freeze_last_abnormal_slot", 0)
             self.freeze_normal_streak      = data.get("freeze_normal_streak", 0)
             self.last_finalized_slot       = data.get("last_finalized_slot", -1)
-            for _b in self.chain:
-                if _b.get("slot", 0) <= self.last_finalized_slot:
-                    self._finalized_hashes.add(compute_block_hash(_b))
             bloom_data = data.get("spent_bloom")
             if bloom_data:
                 self._spent_bloom = SpentBloomFilter.from_dict(bloom_data)
@@ -1944,6 +1984,12 @@ class Network:
         self._attest_rate         = {}   # {ip: [timestamps]}
         self._attest_rate_lock    = threading.Lock()
         self._peer_cache_file = PEERS_FILE
+        # Global per-slot rate counters — reset each slot, cap across all IPs
+        self._global_attest_count  = 0
+        self._global_compete_count = 0
+        self._global_tx_count      = 0
+        self._global_rate_lock     = threading.Lock()
+        self._last_global_rate_slot= -1
 
     def _get_local_ip(self) -> str:
         try:
@@ -1954,6 +2000,22 @@ class Network:
             return ip
         except Exception:
             return "127.0.0.1"
+
+    def _check_global_rate(self, counter_name: str, limit: int) -> bool:
+        """Return True if the global per-slot counter is within limit.
+        Resets all counters when the slot advances. Thread-safe."""
+        slot = get_current_slot()
+        with self._global_rate_lock:
+            if slot > self._last_global_rate_slot:
+                self._global_attest_count  = 0
+                self._global_compete_count = 0
+                self._global_tx_count      = 0
+                self._last_global_rate_slot = slot
+            current = getattr(self, f"_global_{counter_name}_count", 0)
+            if current >= limit:
+                return False
+            setattr(self, f"_global_{counter_name}_count", current + 1)
+            return True
 
     def _save_peers(self):
         try:
@@ -2135,6 +2197,7 @@ class Network:
             now = time.time()
             with self._ban_lock:
                 if now < self._banned_ips.get(sender_ip, 0):
+                    _sec_log("IP_BANNED_DROP", f"ip={sender_ip}")
                     return
 
             data = self._recv_full(conn, ban_ip=sender_ip)
@@ -2737,10 +2800,13 @@ class Node:
             exit(1)
 
         # Step 3+: Connect to peers
+        offline = getattr(self, "_offline_mode", False)
         self.network = Network(wallet=None, ledger=self.ledger, node_ref=self)
         new_wallet_node = not os.path.exists(WALLET_FILE)
 
-        if new_wallet_node:
+        if offline:
+            print("  Offline mode — network threads disabled.")
+        elif new_wallet_node:
             # L1: for new-wallet startup, start network first so the freeze
             # check in _load_or_create_wallet() has real chain data.
             # All network threads guard against wallet=None until it is wired
@@ -2760,12 +2826,13 @@ class Node:
 
         # Step 6: Ledger already loaded in __init__
         # Step 8-11: Start network threads (already started above for new wallets)
-        if not new_wallet_node:
+        if not offline and not new_wallet_node:
             self.network.start()
-        print(f"  Listening on port {self.network.port}")
+        if not offline:
+            print(f"  Listening on port {self.network.port}")
 
         # Wait briefly for peer connections before lottery
-        if not new_wallet_node:
+        if not offline and not new_wallet_node:
             time.sleep(3)
             if not self.network.get_online_peers():
                 print("  Waiting for peers...")
@@ -2774,8 +2841,9 @@ class Node:
             time.sleep(2)
 
         # Steps 13: Broadcast our REGISTER message
-        reg_msg = self.wallet._make_registration_message()
-        self.network.broadcast(reg_msg)
+        if not offline:
+            reg_msg = self.wallet._make_registration_message()
+            self.network.broadcast(reg_msg)
 
         # Steps 14-18: Start protocol threads
         self._running = True
@@ -2909,14 +2977,15 @@ class Node:
         phrase = self.wallet.show_seed_phrase_and_confirm()
 
         # Ask for password
-        print("  Set a wallet password (minimum 8 characters, or press Enter for no password):")
+        print(f"  Set a wallet password (minimum {MIN_PASSPHRASE_LENGTH} characters, or press Enter for no password):")
+        print(f"  Tip: use a long passphrase for best security.")
         while True:
             try:
                 pw = getpass.getpass("  Password: ")
             except (EOFError, KeyboardInterrupt):
                 pw = ""
-            if pw and len(pw) < 8:
-                print("  Password must be at least 8 characters.")
+            if pw and len(pw) < MIN_PASSPHRASE_LENGTH:
+                print(f"  Password must be at least {MIN_PASSPHRASE_LENGTH} characters.")
                 continue
             if pw:
                 pw2 = getpass.getpass("  Confirm password: ")
@@ -3016,6 +3085,10 @@ class Node:
 
     def _on_compete_received(self, msg: dict):
         """Handle an incoming COMPETE message."""
+        # Global flood protection
+        if not self._check_global_rate("compete", MAX_GLOBAL_COMPETE_PER_SLOT):
+            return
+
         slot = msg.get("slot")
         if slot != get_current_slot():
             return
@@ -3230,13 +3303,22 @@ class Node:
 
     def _on_attest_received(self, msg: dict):
         """Handle an incoming ATTEST message."""
+        # Global flood protection — drop silently if over per-slot cap
+        if not self._check_global_rate("attest", MAX_GLOBAL_ATTEST_PER_SLOT):
+            return
+
         block_hash = msg.get("block_hash", "")
         slot       = msg.get("slot", 0)
         did        = msg.get("device_id", "")
         pub_hex    = msg.get("public_key", "")
         sig_hex    = msg.get("signature", "")
 
+        # Cheap structural checks before expensive Dilithium3 verification
         if not block_hash or not did or not pub_hex or not sig_hex:
+            return
+        if not _is_valid_hex64(block_hash):
+            return
+        if not isinstance(slot, int) or slot <= 0:
             return
 
         # Validate attestation
@@ -3293,6 +3375,9 @@ class Node:
 
     def _on_transaction_received(self, tx_dict: dict):
         """Validate and add to mempool."""
+        # Global flood protection
+        if not self._check_global_rate("tx", MAX_GLOBAL_TX_PER_SLOT):
+            return
         try:
             tx = Transaction.from_dict(tx_dict)
         except Exception:
@@ -3958,6 +4043,54 @@ if __name__ == "__main__":
         except Exception:
             pass
         sys.exit(0)
+
+    elif len(sys.argv) >= 2 and sys.argv[1] == "--export-checkpoint":
+        # Export latest checkpoint to a file for air-gapped node use.
+        # Transfer the file via USB to an offline machine.
+        ledger = Ledger()
+        ledger.load()
+        if not ledger.checkpoints:
+            print("No checkpoint available yet.")
+            sys.exit(1)
+        out_path = "timpal_checkpoint.json"
+        with open(out_path, "w") as f:
+            import json as _json
+            _json.dump(ledger.checkpoints[-1], f, indent=2, sort_keys=True)
+        print(f"✅ Checkpoint exported to {out_path}")
+        print(f"   Slot: {ledger.checkpoints[-1].get('slot', '?')}")
+        print(f"   Transfer this file via USB to your offline machine.")
+        sys.exit(0)
+
+    elif len(sys.argv) >= 2 and sys.argv[1] == "--import-ledger":
+        # Import and validate a ledger file from an air-gapped export.
+        if len(sys.argv) < 3:
+            print("Usage: python3 timpal.py --import-ledger <path>")
+            sys.exit(1)
+        import_path = sys.argv[2]
+        if not os.path.exists(import_path):
+            print(f"File not found: {import_path}")
+            sys.exit(1)
+        ledger = Ledger()
+        try:
+            with open(import_path) as f:
+                data = json.load(f)
+            ledger.apply_checkpoint(data)
+            ledger.save()
+            print(f"✅ Ledger imported and validated successfully.")
+            print(f"   Checkpoint slot: {data.get('slot', '?')}")
+        except Exception as e:
+            print(f"❌ Import failed: {e}")
+            sys.exit(1)
+        sys.exit(0)
+
+    elif len(sys.argv) >= 2 and sys.argv[1] == "--offline":
+        # Run node in offline/air-gapped mode — all network threads disabled.
+        # Useful for signing transactions, checking balance, or inspecting chain
+        # on a machine without internet access.
+        print("  Running in offline mode — network disabled.")
+        node = Node()
+        node._offline_mode = True
+        node.start()
 
     else:
         node = Node()

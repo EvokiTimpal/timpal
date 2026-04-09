@@ -246,7 +246,7 @@ TYPE html>
       <div class="section-title">How it works</div>
       <div class="features">
         <div class="feature"><div class="feature-icon">🔐</div><div class="feature-title">Quantum-Resistant from Day One</div><div class="feature-desc">Bitcoin and Ethereum wallets use ECDSA — cryptography that quantum computers will break. TIMPAL uses Dilithium3, the NIST 2024 post-quantum standard, as its only cryptographic primitive. Every wallet, every signature, every transaction is resistant to quantum attack from the moment it is created. There is no fallback. There is no migration path needed.</div></div>
-        <div class="feature"><div class="feature-icon">⚡</div><div class="feature-title">Cryptographic Finality</div><div class="feature-desc">A block is final when more than 2/3 of all mature identities have signed it with Dilithium3 attestations (~30 seconds). A finalized block cannot be reversed under any circumstances short of breaking Dilithium3.</div></div>
+        <div class="feature"><div class="feature-icon">⚡</div><div class="feature-title">Cryptographic Finality</div><div class="feature-desc">A block is final when more than 2/3 of all mature identities have signed it with Dilithium3 attestations (~50 seconds). A finalized block cannot be reversed under any circumstances short of breaking Dilithium3.</div></div>
         <div class="feature"><div class="feature-icon">🎲</div><div class="feature-title">Equal Chance for Every Node</div><div class="feature-desc">Every 10 seconds, one node wins 1.0575 TMPL. A node that started today has the exact same statistical chance as one that has been running since genesis — by design, enforced at the protocol level. No mining hardware. No staking. No capital requirement. The single winner per slot is selected deterministically — every node independently computes the same result. The winner is decided by cryptographic proof, not by who owns the most.</div></div>
         <div class="feature"><div class="feature-icon">🪪</div><div class="feature-title">On-Chain Identity Registration</div><div class="feature-desc">Every new node registers its identity on-chain via a signed REGISTER message embedded in a block. Only identities registered for at least 200 slots (~33 minutes) can produce valid blocks. Enforced at consensus — no shortcut, no bypass.</div></div>
         <div class="feature"><div class="feature-icon">🖥️</div><div class="feature-title">One Node Per Device</div><div class="feature-desc">The protocol enforces one node per physical device at the OS level. Running ten terminals gives you zero advantage.</div></div>
@@ -280,7 +280,7 @@ TYPE html>
       <tr><td class="prop">Distribution Period</td><td class="val">~37.5 years</td></tr>
       <tr><td class="prop">Eligible Nodes Per Slot</td><td class="val">1 deterministic winner per slot</td></tr>
       <tr><td class="prop">Identity Maturation Period</td><td class="val">200 slots (~33 minutes)</td></tr>
-      <tr><td class="prop">Confirmation Depth</td><td class="val">3 slots (~30 seconds)</td></tr>
+      <tr><td class="prop">Confirmation Depth</td><td class="val">5 slots (~50 seconds)</td></tr>
       <tr><td class="prop">Checkpoint Interval</td><td class="val">Every 1,000 slots (~2.8 hours)</td></tr>
       <tr><td class="prop">Transaction Fee</td><td class="val accent">0.1% of amount (min 0.0001, max 0.01 TMPL) → slot winner</td></tr>
       <tr><td class="prop">Pre-mine</td><td class="val green">None</td></tr>
@@ -378,6 +378,7 @@ TYPE html>
       <a class="docs-nav-link" onclick="scrollToDoc('running')">Running on a Server</a>
       <a class="docs-nav-link" onclick="scrollToDoc('commands')">Commands</a>
       <a class="docs-nav-link" onclick="scrollToDoc('wallet')">Your Wallet</a>
+      <a class="docs-nav-link" onclick="scrollToDoc('advanced')">Advanced CLI</a>
       <div class="docs-nav-title">Protocol</div>
       <a class="docs-nav-link" onclick="scrollToDoc('how')">How it Works</a>
       <a class="docs-nav-link" onclick="scrollToDoc('identity')">Identity Registration</a>
@@ -460,7 +461,25 @@ python3 timpal.py send &lt;address&gt; &lt;amount&gt;</div>
         <div class="docs-h2">Your Wallet</div>
         <p class="docs-p">Your wallet is stored in one file:</p>
         <div class="docs-code">~/.timpal_wallet.json</div>
-        <div class="docs-callout">⚠️ Back this file up immediately. It contains your encrypted private key. Also store your 12-word recovery phrase on paper in a safe place — it is the only way to recover your wallet if you lose the file. If you lose both, your TMPL is gone forever.</div>
+        <p class="docs-p">On first run, TIMPAL requires a passphrase of at least 20 characters. Your private key is encrypted with AES-256-GCM and never written to disk in plaintext.</p>
+        <div class="docs-callout">⚠️ Back this file up immediately. Also store your 12-word recovery phrase on paper in a safe place — it is the only way to recover your wallet if you lose the file. If you lose both, your TMPL is gone forever.</div>
+      </div>
+      <div class="docs-section" id="doc-advanced">
+        <div class="docs-h2">Advanced CLI</div>
+        <div class="docs-code"><span class="comment"># Recover wallet from 12-word seed phrase</span>
+python3 timpal.py --recover
+
+<span class="comment"># Connect to a specific peer (no DNS or bootstrap needed)</span>
+python3 timpal.py --peer 5.78.187.91:7779
+
+<span class="comment"># Export latest checkpoint (for air-gapped node use)</span>
+python3 timpal.py --export-checkpoint
+
+<span class="comment"># Import a checkpoint from file</span>
+python3 timpal.py --import-ledger timpal_checkpoint.json
+
+<span class="comment"># Run in offline mode — no network, inspect only</span>
+python3 timpal.py --offline</div>
       </div>
       <div class="docs-section" id="doc-how">
         <div class="docs-h2">How it Works</div>
@@ -506,7 +525,7 @@ winner_id must equal min(mature_active, key=score)</div>
       </div>
       <div class="docs-section" id="doc-ledger">
         <div class="docs-h2">Ledger</div>
-        <p class="docs-p">Blocks achieve cryptographic finality at ~30 seconds via the attestation mechanism. The longer valid chain wins on fork. Out-of-order blocks are held in an orphan pool and attached once their parent arrives. Every 1,000 slots (~2.8 hours), a checkpoint prunes the raw history while preserving all balances and the full identity table. Before accepting a peer checkpoint, every node independently recomputes balances from its own chain history — a checkpoint with corrupted balances is rejected outright.</p>
+        <p class="docs-p">Blocks achieve cryptographic finality at ~50 seconds via the attestation mechanism. The longer valid chain wins on fork. Out-of-order blocks are held in an orphan pool and attached once their parent arrives. Every 1,000 slots (~2.8 hours), a checkpoint prunes the raw history while preserving all balances and the full identity table. Before accepting a peer checkpoint, every node independently recomputes balances from its own chain history — a checkpoint with corrupted balances is rejected outright.</p>
       </div>
       <div class="docs-section" id="doc-network">
         <div class="docs-h2">Network</div>
@@ -530,7 +549,7 @@ winner_id must equal min(mature_active, key=score)</div>
           <tr><td>Distribution Period</td><td>~37.5 years</td></tr>
           <tr><td>Winner Per Slot</td><td>1 deterministic winner</td></tr>
           <tr><td>Identity Maturation</td><td>200 slots (~33 minutes)</td></tr>
-          <tr><td>Confirmation Depth</td><td>3 slots (~30 seconds)</td></tr>
+          <tr><td>Confirmation Depth</td><td>5 slots (~50 seconds)</td></tr>
           <tr><td>Checkpoint Interval</td><td>Every 1,000 slots (~2.8 hours)</td></tr>
           <tr><td>Transaction Fee</td><td>0.1% of amount (min 0.0001 TMPL, max 0.01 TMPL) → slot winner</td></tr>
           <tr><td>Pre-mine</td><td>None</td></tr>

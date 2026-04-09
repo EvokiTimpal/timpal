@@ -111,7 +111,7 @@ A server node stays in the active identity pool continuously, earns block reward
 
 - **Chain-anchored distributed ledger** — Every node holds a full copy. Each reward is a block carrying a cryptographic link to the previous one — a single, unambiguous history. No proof-of-work. No mining.
 - **Quantum-resistant cryptography** — Dilithium3, the NIST 2024 post-quantum standard. Every signature is future-proof against quantum computers.
-- **Encrypted wallet with seed phrase recovery** — Private key encrypted with AES-256-GCM and a password you set. Never stored in plaintext. Recoverable via your 12-word BIP39 seed phrase.
+- **Encrypted wallet with seed phrase recovery** — Private key encrypted with AES-256-GCM and a password of at least 20 characters. Never stored in plaintext. Recoverable via your 12-word BIP39 seed phrase.
 - **Attestation-based cryptographic finality** — A block is final when more than 2/3 of all mature identities have signed it with Dilithium3 attestations. A finalized block cannot be reversed under any circumstances short of breaking Dilithium3.
 - **On-chain identity registration** — When your node starts, it broadcasts a signed REGISTER message to peers. A block producer embeds it in the next block. Your identity is then on-chain with a verifiable `first_seen_slot`. After 200 slots (~33 minutes) your identity is mature and your node becomes eligible to compete in the lottery. This maturation rule is enforced at the consensus layer on every node — no bypass is possible via P2P or any other path.
 - **Deterministic single-winner lottery** — Every 10 seconds, one node wins 1.0575 TMPL. Each slot, every node independently computes the same single winner — the identity with the lowest SHA256 score of `(device_id + prev_block_hash + slot)` among all mature active identities. The winner is unpredictable until the previous block arrives. The winner signs the slot challenge with Dilithium3 (proving they were online) and broadcasts the block directly. Cryptographically fair and independently verifiable by every node.
@@ -133,7 +133,7 @@ A server node stays in the active identity pool continuously, earns block reward
 | Distribution period | ~37.5 years |
 | Eligible nodes per slot | 1 deterministic winner per slot |
 | Identity maturation period | 200 slots (~33 minutes) |
-| Confirmation depth | 3 slots (~30 seconds) |
+| Confirmation depth | 5 slots (~50 seconds) |
 | Checkpoint interval | Every 1,000 slots (~2.8 hours) |
 | Transaction fee | 0.1% of amount (min 0.0001 TMPL, max 0.01 TMPL) → slot winner |
 | Pre-mine | None |
@@ -159,9 +159,30 @@ Your wallet is quantum-resistant from the moment it is created.
 
 ## Wallet security
 
-On first run, TIMPAL generates a 12-word BIP39 recovery phrase and requires you to type it back in full before creating your wallet. Your private key is then encrypted with AES-256-GCM using a key derived from your password via scrypt. The plaintext private key is never written to disk.
+On first run, TIMPAL generates a 12-word BIP39 recovery phrase and requires you to type it back in full before creating your wallet. Your private key is then encrypted with AES-256-GCM using a key derived from your password via scrypt. A minimum passphrase length of 20 characters is enforced. The plaintext private key is never written to disk.
 
 **If you lose both your wallet file and your 12-word recovery phrase, your TMPL is gone forever.** There is no other recovery path. Write the phrase down on paper and store it somewhere safe. Never photograph it. Never put it in cloud storage. Never share it with anyone.
+
+---
+
+## Advanced CLI flags
+
+```bash
+# Recover your wallet from a 12-word seed phrase
+python3 timpal.py --recover
+
+# Connect to a specific peer manually (no DNS or bootstrap required)
+python3 timpal.py --peer 5.78.187.91:7779
+
+# Export latest checkpoint to a file (for air-gapped node use)
+python3 timpal.py --export-checkpoint
+
+# Import a checkpoint from a file
+python3 timpal.py --import-ledger timpal_checkpoint.json
+
+# Run in offline mode — no network, for inspection or signing only
+python3 timpal.py --offline
+```
 
 ---
 

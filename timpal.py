@@ -136,14 +136,6 @@ CONTROL_TOKEN  = os.path.join(os.path.expanduser("~"), ".timpal_control.token")
 
 BOOTSTRAP_SERVERS = [("5.78.187.91", 7777)]
 
-# ── Bootstrap operator signing key (TODO post-launch) ─────────────────────────
-# TODO: Generate a real Dilithium3 keypair for the bootstrap operator and replace
-# this placeholder before enabling signed bootstrap registration enforcement.
-# Until then, REGISTER_BOOTSTRAP is accepted from any peer (current behavior).
-# When ready: set BOOTSTRAP_OPERATOR_PUBKEY to the operator's public key hex and
-# enforce Dilithium3.verify(signature, message, BOOTSTRAP_OPERATOR_PUBKEY) in
-# bootstrap.py handle_register_bootstrap().
-BOOTSTRAP_OPERATOR_PUBKEY = None  # placeholder — set before enabling signed registration
 DNS_SEEDS         = ["dns.timpal.org"]
 
 # ── Explorer push targets ──────────────────────────────────────────────────────

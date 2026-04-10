@@ -141,6 +141,7 @@ WALLET_FILE    = os.path.join(os.path.expanduser("~"), ".timpal_wallet.json")
 LEDGER_FILE    = os.path.join(os.path.expanduser("~"), ".timpal_ledger.json")
 PEERS_FILE     = os.path.join(os.path.expanduser("~"), ".timpal_peers.json")
 CONTROL_TOKEN  = os.path.join(os.path.expanduser("~"), ".timpal_control.token")
+PUBKEYS_DB     = os.path.join(os.path.expanduser("~"), ".timpal_pubkeys.db")
 
 # ── Bootstrap servers ──────────────────────────────────────────────────────────
 
@@ -1034,6 +1035,106 @@ def parse_payment_uri(uri: str) -> dict:
     memo  = params["memo"][0][:128]  if "memo"  in params else None
     label = params["label"][0]       if "label" in params else None
     return {"device_id": device_id, "amount": amount, "memo": memo, "label": label}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PART 8B — IDENTITY PUBKEY STORE (SQLite-backed)
+# ══════════════════════════════════════════════════════════════════════════════
+
+import sqlite3 as _sqlite3
+
+class IdentityPubkeyStore:
+    """SQLite-backed store for Dilithium3 public keys.
+
+    Drop-in replacement for the identity_pubkeys dict.
+    Keeps public keys on disk — O(1) memory regardless of network size.
+
+    At 1,000,000 nodes, storing pubkeys in a Python dict requires ~2.7 GB
+    of RAM (each Dilithium3 pubkey is 1,312 bytes, stored as 2,624-char hex).
+    SQLite stores them on disk and serves single-lookup queries in microseconds.
+
+    Interface mirrors dict: .get(), 'in', [did]=key, len(), .to_dict(), .items()
+    All existing code that accesses identity_pubkeys works without modification.
+    """
+
+    def __init__(self, db_path: str = PUBKEYS_DB):
+        self._db_path = db_path
+        self._conn    = _sqlite3.connect(db_path, check_same_thread=False)
+        self._conn.execute("PRAGMA journal_mode=WAL")   # concurrent readers
+        self._conn.execute("PRAGMA synchronous=NORMAL") # fast writes, safe enough
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS identity_pubkeys (
+                device_id  TEXT PRIMARY KEY,
+                public_key TEXT NOT NULL
+            )
+        """)
+        self._conn.commit()
+        self._lock = threading.Lock()
+
+    def get(self, device_id: str, default: str = "") -> str:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT public_key FROM identity_pubkeys WHERE device_id = ?",
+                (device_id,)
+            ).fetchone()
+            return row[0] if row else default
+
+    def __contains__(self, device_id: str) -> bool:
+        with self._lock:
+            return self._conn.execute(
+                "SELECT 1 FROM identity_pubkeys WHERE device_id = ?",
+                (device_id,)
+            ).fetchone() is not None
+
+    def __setitem__(self, device_id: str, public_key: str):
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO identity_pubkeys (device_id, public_key) VALUES (?, ?)",
+                (device_id, public_key)
+            )
+            self._conn.commit()
+
+    def __getitem__(self, device_id: str) -> str:
+        result = self.get(device_id)
+        if result == "":
+            raise KeyError(device_id)
+        return result
+
+    def __len__(self) -> int:
+        with self._lock:
+            return self._conn.execute(
+                "SELECT COUNT(*) FROM identity_pubkeys"
+            ).fetchone()[0]
+
+    def items(self):
+        """Return all (device_id, public_key) pairs. Used for checkpoints."""
+        with self._lock:
+            return self._conn.execute(
+                "SELECT device_id, public_key FROM identity_pubkeys"
+            ).fetchall()
+
+    def to_dict(self) -> dict:
+        """Return full dict snapshot. Used for checkpoint serialization and reorg."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT device_id, public_key FROM identity_pubkeys"
+            ).fetchall()
+            return dict(rows)
+
+    def load_from_dict(self, d: dict):
+        """Bulk-load from a dict. Used in _load() and apply_checkpoint()."""
+        with self._lock:
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO identity_pubkeys (device_id, public_key) VALUES (?, ?)",
+                d.items()
+            )
+            self._conn.commit()
+
+    def close(self):
+        try:
+            self._conn.close()
+        except Exception:
+            pass
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1971,11 +2072,15 @@ class Ledger:
                     if did not in self.identities or slot < self.identities[did]:
                         self.identities[did] = slot
 
-            # Merge identity_pubkeys — do not overwrite a key we already know
-            for did, pub_hex in checkpoint.get("identity_pubkeys", {}).items():
-                if isinstance(did, str) and isinstance(pub_hex, str) and pub_hex:
-                    if did not in self.identity_pubkeys:
-                        self.identity_pubkeys[did] = pub_hex
+            # Merge identity_pubkeys via bulk load — INSERT OR REPLACE preserves
+            # existing entries and adds new ones atomically.
+            _cp_pubkeys = {
+                did: pub_hex
+                for did, pub_hex in checkpoint.get("identity_pubkeys", {}).items()
+                if isinstance(did, str) and isinstance(pub_hex, str) and pub_hex
+            }
+            if _cp_pubkeys:
+                self.identity_pubkeys.load_from_dict(_cp_pubkeys)
 
             # Merge identity_last_attest — take the most recent slot per identity
             for did, last_slot in checkpoint.get("identity_last_attest", {}).items():

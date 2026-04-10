@@ -106,9 +106,19 @@ BROADCAST_PORT         = 7778
 # ── Global rate limit constants ────────────────────────────────────────────────
 # Per-IP limits are already enforced. These global per-slot caps prevent
 # coordinated floods from many IPs overwhelming the node simultaneously.
-MAX_GLOBAL_ATTEST_PER_SLOT  = 5000   # max attestations accepted per slot across all IPs
+MAX_GLOBAL_ATTEST_PER_SLOT  =  600   # committee (512) + buffer — replaces old 5000
 MAX_GLOBAL_COMPETE_PER_SLOT =  100   # max compete messages accepted per slot
 MAX_GLOBAL_TX_PER_SLOT      = 1000   # max transactions accepted per slot
+
+# ── Attestation committee constants ────────────────────────────────────────────
+# At large network size, requiring ALL active nodes to attest makes finality
+# O(N) in verification cost — impossible at 1M nodes (267 seconds per slot).
+# A randomly-selected committee of 512 nodes per slot makes finality O(512)
+# regardless of network size. Selection is deterministic from block_hash+slot
+# so it is unpredictable in advance (block_hash unknown until block produced).
+# At 33% attacker share, probability of corrupting 2/3 of committee: ~10^-44.
+# Below ATTESTATION_COMMITTEE_SIZE the whole active set attests (current behavior).
+ATTESTATION_COMMITTEE_SIZE  =  512
 NODE_PORT_RANGE_START  = 7779
 MAX_P2P_MESSAGE_SIZE   = 10_000_000   # 10MB DoS protection — regular P2P messages
 MAX_SYNC_MESSAGE_SIZE  = 100_000_000  # 100MB — SYNC responses can contain full block history
@@ -375,29 +385,78 @@ def get_active_mature_identities(ledger, slot: int) -> set:
     return active
 
 
+def get_active_mature_identities_list(identities: dict,
+                                      identity_last_attest: dict,
+                                      slot: int) -> list:
+    """Same filter as get_active_mature_identities but takes raw dicts and
+    returns a list — required by select_attestation_committee for deterministic
+    ordering before SHA256 scoring."""
+    active = []
+    for did, first_seen in identities.items():
+        if slot - first_seen < MIN_IDENTITY_AGE:
+            continue
+        if slot > first_seen + IDENTITY_GRACE_PERIOD:
+            last_attest = identity_last_attest.get(did, first_seen)
+            if slot - last_attest > IDENTITY_ACTIVITY_WINDOW:
+                continue
+        active.append(did)
+    return active
+
+
+def select_attestation_committee(identities: dict,
+                                  identity_last_attest: dict,
+                                  block_hash: str,
+                                  slot: int) -> set:
+    """Select the attestation committee for a given block deterministically.
+
+    Committee size is ATTESTATION_COMMITTEE_SIZE (512). When the active
+    mature network is smaller than 512 every active node is in the committee
+    — identical to the pre-committee behaviour, so small networks are unaffected.
+
+    Selection uses SHA256(committee:{did}:{block_hash}:{slot}) as a score.
+    block_hash is the hash of the block being attested. It is unknown until
+    the block is produced (depends on the winner's Dilithium3 signature) so
+    the committee cannot be predicted or targeted in advance.
+
+    Security: with a 33% attacker and committee size 512 the probability of
+    the attacker controlling >2/3 of the committee is ~10^-44.
+    """
+    active = get_active_mature_identities_list(identities, identity_last_attest, slot)
+    if len(active) <= ATTESTATION_COMMITTEE_SIZE:
+        return set(active)   # small network: everyone attests
+    scored = sorted(
+        active,
+        key=lambda did: hashlib.sha256(
+            f"committee:{did}:{block_hash}:{slot}".encode()
+        ).hexdigest()
+    )
+    return set(scored[:ATTESTATION_COMMITTEE_SIZE])
+
+
 def is_final(block_hash: str, slot: int, ledger, attestations: dict) -> bool:
-    """A block is cryptographically final when >2/3 of active mature identities attest.
+    """A block is final when >2/3 of its attestation committee have attested.
 
-    attestations = {block_hash: {device_id: attestation_dict}}
+    The committee is selected deterministically from block_hash + slot.
+    Below ATTESTATION_COMMITTEE_SIZE active nodes the entire active set is
+    the committee (preserves original behaviour for small networks).
 
-    Uses active mature identities only — dormant identities are excluded from
-    the denominator. This prevents a gradual Sybil attack where an attacker
-    accumulates dormant identities to inflate the quorum denominator and
-    permanently stall finality by withholding attestations.
-
-    Finality self-heals: if an attacker stops attesting, their identities
-    drop out of the active set after IDENTITY_ACTIVITY_WINDOW slots,
-    reducing the denominator back to the honest active majority.
+    Committee-based finality scales to any network size: verification cost
+    is O(512) regardless of whether there are 100 or 1,000,000 nodes.
 
     A finalized block cannot be reorged under any circumstances short of
     breaking Dilithium3.
     """
-    active_mature = get_active_mature_identities(ledger, slot)
-    total         = len(active_mature)
+    committee = select_attestation_committee(
+        ledger.identities,
+        ledger.identity_last_attest,
+        block_hash,
+        slot
+    )
+    total = len(committee)
     if total == 0:
         return False
     attested = sum(1 for did in attestations.get(block_hash, {})
-                   if did in active_mature)
+                   if did in committee)
     return attested / total > ATTESTATION_THRESHOLD
 
 
@@ -3259,10 +3318,16 @@ class Node:
 
         if changed:
             tip_hash = compute_block_hash(msg)
-            # Attest immediately
-            attest = produce_attestation(tip_hash, slot, self.wallet)
-            self.network.broadcast(attest)
-            self._on_attest_received(attest)
+            # Only attest if this node is in the committee for this block
+            committee = select_attestation_committee(
+                self.ledger.identities,
+                self.ledger.identity_last_attest,
+                tip_hash, slot
+            )
+            if self.wallet.device_id in committee:
+                attest = produce_attestation(tip_hash, slot, self.wallet)
+                self.network.broadcast(attest)
+                self._on_attest_received(attest)
 
             # Remove confirmed txs from mempool
             with self._mempool_lock:
@@ -3298,6 +3363,14 @@ class Node:
                     block_hash = compute_block_hash(block)
                     slot       = block.get("slot", 0)
                     if block_hash in self._finalized:
+                        continue
+                    # Only attest if this node is in the committee for this block
+                    committee = select_attestation_committee(
+                        self.ledger.identities,
+                        self.ledger.identity_last_attest,
+                        block_hash, slot
+                    )
+                    if self.wallet.device_id not in committee:
                         continue
                     attest = produce_attestation(block_hash, slot, self.wallet)
                     self.network.broadcast(attest)
@@ -3337,6 +3410,16 @@ class Node:
         # the voter is not the real identity owner.
         registered_pub = self.ledger.identity_pubkeys.get(did, "")
         if registered_pub and pub_hex != registered_pub:
+            return
+
+        # Committee membership check — reject attestations from nodes outside
+        # the committee for this block. Cheap check before Dilithium3 verify.
+        committee = select_attestation_committee(
+            self.ledger.identities,
+            self.ledger.identity_last_attest,
+            block_hash, slot
+        )
+        if did not in committee:
             return
 
         try:

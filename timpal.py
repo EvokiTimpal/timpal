@@ -1044,6 +1044,12 @@ class Ledger:
             self.freeze_last_abnormal_slot = data.get("freeze_last_abnormal_slot", 0)
             self.freeze_normal_streak      = data.get("freeze_normal_streak", 0)
             self.last_finalized_slot       = data.get("last_finalized_slot", -1)
+            # Repopulate _finalized_hashes from chain so Rule 9 doesn't reject
+            # every new block after a restart. _finalized_hashes is never persisted
+            # (it's a runtime set); rebuild from blocks at or below last_finalized_slot.
+            for b in self.chain:
+                if b.get("slot", 0) <= self.last_finalized_slot:
+                    self._finalized_hashes.add(compute_block_hash(b))
             bloom_data = data.get("spent_bloom")
             if bloom_data:
                 self._spent_bloom = SpentBloomFilter.from_dict(bloom_data)
@@ -1237,6 +1243,11 @@ class Ledger:
         # (A more strict check would store the gbh per identity, which is future work.)
         # For now: wid must equal sha256(pubkey) OR be in identities (chain-anchored).
         if expected_from_pub != wid and wid not in self.identities:
+            return False
+        # Bind vrf_public_key to the registered pubkey for this identity.
+        # Prevents impersonating a winner by using a different key with their device_id.
+        registered_pub = self.identity_pubkeys.get(wid, "")
+        if registered_pub and pub_hex != registered_pub:
             return False
 
         # Rule 6: maturation check (applies to all slots)
@@ -3078,7 +3089,7 @@ class Node:
     def _on_compete_received(self, msg: dict):
         """Handle an incoming COMPETE message."""
         # Global flood protection
-        if not self._check_global_rate("compete", MAX_GLOBAL_COMPETE_PER_SLOT):
+        if not self.network._check_global_rate("compete", MAX_GLOBAL_COMPETE_PER_SLOT):
             return
 
         slot = msg.get("slot")
@@ -3296,7 +3307,7 @@ class Node:
     def _on_attest_received(self, msg: dict):
         """Handle an incoming ATTEST message."""
         # Global flood protection — drop silently if over per-slot cap
-        if not self._check_global_rate("attest", MAX_GLOBAL_ATTEST_PER_SLOT):
+        if not self.network._check_global_rate("attest", MAX_GLOBAL_ATTEST_PER_SLOT):
             return
 
         block_hash = msg.get("block_hash", "")
@@ -3368,7 +3379,7 @@ class Node:
     def _on_transaction_received(self, tx_dict: dict):
         """Validate and add to mempool."""
         # Global flood protection
-        if not self._check_global_rate("tx", MAX_GLOBAL_TX_PER_SLOT):
+        if not self.network._check_global_rate("tx", MAX_GLOBAL_TX_PER_SLOT):
             return
         try:
             tx = Transaction.from_dict(tx_dict)
@@ -3920,7 +3931,7 @@ def _recover_wallet():
     print(f"\n  Recovered device ID: {device_id}")
     print("  Set a new wallet password (or press Enter for none):")
     pw = getpass.getpass("  Password: ")
-    if pw and len(pw) < 8:
+    if pw and len(pw) < MIN_PASSPHRASE_LENGTH:
         print("  Password too short — saving without encryption.")
         pw = None
     elif pw:

@@ -290,6 +290,52 @@ def calculate_fee(amount: int) -> int:
     return max(TX_FEE_MIN, min(TX_FEE_MAX, fee))
 
 
+import re as _re
+_TMPL_AMOUNT_RE = _re.compile(r'^\d+(\.\d{1,8})?$')
+
+def _parse_tmpl_to_units(amount_str) -> int:
+    """Convert a TMPL amount to integer units without any float arithmetic.
+
+    Eliminates float representation drift entirely. Parses by splitting on
+    the decimal point and constructing the integer directly from digit strings.
+    Accepts up to 8 decimal places. Inputs with more than 8 decimal places
+    are rejected — silent truncation would send a different amount than typed.
+
+    1 TMPL = 100_000_000 units (UNIT).
+
+    Strictly validated against r'^\\d+(\\.\\d{1,8})?$' before parsing.
+    Explicitly rejects: negatives (-1.0), scientific notation (1e-3),
+    underscores (1_000), multiple decimals (1.2.3), 9+ decimal places, empty strings.
+
+    Examples:
+        "1"            → 100_000_000
+        "1.5"          → 150_000_000
+        "0.1"          → 10_000_000      (float("0.1") is not exact — this is)
+        "0.00000001"   → 1
+        "0.000000019"  → ValueError      (9 decimal places — rejected, not truncated)
+        "125.99999999" → 12_599_999_999
+
+    Raises ValueError on any input that does not match the strict pattern.
+    """
+    s = str(amount_str).strip()
+    if not _TMPL_AMOUNT_RE.match(s):
+        raise ValueError(
+            f"invalid amount {amount_str!r} — "
+            f"must be digits with optional decimal point and up to 8 decimal places "
+            f"(e.g. '1', '0.5', '1.23456789')"
+        )
+    if "." in s:
+        int_part, dec_part = s.split(".", 1)
+    else:
+        int_part, dec_part = s, ""
+    # Pad decimal to exactly 8 digits (regex already caps it at 8)
+    dec_part = dec_part.ljust(8, "0")
+    units = int(int_part) * UNIT + int(dec_part)
+    if units <= 0:
+        raise ValueError("amount must be greater than zero")
+    return units
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # PART 3 — LOTTERY: COMPETITOR SELECTION AND CHALLENGE
 # ══════════════════════════════════════════════════════════════════════════════
@@ -4065,13 +4111,27 @@ class Node:
 
     # ── Send TMPL ──────────────────────────────────────────────────────────────
 
-    def send(self, recipient_id: str, amount_tmpl: float, memo: str = "") -> dict:
-        """Send TMPL to recipient. Returns {ok, error}."""
+    def send(self, recipient_id: str, amount_tmpl, memo: str = "") -> dict:
+        """Send TMPL to recipient. Returns {ok, error}.
+
+        amount_tmpl may be a string ("1.5"), int (units), or float.
+        String input is parsed with _parse_tmpl_to_units — no float arithmetic.
+        Float/int input is formatted to 8 decimal places then parsed the same way,
+        keeping the full pipeline float-free.
+        """
         if not _is_valid_hex64(recipient_id):
             return {"ok": False, "error": "invalid address"}
         if recipient_id == self.wallet.device_id:
             return {"ok": False, "error": "cannot send to yourself"}
-        amount_units = int(round(amount_tmpl * UNIT))
+        try:
+            if isinstance(amount_tmpl, str):
+                amount_units = _parse_tmpl_to_units(amount_tmpl)
+            else:
+                # Float or int from control socket / CLI — format to 8 d.p. then parse.
+                # f"{x:.8f}" is deterministic across platforms for any representable float.
+                amount_units = _parse_tmpl_to_units(f"{float(amount_tmpl):.8f}")
+        except (ValueError, Exception) as e:
+            return {"ok": False, "error": f"invalid amount: {e}"}
         if amount_units <= 0:
             return {"ok": False, "error": "amount must be > 0"}
         fee = calculate_fee(amount_units)
@@ -4192,12 +4252,13 @@ class Node:
                     bal = self.ledger.get_balance(self.wallet.device_id)
                     amount_str = input(f"  Amount in TMPL (balance: {bal/UNIT:.8f}): ").strip()
                     try:
-                        amount = float(amount_str)
-                    except ValueError:
+                        if _parse_tmpl_to_units(amount_str) <= 0:
+                            raise ValueError("must be > 0")
+                    except (ValueError, Exception):
                         print("  Invalid amount.\n")
                         continue
                     memo = input("  Memo (optional, max 128 chars): ").strip()[:128]
-                    result = self.send(recipient, amount, memo)
+                    result = self.send(recipient, amount_str, memo)
                     if not result["ok"]:
                         print(f"  Error: {result['error']}\n")
                 finally:
@@ -4379,10 +4440,12 @@ if __name__ == "__main__":
         if len(sys.argv) < 4:
             print("Usage: python3 timpal.py send <address> <amount_tmpl>")
             sys.exit(1)
-        recipient = sys.argv[2].lower().strip()
+        recipient  = sys.argv[2].lower().strip()
+        amount_str = sys.argv[3].strip()
         try:
-            amount = float(sys.argv[3])
-        except ValueError:
+            if _parse_tmpl_to_units(amount_str) <= 0:
+                raise ValueError("must be > 0")
+        except (ValueError, Exception):
             print("Invalid amount.")
             sys.exit(1)
         if not _is_valid_hex64(recipient):
@@ -4400,7 +4463,7 @@ if __name__ == "__main__":
             sock.connect(("127.0.0.1", 7780))
             sock.sendall((json.dumps({
                 "action": "send", "peer_id": recipient,
-                "amount": amount, "token": token
+                "amount": amount_str, "token": token
             }) + "\n").encode())
             resp = b""
             while True:

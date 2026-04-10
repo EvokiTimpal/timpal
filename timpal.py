@@ -1166,7 +1166,7 @@ class Ledger:
         self.total_minted:   int   = 0
         self.checkpoints:    list  = []
         self.identities:      dict  = {}     # {device_id: first_seen_slot}
-        self.identity_pubkeys:dict  = {}     # {device_id: public_key_hex} — attestation binding
+        self.identity_pubkeys      = IdentityPubkeyStore()  # SQLite-backed — O(1) memory at any scale
         self.identity_last_attest:dict = {}  # {device_id: last_attest_slot} — activity decay
         self.anchor_hashes:  set   = set()  # {genesis_block_hash} — Layer 2 Sybil
         self.balances:       dict  = {}     # {device_id: int} permanent balance cache
@@ -1195,7 +1195,9 @@ class Ledger:
             self.chain         = data.get("chain", [])
             self.fee_rewards   = data.get("fee_rewards", [])
             self.identities      = data.get("identities", {})
-            self.identity_pubkeys= data.get("identity_pubkeys", {})
+            _pubkeys_data = data.get("identity_pubkeys", {})
+            if _pubkeys_data:
+                self.identity_pubkeys.load_from_dict(_pubkeys_data)
             self.identity_last_attest = data.get("identity_last_attest", {})
             self.anchor_hashes   = set(data.get("anchor_hashes", []))
             self.balances      = data.get("balances", {})
@@ -1229,7 +1231,7 @@ class Ledger:
                     "total_minted":   self.total_minted,
                     "checkpoints":    self.checkpoints,
                     "identities":      self.identities,
-                    "identity_pubkeys":self.identity_pubkeys,
+                    "identity_pubkeys":self.identity_pubkeys.to_dict(),
                     "identity_last_attest": self.identity_last_attest,
                     "anchor_hashes":   list(self.anchor_hashes),
                     "balances":       self.balances,
@@ -1719,7 +1721,7 @@ class Ledger:
         prev_hash       = anchor_hash
         prev_slot       = anchor_slot
         fork_identities = dict(self.identities)
-        fork_pubkeys    = dict(self.identity_pubkeys)
+        fork_pubkeys    = self.identity_pubkeys.to_dict()
         fork_anchors    = set(self.anchor_hashes)
 
         for block in fork_blocks:
@@ -1972,7 +1974,7 @@ class Ledger:
                 "prune_before":     prune_before,
                 "balances":         balances,
                 "identities":       dict(self.identities),
-                "identity_pubkeys": dict(self.identity_pubkeys),
+                "identity_pubkeys": self.identity_pubkeys.to_dict(),
                 "identity_last_attest": dict(self.identity_last_attest),
                 "anchor_hashes":    list(self.anchor_hashes),
                 "total_minted":     self.total_minted,

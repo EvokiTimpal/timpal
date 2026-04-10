@@ -74,6 +74,14 @@ _post_rate      = {}
 _post_rate_lock = threading.Lock()
 POST_RATE_LIMIT = 5
 
+# L2 fix: rate limit GET requests to prevent explorer DDoS.
+# 20 requests per 10-second window per IP is generous for a human browser
+# but stops automated flood attacks cold.
+_get_rate        = {}
+_get_rate_lock   = threading.Lock()
+GET_RATE_LIMIT   = 20    # max GET requests per IP per 10 seconds
+GET_RATE_WINDOW  = 10.0  # seconds
+
 
 def _ver(v: str) -> tuple:
     """Parse version string into comparable tuple. Returns (0,0) on error."""
@@ -225,6 +233,12 @@ def _clean_post_rate():
                      if not [t for t in times if now - t < 10]]
             for ip in stale:
                 del _post_rate[ip]
+        # L2 fix: also prune stale GET rate entries
+        with _get_rate_lock:
+            stale = [ip for ip, times in _get_rate.items()
+                     if not [t for t in times if now - t < GET_RATE_WINDOW]]
+            for ip in stale:
+                del _get_rate[ip]
 
 
 def _rebuild_stats_cache() -> dict:
@@ -358,6 +372,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         try:
+            # L2 fix: rate limit GET requests to prevent explorer DDoS.
+            ip  = self.client_address[0]
+            now = time.time()
+            with _get_rate_lock:
+                times = [t for t in _get_rate.get(ip, []) if now - t < GET_RATE_WINDOW]
+                if len(times) >= GET_RATE_LIMIT:
+                    self._send_json(429, {"error": "rate limit exceeded"})
+                    return
+                times.append(now)
+                _get_rate[ip] = times
+
             parsed = urllib.parse.urlparse(self.path)
             path   = parsed.path.rstrip("/")
             params = urllib.parse.parse_qs(parsed.query)

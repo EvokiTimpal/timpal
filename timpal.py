@@ -107,7 +107,7 @@ BROADCAST_PORT         = 7778
 # Per-IP limits are already enforced. These global per-slot caps prevent
 # coordinated floods from many IPs overwhelming the node simultaneously.
 MAX_GLOBAL_ATTEST_PER_SLOT  =  600   # committee (512) + buffer — replaces old 5000
-MAX_GLOBAL_COMPETE_PER_SLOT =  100   # max compete messages accepted per slot
+MAX_GLOBAL_COMPETE_PER_SLOT =  600   # C1 VRF fix: all active mature nodes compete (was 100 for 10-node subset)
 MAX_GLOBAL_TX_PER_SLOT      = 1000   # max transactions accepted per slot
 
 # ── Attestation committee constants ────────────────────────────────────────────
@@ -1212,9 +1212,22 @@ class Ledger:
             for b in self.chain:
                 if b.get("slot", 0) <= self.last_finalized_slot:
                     self._finalized_hashes.add(compute_block_hash(b))
-            bloom_data = data.get("spent_bloom")
-            if bloom_data:
-                self._spent_bloom = SpentBloomFilter.from_dict(bloom_data)
+            # H1 fix: bloom filter is NOT persisted in the per-block save (it was ~46MB
+            # of hex, causing ~400GB/day of disk writes). Instead rebuild on load:
+            # 1. Restore from latest checkpoint's bloom (covers pre-checkpoint history).
+            # 2. Re-add all tx IDs from the rolling-window transactions list.
+            # This is complete — the rolling window covers everything since last checkpoint.
+            if self.checkpoints:
+                bloom_data = self.checkpoints[-1].get("spent_bloom")
+                if bloom_data:
+                    try:
+                        self._spent_bloom = SpentBloomFilter.from_dict(bloom_data)
+                    except Exception:
+                        pass  # keep empty filter — never crash on load
+            for tx in self.transactions:
+                tx_id = tx.get("tx_id", "")
+                if tx_id:
+                    self._spent_bloom.add(tx_id)
             self.recalculate_totals()
         except Exception as e:
             print(f"  [ledger] Load warning: {e}")
@@ -1232,15 +1245,17 @@ class Ledger:
                     "checkpoints":    self.checkpoints,
                     "identities":      self.identities,
                     "identity_pubkeys":self.identity_pubkeys.to_dict(),
-                    "identity_last_attest": self.identity_last_attest,
+                    "identity_last_attest": dict(self.identity_last_attest),
                     "anchor_hashes":   list(self.anchor_hashes),
                     "balances":       self.balances,
                     "my_transactions":self.my_transactions,
                     "freeze_triggered_slot":     self.freeze_triggered_slot,
                     "freeze_last_abnormal_slot": self.freeze_last_abnormal_slot,
                     "freeze_normal_streak":      self.freeze_normal_streak,
-                    "last_finalized_slot":        self.last_finalized_slot,
-                    "spent_bloom":    self._spent_bloom.to_dict()
+                    "last_finalized_slot":        self.last_finalized_slot
+                    # spent_bloom is NOT serialized here — it was ~46MB of hex causing
+                    # ~400GB/day of disk writes. It is rebuilt on _load() from the
+                    # checkpoint bloom + rolling-window transactions. See H1 fix.
                 }, f, indent=2)
             os.replace(tmp, LEDGER_FILE)
         except Exception as e:
@@ -1348,24 +1363,25 @@ class Ledger:
         if _ver(ver) < _ver(MIN_VERSION):
             return False
 
-        # Rule 1: winner_id must be the single deterministic winner for this slot.
-        # After slot 1000 only one winner is valid — the identity with the lowest
-        # SHA256(device_id + prev_hash + slot) score among all mature identities.
-        # Before slot 1000 (genesis phase) any mature identity may produce.
+        # Rule 1 (VRF fix): winner must be an active (non-dormant) mature identity.
+        # The old check — "winner must have the lowest SHA256(did+hash+slot)" — is
+        # REMOVED. That formula was computable 10 seconds in advance, allowing an
+        # attacker to pre-identify and DoS the next slot winner before they produce.
+        # Winner selection now happens via compete_sig VRF output: all active mature
+        # nodes compete, and the one with the lowest SHA256(compete_sig) is chosen at
+        # the network coordination level (see _try_produce_block). Rule 3 verifies the
+        # compete_sig is a valid Dilithium3 signature — forgery is impossible.
+        # After slot 1000: additionally reject blocks from dormant Sybil identities.
+        # Before slot 1000 (genesis phase): any mature identity may produce.
         tip_hash, tip_slot = self._get_tip()
         prev_hash_for_selection = block.get("prev_hash", GENESIS_PREV_HASH)
         if slot >= 1000:
-            mature = [d for d, fs in self.identities.items()
-                      if slot - fs >= MIN_IDENTITY_AGE]
-            if mature:
-                winner = min(
-                    mature,
-                    key=lambda did: hashlib.sha256(
-                        f"{did}:{prev_hash_for_selection}:{slot}".encode()
-                    ).hexdigest()
-                )
-                if wid != winner:
-                    return False
+            wid_first_seen = self.identities.get(wid)
+            if wid_first_seen is not None:
+                if slot > wid_first_seen + IDENTITY_GRACE_PERIOD:
+                    last_a = self.identity_last_attest.get(wid, wid_first_seen)
+                    if slot - last_a > IDENTITY_ACTIVITY_WINDOW:
+                        return False  # dormant identity — cannot produce blocks
 
         # Rule 2: challenge must match compute_challenge(prev_hash, slot)
         expected_challenge = compute_challenge(prev_hash_for_selection, slot).hex()
@@ -2385,14 +2401,22 @@ class Network:
                     return
                 if pid and (not self.wallet or pid != self.wallet.device_id):
                     with self._peers_lock:
-                        if pid not in self.peers and len(self.peers) >= MAX_PEERS:
-                            oldest = min(self.peers, key=lambda k: self.peers[k]["last_seen"])
-                            del self.peers[oldest]
-                        self.peers[pid] = {
-                            "ip":        sender_ip,
-                            "port":      msg.get("port", NODE_PORT_RANGE_START),
-                            "last_seen": time.time()
-                        }
+                        existing = self.peers.get(pid)
+                        if existing and time.time() - existing.get("last_seen", 0) < 60:
+                            # M2 fix: peer was seen recently — only refresh last_seen, never
+                            # overwrite IP/port. An attacker claiming a live peer's device_id
+                            # from a different IP would otherwise evict the real peer from our
+                            # routing table. Legitimate IP changes are accepted once stale (>60s).
+                            existing["last_seen"] = time.time()
+                        else:
+                            if pid not in self.peers and len(self.peers) >= MAX_PEERS:
+                                oldest = min(self.peers, key=lambda k: self.peers[k]["last_seen"])
+                                del self.peers[oldest]
+                            self.peers[pid] = {
+                                "ip":        sender_ip,
+                                "port":      msg.get("port", NODE_PORT_RANGE_START),
+                                "last_seen": time.time()
+                            }
                     if self.wallet:
                         conn.sendall(json.dumps({
                             "type":      "HELLO_ACK",
@@ -2785,8 +2809,10 @@ class Network:
                                 [b for b in self.ledger.chain
                                  if pb <= b.get("slot", 0) < cs]
                             )
-                        ledger_empty = not self.ledger.chain and not self.ledger.checkpoints
-                        if ledger_empty or can_verify:
+                        # C3 fix: never accept a checkpoint without verification or peer
+                        # confirmation — even on an empty ledger. A malicious first peer
+                        # could otherwise inject fabricated balances with zero resistance.
+                        if can_verify:
                             self.ledger.apply_checkpoint(cp)
                         else:
                             # Confirm with additional peers before applying
@@ -3024,6 +3050,7 @@ class Node:
             (self._explorer_push_loop,       "explorer-push"),
             (self._mempool_expiry_loop,      "mempool-expiry"),
             (self._seen_cleanup_loop,        "seen-cleanup"),
+            (self._partition_recovery_loop,  "partition-recovery"),
         ]:
             threading.Thread(target=fn, daemon=True, name=f"timpal-{name}").start()
 
@@ -3191,22 +3218,31 @@ class Node:
                     identities_snapshot   = dict(self.ledger.identities)
                     last_attest_snapshot  = dict(self.ledger.identity_last_attest)
 
-                # Am I the winner this slot?
-                # After slot 1000: single deterministic winner.
-                # Before slot 1000 (genesis): use existing compete-based selection.
+                # C1 VRF fix: all mature nodes compete every slot.
+                # Winner is whoever has the lowest SHA256(compete_sig) — their
+                # Dilithium3 signature over the challenge. The signature is
+                # unpredictable to anyone who doesn't hold that node's private key,
+                # so the winner is unknowable until COMPETEs arrive. This prevents
+                # an attacker pre-identifying the next slot winner and DoS-targeting
+                # them before they can produce their block.
+                #
+                # Before slot 1000 (genesis): use existing select_competitors filter
+                # (10-node subset) to limit genesis-phase network load.
+                # After slot 1000: all active mature identities compete.
                 if current_slot >= 1000:
                     mature = [d for d, fs in identities_snapshot.items()
                               if current_slot - fs >= MIN_IDENTITY_AGE]
-                    if mature:
-                        winner = min(
-                            mature,
-                            key=lambda did: hashlib.sha256(
-                                f"{did}:{tip_hash}:{current_slot}".encode()
-                            ).hexdigest()
-                        )
-                        if winner == self.wallet.device_id:
-                            self._compete(current_slot, tip_hash)
-                    # else: no mature identities yet — nobody produces
+                    # Apply activity filter (mirrors get_active_mature_identities)
+                    active_mature = []
+                    for did in mature:
+                        fs = identities_snapshot[did]
+                        if current_slot > fs + IDENTITY_GRACE_PERIOD:
+                            last_a = last_attest_snapshot.get(did, fs)
+                            if current_slot - last_a > IDENTITY_ACTIVITY_WINDOW:
+                                continue
+                        active_mature.append(did)
+                    if self.wallet.device_id in active_mature:
+                        self._compete(current_slot, tip_hash)
                 else:
                     selected = select_competitors(
                         identities_snapshot, tip_hash, current_slot,
@@ -3267,16 +3303,30 @@ class Node:
         sig_hex  = msg.get("signature", "")
         proof    = msg.get("proof", "")
 
-        # Validate COMPETE
-        with self.ledger._lock:
-            tip_hash, _ = self.ledger._get_tip()
-            selected = select_competitors(self.ledger.identities, tip_hash, slot,
-                                          identity_last_attest=self.ledger.identity_last_attest)
-
-        if did not in selected:
-            return
         if not _is_valid_hex64(did) or not pub_hex or not sig_hex or not proof:
             return
+
+        # C1 VRF fix: validate sender is an active mature identity.
+        # Old code: validated against select_competitors(10) — only a 10-node subset.
+        # New code: any active mature identity may compete. Winner is determined by
+        # lowest SHA256(compete_sig) among all received COMPETEs. The old 10-node
+        # filter was tied to the predictable pre-winner design and is no longer needed.
+        with self.ledger._lock:
+            tip_hash, _ = self.ledger._get_tip()
+            first_seen = self.ledger.identities.get(did)
+            if first_seen is None:
+                return  # unregistered identity
+            if slot - first_seen < MIN_IDENTITY_AGE:
+                return  # not yet mature
+            # Activity filter: dormant identities may not compete
+            if slot > first_seen + IDENTITY_GRACE_PERIOD:
+                last_a = self.ledger.identity_last_attest.get(did, first_seen)
+                if slot - last_a > IDENTITY_ACTIVITY_WINDOW:
+                    return
+            # Pubkey binding: submitted pubkey must match registered pubkey
+            registered_pub = self.ledger.identity_pubkeys.get(did, "")
+            if registered_pub and pub_hex != registered_pub:
+                return
 
         # Verify challenge signature
         try:
@@ -3414,9 +3464,12 @@ class Node:
         slot = msg.get("slot")
         wid  = msg.get("winner_id", "")
 
-        # Record compete_time to suppress COMPETE_TO_BLOCK_TIMEOUT
+        # Record compete_time to suppress COMPETE_TO_BLOCK_TIMEOUT.
+        # Also clear _compete_received for this slot — without this, the dict
+        # accumulates ~8KB per slot (Dilithium3 sig + pubkey) and grows ~68MB/day.
         with self._compete_lock:
             self._compete_time.pop(slot, None)
+            self._compete_received.pop(slot, None)
 
         with self.ledger._lock:
             changed = self.ledger._add_block_locked(msg)
@@ -3705,6 +3758,165 @@ class Node:
                     self._attestations.pop(h, None)
                     self._attestation_slots.pop(h, None)
 
+    # ── Partition recovery ─────────────────────────────────────────────────────
+
+    # How many consecutive slots without a new finalized block triggers recovery.
+    _PARTITION_STALL_SLOTS = 100   # ~17 minutes at 10s/slot
+
+    def _partition_recovery_loop(self):
+        """Detect and recover from network partition.
+
+        If the network splits, the minority partition stalls — it can never
+        reach >2/3 committee finality. Without this loop, minority nodes would
+        be stuck permanently even after the partition heals.
+
+        Recovery logic:
+        1. Monitor elapsed slots since last_finalized_slot.
+        2. If stalled for _PARTITION_STALL_SLOTS with at least one online peer,
+           enter recovery mode: aggressively sync from all known peers.
+        3. If any peer has a longer finalized chain, accept it by clearing our
+           unfinalized tail (safe — unfinalized = not yet confirmed by 2/3 sigs)
+           and syncing from scratch.
+        4. Reset the _finalized and attestation state so the recovered chain can
+           proceed to accumulate attestations normally.
+
+        This loop does NOT fire during normal operation — last_finalized_slot
+        advances every few blocks, keeping the stall counter below threshold.
+        """
+        time.sleep(60)   # give node time to fully start before monitoring
+        last_recovery_slot = -1
+        while self._running:
+            time.sleep(REWARD_INTERVAL * 10)   # check every ~100 seconds
+            try:
+                current_slot = get_current_slot()
+                with self.ledger._lock:
+                    last_fin = self.ledger.last_finalized_slot
+                    chain_len = len(self.ledger.chain)
+
+                # No finalization ever (very early network) — not a partition
+                if last_fin < 0:
+                    continue
+
+                slots_stalled = current_slot - last_fin
+                if slots_stalled < self._PARTITION_STALL_SLOTS:
+                    continue
+
+                # Don't trigger more than once per stall window
+                if last_fin == last_recovery_slot:
+                    continue
+
+                peers = self.network.get_online_peers()
+                if not peers:
+                    continue   # isolated node — nothing to sync from
+
+                print(f"\n  ⚠️  PARTITION RECOVERY: no finalization for {slots_stalled} slots "
+                      f"(last finalized: slot {last_fin}). Syncing from {len(peers)} peer(s)...\n  > ",
+                      end="", flush=True)
+
+                # Sync from all online peers (not just 3)
+                best_fin_slot = last_fin
+                best_peer     = None
+                for peer_id, peer in list(peers.items()):
+                    try:
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        sock.settimeout(15.0)
+                        sock.connect((peer["ip"], peer["port"]))
+                        with self.ledger._lock:
+                            tip_hash, tip_slot   = self.ledger._get_tip()
+                            recent_hashes        = [compute_block_hash(b)
+                                                    for b in self.ledger.chain[-150:]]
+                            cp_slot              = (self.ledger.checkpoints[-1]["slot"]
+                                                    if self.ledger.checkpoints else 0)
+                        sock.sendall(json.dumps({
+                            "type":               "SYNC_REQUEST",
+                            "chain_tip_hash":     tip_hash,
+                            "chain_tip_slot":     tip_slot,
+                            "checkpoint_slot":    cp_slot,
+                            "chain_recent_hashes":recent_hashes
+                        }).encode())
+                        sock.shutdown(socket.SHUT_WR)
+                        data = b""
+                        while True:
+                            chunk = sock.recv(65536)
+                            if not chunk:
+                                break
+                            data += chunk
+                            if len(data) > MAX_SYNC_MESSAGE_SIZE:
+                                break
+                        sock.close()
+                        msg = json.loads(data.decode())
+                        if msg.get("type") == "SYNC_RESPONSE":
+                            peer_blocks = msg.get("blocks", [])
+                            if peer_blocks:
+                                peer_fin = max(
+                                    (b.get("slot", 0) for b in peer_blocks),
+                                    default=0
+                                )
+                                if peer_fin > best_fin_slot:
+                                    best_fin_slot = peer_fin
+                                    best_peer     = (peer, msg)
+                    except Exception:
+                        continue
+
+                if best_peer is None:
+                    # No peer has a longer chain — we may be the majority or
+                    # the network is genuinely down. Stay put.
+                    last_recovery_slot = last_fin
+                    print(f"\n  [partition-recovery] No longer chain found — "
+                          f"waiting for peers.\n  > ", end="", flush=True)
+                    continue
+
+                peer_info, sync_msg = best_peer
+
+                # Apply checkpoint from peer if available and confirmable
+                if sync_msg.get("checkpoint"):
+                    cp = sync_msg["checkpoint"]
+                    pb = cp.get("prune_before", 0)
+                    cs = cp.get("slot", 0)
+                    with self.ledger._lock:
+                        can_verify = bool([b for b in self.ledger.chain
+                                           if pb <= b.get("slot", 0) < cs])
+                    if can_verify:
+                        self.ledger.apply_checkpoint(cp)
+                    else:
+                        confirms = self.network._confirm_checkpoint_with_peers(
+                            cp, exclude_ip=peer_info["ip"])
+                        if confirms:
+                            self.ledger.apply_checkpoint(cp)
+
+                # Drop our unfinalized tail — it will never finalize in a partition.
+                # Unfinalized blocks have NOT been confirmed by >2/3 of the committee
+                # so discarding them is safe: no committed state is lost.
+                with self.ledger._lock:
+                    if self.ledger.last_finalized_slot >= 0:
+                        self.ledger.chain = [
+                            b for b in self.ledger.chain
+                            if b.get("slot", 0) <= self.ledger.last_finalized_slot
+                        ]
+                        self.ledger.recalculate_totals()
+
+                # Reset attestation state so majority chain can finalize normally
+                with self._attest_lock:
+                    self._attestations.clear()
+                    self._attestation_slots.clear()
+                    # Keep _finalized — it prevents re-reorging already-final blocks
+
+                # Merge the majority chain
+                delta = {
+                    "blocks":       sync_msg.get("blocks", []),
+                    "transactions": sync_msg.get("txs", [])
+                }
+                if delta["blocks"] or delta["transactions"]:
+                    self.ledger.merge(delta)
+
+                last_recovery_slot = last_fin
+                print(f"\n  ✅ PARTITION RECOVERY complete — "
+                      f"synced to slot {best_fin_slot}.\n  > ",
+                      end="", flush=True)
+
+            except Exception:
+                pass
+
     # ── Explorer push ──────────────────────────────────────────────────────────
 
     def _explorer_push_loop(self):
@@ -3859,7 +4071,7 @@ class Node:
             return {"ok": False, "error": "invalid address"}
         if recipient_id == self.wallet.device_id:
             return {"ok": False, "error": "cannot send to yourself"}
-        amount_units = int(amount_tmpl * UNIT)
+        amount_units = int(round(amount_tmpl * UNIT))
         if amount_units <= 0:
             return {"ok": False, "error": "amount must be > 0"}
         fee = calculate_fee(amount_units)

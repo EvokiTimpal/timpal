@@ -1330,17 +1330,29 @@ class Ledger:
     # ── Balance ────────────────────────────────────────────────────────────────
 
     def get_balance(self, device_id: str) -> int:
-        """Return balance in units. Starts from checkpoint balance then adds
-        block rewards, fee rewards, and transactions from the rolling window."""
+        """Return balance in units.
+
+        Checkpoint balances now cover 0 through chain_tip_slot (not just
+        through prune_before). Only chain blocks and transactions AFTER
+        chain_tip_slot are added here — those before are already baked in.
+        This ensures new nodes that only have blocks from chain_tip_slot+1
+        onwards get the same correct result as established nodes.
+        """
         with self._lock:
-            balance = 0
+            balance   = 0
+            chain_tip = -1   # last slot already baked into checkpoint.balances
             if self.checkpoints:
-                balance = self.checkpoints[-1].get("balances", {}).get(device_id, 0)
+                balance   = self.checkpoints[-1].get("balances", {}).get(device_id, 0)
+                chain_tip = self.checkpoints[-1].get("chain_tip_slot", -1)
             for block in self.chain:
+                if block.get("slot", 0) <= chain_tip:
+                    continue  # already in checkpoint.balances — skip to avoid double-count
                 if block.get("winner_id") == device_id:
                     balance += block.get("amount", 0)
                     balance += block.get("fees_collected", 0)
             for tx in self.transactions:
+                if (tx.get("slot") or 0) <= chain_tip:
+                    continue  # already in checkpoint.balances
                 if tx["recipient_id"] == device_id:
                     balance += tx["amount"]
                 if tx["sender_id"] == device_id:
@@ -1925,49 +1937,48 @@ class Ledger:
             json.dumps(entries, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
 
-    def _recompute_balances_locked(self, prune_before: int) -> dict:
-        """Independently recompute balances for all addresses up to prune_before.
+    def _recompute_balances_locked(self, cap_slot: int) -> dict:
+        """Independently recompute balances for all addresses through cap_slot.
 
-        Starts from the most recent checkpoint's balance snapshot (or zero),
-        then applies every block reward, fee reward, and transaction in the
-        rolling window where slot < prune_before.
+        Starts from the most recent checkpoint's balance snapshot (which now
+        covers 0 through that checkpoint's chain_tip_slot), then applies every
+        block reward, fee reward, and transaction where:
+            previous_checkpoint.chain_tip_slot < slot <= cap_slot
 
         Called by apply_checkpoint to verify that the peer's balance snapshot
         is consistent with our independently verified chain history.
         Caller must hold self._lock.
         """
-        # Start from previous checkpoint balances (the last one we accepted)
         if self.checkpoints:
-            balances = dict(self.checkpoints[-1].get("balances", {}))
+            balances  = dict(self.checkpoints[-1].get("balances", {}))
+            prev_tip  = self.checkpoints[-1].get("chain_tip_slot", -1)
         else:
-            balances = {}
+            balances  = {}
+            prev_tip  = -1
 
-        # Apply block rewards and fees for blocks strictly before prune_before
         for block in self.chain:
             s   = block.get("slot", 0)
             wid = block.get("winner_id", "")
-            if s < prune_before and wid:
+            if s > prev_tip and s <= cap_slot and wid:
                 balances[wid] = balances.get(wid, 0) + block.get("amount", 0)
                 balances[wid] = balances.get(wid, 0) + block.get("fees_collected", 0)
 
-        # Apply fee_rewards for records strictly before prune_before
         for fr in self.fee_rewards:
-            if fr.get("time_slot", 0) < prune_before:
-                wid = fr.get("winner_id", "")
-                if wid:
-                    balances[wid] = balances.get(wid, 0) + fr.get("amount", 0)
+            ts  = fr.get("time_slot", 0)
+            wid = fr.get("winner_id", "")
+            if ts > prev_tip and ts <= cap_slot and wid:
+                balances[wid] = balances.get(wid, 0) + fr.get("amount", 0)
 
-        # Apply transactions strictly before prune_before
         for tx in self.transactions:
-            if (tx.get("slot") or 0) < prune_before:
-                r = tx.get("recipient_id", "")
-                s = tx.get("sender_id", "")
+            s = tx.get("slot") or 0
+            if s > prev_tip and s <= cap_slot:
+                r  = tx.get("recipient_id", "")
+                sd = tx.get("sender_id", "")
                 if r:
-                    balances[r] = balances.get(r, 0) + tx.get("amount", 0)
-                if s:
-                    balances[s] = balances.get(s, 0) - tx.get("amount", 0) - tx.get("fee", 0)
+                    balances[r]  = balances.get(r,  0) + tx.get("amount", 0)
+                if sd:
+                    balances[sd] = balances.get(sd, 0) - tx.get("amount", 0) - tx.get("fee", 0)
 
-        # Strip zero / negative entries — matches create_checkpoint filter
         return {k: v for k, v in balances.items() if isinstance(v, int) and v > 0}
 
     def create_checkpoint(self, checkpoint_slot: int) -> dict:
@@ -1988,29 +1999,37 @@ class Ledger:
 
             prune_before = max(0, checkpoint_slot - CHECKPOINT_BUFFER)
 
-            # Build balance snapshot from checkpointed base + full chain window
-            balances = {}
+            # Build balance snapshot covering ALL history through chain_tip_slot.
+            # Previously this only covered slots 0 to prune_before-1. That left
+            # the buffer window (prune_before to chain_tip_slot) unbaked — new
+            # nodes receiving this checkpoint could not merge those blocks (they
+            # don't extend the checkpoint tip) and had an incomplete balance view.
+            # Fix: start from the previous checkpoint's balances (which cover
+            # 0 to prev_chain_tip_slot) and add everything since then.
+            balances     = {}
+            prev_tip_slot = -1
             if self.checkpoints:
-                balances = dict(self.checkpoints[-1].get("balances", {}))
+                balances      = dict(self.checkpoints[-1].get("balances", {}))
+                prev_tip_slot = self.checkpoints[-1].get("chain_tip_slot", -1)
 
-            # Apply block rewards and fee rewards up to prune_before
+            # Extend through every block/tx/fee_reward since the previous checkpoint tip
             for block in self.chain:
-                s = block.get("slot", 0)
+                s   = block.get("slot", 0)
                 wid = block.get("winner_id", "")
-                if s < prune_before:
+                if s > prev_tip_slot and wid:
                     balances[wid] = balances.get(wid, 0) + block.get("amount", 0)
                     balances[wid] = balances.get(wid, 0) + block.get("fees_collected", 0)
 
             for fr in self.fee_rewards:
-                if fr.get("time_slot", 0) < prune_before:
-                    wid = fr.get("winner_id", "")
+                ts  = fr.get("time_slot", 0)
+                wid = fr.get("winner_id", "")
+                if ts > prev_tip_slot and wid:
                     balances[wid] = balances.get(wid, 0) + fr.get("amount", 0)
 
-            # Apply transactions up to prune_before
             for tx in self.transactions:
-                if (tx.get("slot") or 0) < prune_before:
+                if (tx.get("slot") or 0) > prev_tip_slot:
                     balances[tx["recipient_id"]] = balances.get(tx["recipient_id"], 0) + tx["amount"]
-                    balances[tx["sender_id"]]    = balances.get(tx["sender_id"], 0)    - tx["amount"] - tx.get("fee", 0)
+                    balances[tx["sender_id"]]    = balances.get(tx["sender_id"],    0) - tx["amount"] - tx.get("fee", 0)
 
             # Remove zero or negative balances
             balances = {k: v for k, v in balances.items() if isinstance(v, int) and v > 0}
@@ -2115,7 +2134,10 @@ class Ledger:
                 # above prove the raw block/tx data is correct; this step proves
                 # the balance arithmetic is also correct.  A peer who crafts valid
                 # hashes but inflated balances is rejected here.
-                recomputed = self._recompute_balances_locked(prune_before)
+                # cap_slot = chain_tip_slot so recomputation covers the full window
+                # now stored in checkpoint.balances (0 through chain_tip_slot).
+                cp_tip_slot = checkpoint.get("chain_tip_slot", prune_before)
+                recomputed = self._recompute_balances_locked(cp_tip_slot)
                 peer_bals  = {k: v for k, v in checkpoint.get("balances", {}).items()
                               if isinstance(v, int) and not isinstance(v, bool) and v > 0}
                 if recomputed != peer_bals:
@@ -3264,17 +3286,7 @@ class Node:
                     identities_snapshot   = dict(self.ledger.identities)
                     last_attest_snapshot  = dict(self.ledger.identity_last_attest)
 
-                # C1 VRF fix: all mature nodes compete every slot.
-                # Winner is whoever has the lowest SHA256(compete_sig) — their
-                # Dilithium3 signature over the challenge. The signature is
-                # unpredictable to anyone who doesn't hold that node's private key,
-                # so the winner is unknowable until COMPETEs arrive. This prevents
-                # an attacker pre-identifying the next slot winner and DoS-targeting
-                # them before they can produce their block.
-                #
-                # Before slot 1000 (genesis): use existing select_competitors filter
-                # (10-node subset) to limit genesis-phase network load.
-                # After slot 1000: all active mature identities compete.
+                competed = False
                 if current_slot >= 1000:
                     mature = [d for d, fs in identities_snapshot.items()
                               if current_slot - fs >= MIN_IDENTITY_AGE]
@@ -3289,6 +3301,7 @@ class Node:
                         active_mature.append(did)
                     if self.wallet.device_id in active_mature:
                         self._compete(current_slot, tip_hash)
+                        competed = True
                 else:
                     selected = select_competitors(
                         identities_snapshot, tip_hash, current_slot,
@@ -3296,6 +3309,21 @@ class Node:
                     )
                     if self.wallet.device_id in selected:
                         self._compete(current_slot, tip_hash)
+                        competed = True
+
+                if competed:
+                    # Wait 2 seconds for other nodes' COMPETEs to propagate before
+                    # selecting the winner. Without this wait, we would fire
+                    # _try_produce_block with only our own proof in the dict and
+                    # always believe we won — causing unnecessary forks every slot
+                    # when another node has a lower proof. The 2-second window fits
+                    # comfortably within a 10-second slot. If another node's BLOCK
+                    # arrives during the wait, _on_block_received clears
+                    # _compete_received[slot] and _try_produce_block exits cleanly.
+                    time.sleep(2.0)
+                    with self.ledger._lock:
+                        current_tip_hash, _ = self.ledger._get_tip()
+                    self._try_produce_block(current_slot, current_tip_hash)
 
                 # Wait for COMPETE_TO_BLOCK_TIMEOUT then advance
                 slot_deadline = GENESIS_TIME + (current_slot + 1) * REWARD_INTERVAL
@@ -3392,8 +3420,10 @@ class Node:
                 self._compete_time[slot]     = time.time()
             self._compete_received[slot][did] = msg
 
-        # If I am the winner (or the best COMPETE so far is mine), produce a block
-        self._try_produce_block(slot, tip_hash)
+        # Block production is now triggered from _lottery_thread after a 2-second
+        # collection window. Do NOT call _try_produce_block here — firing immediately
+        # with only our own COMPETE in the dict causes premature production before
+        # other nodes' proofs arrive, leading to unnecessary forks every slot.
 
     def _try_produce_block(self, slot: int, prev_hash: str):
         """Produce a block if we are the winner for this slot."""

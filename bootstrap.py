@@ -22,7 +22,7 @@ PORT        = 7777
 VERSION     = "4.0"
 MIN_VERSION = "4.0"
 
-GENESIS_TIME = 0   # ← same value as in timpal.py
+GENESIS_TIME = 1775953800   # 5:30 PM PDT / 00:30 UTC April 12 2026 — must match timpal.py
 
 # Rate limits (DoS protection only — no consensus gatekeeping)
 HELLO_RATE_LIMIT = 10   # per 60 seconds per IP

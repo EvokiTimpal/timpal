@@ -42,7 +42,7 @@ MIN_VERSION = "4.0"
 
 # ── Genesis time — SET BEFORE LAUNCH, identical in timpal.py and bootstrap.py ─
 
-GENESIS_TIME = 0   # ← python3 -c "import time; print(int(time.time()) + 300)"
+GENESIS_TIME = 1775953800   # 5:30 PM PDT / 00:30 UTC April 12 2026
 
 # ── Economic constants (immutable post-genesis) ────────────────────────────────
 

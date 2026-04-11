@@ -1507,13 +1507,19 @@ class Ledger:
         if registered_pub and pub_hex != registered_pub:
             return False
 
-        # Rule 6: maturation check (applies to all slots)
+        # Rule 6: maturation check
+        # Genesis bootstrap exception: if no identities exist yet (chain has never
+        # produced a block), the maturation check is waived so the first block can
+        # be produced. Once any block is accepted the winner self-registers and
+        # Rule 6 applies normally from that point forward.
         first_seen = self.identities.get(wid)
         if first_seen is None:
+            if self.identities:
+                # Chain has started but this specific identity is unknown — reject.
+                return False
+            # Genesis bootstrap: no identities at all — waive maturation check.
             # Rule 5 already verified sha256(pubkey)==wid for this branch.
-            # Treat genesis wallet as registered at slot 0 so the chain can start.
-            first_seen = 0
-        if slot - first_seen < MIN_IDENTITY_AGE:
+        elif slot - first_seen < MIN_IDENTITY_AGE:
             return False
 
         # Rule 7: slot validity
@@ -3328,6 +3334,12 @@ class Node:
                         identities_snapshot, tip_hash, current_slot,
                         identity_last_attest=last_attest_snapshot
                     )
+                    # Genesis bootstrap: if no identities are registered yet
+                    # (chain has never produced a block) this node is always
+                    # eligible to compete. Without this, select_competitors
+                    # returns [] forever and the chain can never start.
+                    if not selected and not identities_snapshot:
+                        selected = [self.wallet.device_id]
                     if self.wallet.device_id in selected:
                         self._compete(current_slot, tip_hash)
                         competed = True
@@ -3408,20 +3420,25 @@ class Node:
         # filter was tied to the predictable pre-winner design and is no longer needed.
         with self.ledger._lock:
             tip_hash, _ = self.ledger._get_tip()
-            first_seen = self.ledger.identities.get(did)
-            if first_seen is None:
-                return  # unregistered identity
-            if slot - first_seen < MIN_IDENTITY_AGE:
-                return  # not yet mature
-            # Activity filter: dormant identities may not compete
-            if slot > first_seen + IDENTITY_GRACE_PERIOD:
-                last_a = self.ledger.identity_last_attest.get(did, first_seen)
-                if slot - last_a > IDENTITY_ACTIVITY_WINDOW:
+            # Genesis bootstrap: if no identities are registered yet, any node
+            # may compete. Once the first block is produced the winner
+            # self-registers and normal identity checks apply from then on.
+            is_genesis_bootstrap = not self.ledger.identities
+            if not is_genesis_bootstrap:
+                first_seen = self.ledger.identities.get(did)
+                if first_seen is None:
+                    return  # unregistered identity
+                if slot - first_seen < MIN_IDENTITY_AGE:
+                    return  # not yet mature
+                # Activity filter: dormant identities may not compete
+                if slot > first_seen + IDENTITY_GRACE_PERIOD:
+                    last_a = self.ledger.identity_last_attest.get(did, first_seen)
+                    if slot - last_a > IDENTITY_ACTIVITY_WINDOW:
+                        return
+                # Pubkey binding: submitted pubkey must match registered pubkey
+                registered_pub = self.ledger.identity_pubkeys.get(did, "")
+                if registered_pub and pub_hex != registered_pub:
                     return
-            # Pubkey binding: submitted pubkey must match registered pubkey
-            registered_pub = self.ledger.identity_pubkeys.get(did, "")
-            if registered_pub and pub_hex != registered_pub:
-                return
 
         # Verify challenge signature
         try:

@@ -112,9 +112,9 @@ A server node stays in the active identity pool continuously, earns block reward
 - **Chain-anchored distributed ledger** — Every node holds a full copy. Each reward is a block carrying a cryptographic link to the previous one — a single, unambiguous history. No proof-of-work. No mining.
 - **Quantum-resistant cryptography** — Dilithium3, the NIST 2024 post-quantum standard. Every signature is future-proof against quantum computers.
 - **Encrypted wallet with seed phrase recovery** — Private key encrypted with AES-256-GCM and a password of at least 20 characters. Never stored in plaintext. Recoverable via your 12-word BIP39 seed phrase.
-- **Attestation-based cryptographic finality** — A block is final when more than 2/3 of all mature identities have signed it with Dilithium3 attestations. A finalized block cannot be reversed under any circumstances short of breaking Dilithium3.
+- **Attestation-based cryptographic finality** — A block is final when more than 2/3 of a deterministically-selected 512-node committee have signed it with Dilithium3 attestations (~50 seconds). Below 512 active nodes, every active node attests. A finalized block cannot be reversed under any circumstances short of breaking Dilithium3.
 - **On-chain identity registration** — When your node starts, it broadcasts a signed REGISTER message to peers. A block producer embeds it in the next block. Your identity is then on-chain with a verifiable `first_seen_slot`. After 200 slots (~33 minutes) your identity is mature and your node becomes eligible to compete in the lottery. This maturation rule is enforced at the consensus layer on every node — no bypass is possible via P2P or any other path.
-- **Deterministic single-winner lottery** — Every 10 seconds, one node wins 1.0575 TMPL. Each slot, every node independently computes the same single winner — the identity with the lowest SHA256 score of `(device_id + prev_block_hash + slot)` among all mature active identities. The winner is unpredictable until the previous block arrives. The winner signs the slot challenge with Dilithium3 (proving they were online) and broadcasts the block directly. Cryptographically fair and independently verifiable by every node.
+- **VRF lottery** — Every 10 seconds, one node wins 1.0575 TMPL. Every active mature node competes each slot by signing the challenge with its Dilithium3 private key. The winner is whoever produces the lowest `sha256(compete_sig)` — unpredictable to everyone until COMPETEs arrive. Cryptographically fair and independently verifiable by every node.
 - **Checkpoints every ~2.8 hours** — Every 1,000 slots, all nodes independently create a checkpoint. Before accepting a peer checkpoint, every node independently recomputes balances from its own chain history — a corrupted checkpoint cannot be accepted. The full identity table is preserved in every checkpoint and survives pruning. Keeps the ledger lightweight forever.
 - **Fork resolution** — Heaviest valid chain wins. Weight is block count minus slot-gap penalties. Equal-weight forks resolve deterministically by tip hash. All nodes converge to the same chain regardless of arrival order.
 - **One node per device** — Enforced by the protocol at the OS level. Running multiple terminals gives zero advantage.
@@ -131,7 +131,7 @@ A server node stays in the active identity pool continuously, earns block reward
 | Reward per round | 1.0575 TMPL |
 | Round interval | 10 seconds |
 | Distribution period | ~37.5 years |
-| Eligible nodes per slot | 1 deterministic winner per slot |
+| Eligible nodes per slot | All active mature identities compete — 1 winner per slot |
 | Identity maturation period | 200 slots (~33 minutes) |
 | Confirmation depth | 5 slots (~50 seconds) |
 | Checkpoint interval | Every 1,000 slots (~2.8 hours) |

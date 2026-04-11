@@ -83,48 +83,47 @@ On first run, the node generates a 12-word BIP39 recovery phrase from 128 bits o
 
 Once connected, nodes communicate directly peer-to-peer. The bootstrap server serves only as a peer directory. Its role in the protocol is strictly limited: it accepts five message types (HELLO, PING, GET_PEERS, REGISTER_BOOTSTRAP, GET_BOOTSTRAP_SERVERS) and handles nothing else. Community-operated bootstrap servers are welcome — the more servers, the more resilient the network.
 
-### 3.5 Deterministic Single-Winner Lottery
+### 3.5 VRF Lottery
 
-Every 10 seconds, one node wins 1.0575 TMPL. The lottery uses deterministic single-winner selection to ensure one valid block producer per slot — no equivocation, no competing blocks.
+Every 10 seconds, one node wins 1.0575 TMPL. Every eligible node competes every slot by signing a challenge with its Dilithium3 private key and broadcasting the result. The node whose signature produces the lowest SHA-256 hash wins. This is a Verifiable Random Function (VRF): the outcome is unpredictable until all competitors have broadcast, yet it is independently verifiable by every node.
 
-**Winner selection.** At the start of each slot, every node independently computes the same single winner:
-
-```
-score(device_id) = sha256(f"{device_id}:{prev_block_hash}:{slot}")
-winner           = identity with the lowest score among all mature active identities
-```
-
-Selection requires the previous block's hash, which cannot be known until that block arrives. This makes the winner for slot N unpredictable before slot N-1 is final. An attacker controlling K of N active identities has K/N probability of winning — this cannot be improved without controlling the previous block hash itself.
-
-**Challenge.** A challenge is derived from the same inputs:
+**Challenge.** At the start of each slot, a challenge is derived from the previous block's hash:
 
 ```
 challenge = sha256(f"challenge:{prev_block_hash}:{slot}")
 ```
 
-The challenge cannot be pre-computed because it depends on the previous block hash. The winner must be online to solve it.
+The challenge cannot be pre-computed because it depends on the previous block hash, which is unknown until that block arrives.
 
-**Winner proof.** The winning node signs the challenge with its Dilithium3 private key:
+**Competing.** Every active mature identity signs the challenge with its Dilithium3 private key and broadcasts a COMPETE message:
 
 ```
 compete_sig   = Dilithium3.sign(private_key, challenge)
 compete_proof = sha256(compete_sig)
 ```
 
-This proves the winner was online at the moment the previous block arrived. An offline node cannot produce a valid compete_sig because the challenge was unknown until that moment.
+The compete_sig is unpredictable to anyone who does not hold that node's private key. No node can know its own proof — or anyone else's — before signing.
 
-**Block construction.** The winning node builds a block containing `winner_id`, `compete_sig`, `compete_proof`, `reward_amount`, `fees_collected`, pending transactions (up to 500), pending identity registrations (up to 10), and the `prev_hash`. The winning node then signs the entire canonical block with its Dilithium3 key (`block_sig`). The block is added to the local chain and broadcast to all peers.
+**Winner selection.** After COMPETEs are collected, the winner is the competitor with the lowest proof hash:
+
+```
+winner = competitor with lowest sha256(compete_sig)
+```
+
+This is determined independently by every node from the received COMPETE messages. An attacker controlling K of N active identities has K/N probability of winning — no more.
+
+**Block construction.** The winning node builds a block containing `winner_id`, `compete_sig`, `compete_proof`, `reward_amount`, `fees_collected`, pending transactions (up to 500), pending identity registrations (up to 10), and the `prev_hash`. The winning node then signs the entire canonical block with its Dilithium3 key (`block_sig`). The block is broadcast to all peers.
 
 **Verification.** Every node that receives a block independently verifies:
 
-1. `winner_id` is the deterministic winner: `min(mature_active, key=lambda d: sha256(f"{d}:{prev_hash}:{slot}"))`
+1. `winner_id` is an active mature identity (not dormant)
 2. `challenge == sha256(f"challenge:{prev_block_hash}:{slot}")`
 3. `Dilithium3.verify(public_key, challenge, compete_sig)` passes
 4. `sha256(compete_sig) == compete_proof`
 5. `winner_id` derives correctly from `public_key`
 6. `Dilithium3.verify(public_key, canonical_block_without_sig, block_sig)` passes
 
-All six checks must pass. A block failing any check is rejected outright. Only one valid block can exist per slot — deterministic selection makes equivocation impossible.
+All six checks must pass. A block failing any check is rejected outright. Exactly one valid block can exist per slot.
 
 ### 3.6 One Node Per Device
 
@@ -148,22 +147,25 @@ An OS-level file lock prevents more than one node running per device. Any second
 
 ### 3.8 Attestation-Based Cryptographic Finality
 
-After accepting a new block, every mature node produces an attestation — a Dilithium3 signature over `f"attest:{block_hash}:{slot}"` — and broadcasts it to peers:
+After accepting a new block, every eligible node produces an attestation — a Dilithium3 signature over `f"attest:{block_hash}:{slot}"` — and broadcasts it to peers:
 
 ```
 payload   = f"attest:{block_hash}:{slot}".encode()
 signature = Dilithium3.sign(private_key, payload)
 ```
 
-A block achieves **cryptographic finality** when more than 2/3 of all mature identities have submitted valid attestations for it:
+**Committee-based finality.** To keep finality fast at any network size, attestation uses a randomly-selected committee of 512 nodes per block. The committee is selected deterministically from the block hash and slot number — it cannot be predicted before the block is produced. When the network has fewer than 512 active mature nodes, every active node is on the committee (identical to the simple majority rule).
 
 ```
-finalized = (attested_count / total_mature_identities) > 2/3
+committee = deterministic_select(active_mature, block_hash, slot, size=512)
+finalized = (committee_attestations / committee_size) > 2/3
 ```
 
-Every attestation is verified: the attesting node must be a known registered identity, its public key must match the key stored in `identity_pubkeys` at registration time (preventing attestation forgery), and the Dilithium3 signature must be valid. A node cannot attest on behalf of another — it would require the target's private key.
+At 33% attacker share the probability of corrupting more than 2/3 of a 512-node committee is approximately 10⁻⁴⁴ — computationally impossible.
 
-A finalized block cannot be reorged under any circumstances short of breaking Dilithium3. This is a stronger guarantee than probabilistic finality: it requires an attacker to control more than 1/3 of all registered mature identities and produce valid post-quantum signatures for each.
+Every attestation is verified: the attesting node must be a known registered identity, its public key must match the key stored in `identity_pubkeys` at registration time (preventing attestation forgery), the node must be a member of the committee for that block, and the Dilithium3 signature must be valid. A node cannot attest on behalf of another — it would require the target's private key.
+
+A finalized block cannot be reorged under any circumstances short of breaking Dilithium3. This is a stronger guarantee than probabilistic finality: it requires an attacker to corrupt more than 1/3 of the attestation committee with valid post-quantum signatures.
 
 ### 3.9 Transaction Rate Limiting
 
@@ -296,12 +298,13 @@ The transition is automatic. No upgrade required. No vote.
 
 ### 6.1 Sybil Resistance
 
-Sybil resistance operates at four independent layers:
+Sybil resistance operates at five independent layers:
 
 1. **One node per device** enforced at the OS level via file lock.
-2. **Deterministic single-winner selection** — only one valid block producer exists per slot. An attacker controlling K of N active identities has K/N probability of winning — expected reward per identity stays constant regardless of total network size.
+2. **VRF lottery** — every active mature identity competes every slot by signing the challenge. The winner is the competitor with the lowest `sha256(compete_sig)`. An attacker controlling K of N active identities has K/N probability of winning — expected reward per identity stays constant regardless of total network size.
 3. **Chain-anchored wallet creation** (post-genesis phase): every new wallet must anchor its `device_id` to a live block hash from the running network via `sha256(public_key + block_hash)`. Offline mass wallet generation is physically impossible — the chain produces block hashes at fixed speed regardless of attacker CPU.
 4. **On-chain identity maturation**: every identity must register on-chain and wait 200 slots (~33 minutes) before it can produce valid blocks. This check is enforced at the consensus layer in every node — it cannot be bypassed via P2P, bootstrap, or any other path.
+5. **Identity activity decay**: an identity that has not attested or produced a block for more than 8,640 slots (~24 hours) is excluded from the lottery and from the finality quorum. Dormant accumulated identities hold zero lottery power — an attacker must keep every fake identity online and attesting continuously to retain influence.
 
 ### 6.2 Double-Spend Prevention
 
@@ -317,7 +320,7 @@ Every block carries a `compete_sig` derived from the winner's Dilithium3 private
 
 ### 6.5 Attestation Security
 
-Each attestation is bound to a specific public key stored in `identity_pubkeys` at registration time. An attacker cannot send an attestation using another node's `device_id` with their own key — the supplied public key must match the registered key. Every attestation is Dilithium3-signed over a payload that includes the block hash and slot number, preventing replay across slots or blocks.
+Each attestation is bound to a specific public key stored in `identity_pubkeys` at registration time. An attacker cannot send an attestation using another node's `device_id` with their own key — the supplied public key must match the registered key. The attesting node must also be a member of the deterministically-selected 512-node committee for that block — attestations from nodes outside the committee are rejected before signature verification. Every attestation is Dilithium3-signed over a payload that includes the block hash and slot number, preventing replay across slots or blocks.
 
 ### 6.6 Chain Integrity
 

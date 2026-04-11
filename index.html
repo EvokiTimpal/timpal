@@ -246,7 +246,7 @@ TYPE html>
       <div class="section-title">How it works</div>
       <div class="features">
         <div class="feature"><div class="feature-icon">🔐</div><div class="feature-title">Quantum-Resistant from Day One</div><div class="feature-desc">Bitcoin and Ethereum wallets use ECDSA — cryptography that quantum computers will break. TIMPAL uses Dilithium3, the NIST 2024 post-quantum standard, as its only cryptographic primitive. Every wallet, every signature, every transaction is resistant to quantum attack from the moment it is created. There is no fallback. There is no migration path needed.</div></div>
-        <div class="feature"><div class="feature-icon">⚡</div><div class="feature-title">Cryptographic Finality</div><div class="feature-desc">A block is final when more than 2/3 of all mature identities have signed it with Dilithium3 attestations (~50 seconds). A finalized block cannot be reversed under any circumstances short of breaking Dilithium3.</div></div>
+        <div class="feature"><div class="feature-icon">⚡</div><div class="feature-title">Cryptographic Finality</div><div class="feature-desc">A block is final when more than 2/3 of a deterministically-selected 512-node committee have signed it with Dilithium3 attestations (~50 seconds). Below 512 active nodes, every active node attests. A finalized block cannot be reversed under any circumstances short of breaking Dilithium3.</div></div>
         <div class="feature"><div class="feature-icon">🎲</div><div class="feature-title">Equal Chance for Every Node</div><div class="feature-desc">Every 10 seconds, one node wins 1.0575 TMPL. A node that started today has the exact same statistical chance as one that has been running since genesis — by design, enforced at the protocol level. No mining hardware. No staking. No capital requirement. The single winner per slot is selected deterministically — every node independently computes the same result. The winner is decided by cryptographic proof, not by who owns the most.</div></div>
         <div class="feature"><div class="feature-icon">🪪</div><div class="feature-title">On-Chain Identity Registration</div><div class="feature-desc">Every new node registers its identity on-chain via a signed REGISTER message embedded in a block. Only identities registered for at least 200 slots (~33 minutes) can produce valid blocks. Enforced at consensus — no shortcut, no bypass.</div></div>
         <div class="feature"><div class="feature-icon">🖥️</div><div class="feature-title">One Node Per Device</div><div class="feature-desc">The protocol enforces one node per physical device at the OS level. Running ten terminals gives you zero advantage.</div></div>
@@ -503,25 +503,23 @@ if block.slot >= 1000:  <span class="comment"># post-genesis phase</span>
       </div>
       <div class="docs-section" id="doc-vrf">
         <div class="docs-h2">Lottery</div>
-        <p class="docs-p">Every 10 seconds, one node wins 1.0575 TMPL. Every node independently computes the same single winner — the identity with the lowest SHA256 score among all mature active identities. The winner is unpredictable until the previous block arrives. The winner must be online to sign the challenge and produce the block.</p>
-        <div class="docs-code"><span class="comment"># Single winner selection — deterministic, unpredictable until prev block arrives</span>
-score(device_id) = sha256(f"{device_id}:{prev_block_hash}:{slot}")
-winner           = identity with the lowest score
-
-<span class="comment"># Winner signs the slot challenge (proves they were online)</span>
+        <p class="docs-p">Every 10 seconds, one node wins 1.0575 TMPL. Every active mature node competes each slot by signing the challenge with its Dilithium3 private key and broadcasting the result. The winner is the competitor with the lowest <span class="inline-code">sha256(compete_sig)</span> — unpredictable to everyone until the COMPETEs arrive. Every node independently verifies the winner from the received COMPETE messages.</p>
+        <div class="docs-code"><span class="comment"># Challenge — unpredictable until prev block arrives</span>
 challenge    = sha256(f"challenge:{prev_block_hash}:{slot}")
+
+<span class="comment"># Every active mature node competes by signing the challenge</span>
 compete_sig  = Dilithium3.sign(private_key, challenge)
 compete_proof = sha256(compete_sig)
 
-<span class="comment"># Winner broadcasts block — every node verifies independently</span>
-winner_id must equal min(mature_active, key=score)</div>
-        <p class="docs-p">Every node independently verifies the winner from chain data alone. No messages between competing nodes. No coordination required. Exactly one valid block producer per slot — deterministic and tamper-proof.</p>
+<span class="comment"># Winner = lowest proof hash among all received COMPETEs</span>
+winner = competitor with min(sha256(compete_sig))</div>
+        <p class="docs-p">An attacker controlling K of N active identities has K/N probability of winning — no more. Every node independently verifies all six winner rules from chain data alone. Exactly one valid block producer per slot.</p>
       </div>
       <div class="docs-section" id="doc-finality">
         <div class="docs-h2">Finality</div>
-        <p class="docs-p">After accepting a new block, every mature node produces a Dilithium3 attestation over <span class="inline-code">f"attest:{block_hash}:{slot}"</span> and broadcasts it to peers. A block is cryptographically final when more than 2/3 of all mature identities have attested it.</p>
-        <div class="docs-callout">A finalized block cannot be reorged under any circumstances short of breaking Dilithium3. This is a stronger guarantee than probabilistic finality — it requires an attacker to control more than 1/3 of all registered mature identities.</div>
-        <p class="docs-p">Each attestation is bound to the public key registered on-chain for that identity. An attacker cannot forge an attestation for another node without its private key.</p>
+        <p class="docs-p">After accepting a new block, every eligible node produces a Dilithium3 attestation over <span class="inline-code">f"attest:{block_hash}:{slot}"</span> and broadcasts it to peers. A block is cryptographically final when more than 2/3 of a deterministically-selected 512-node committee have attested it. Below 512 active nodes, every active node attests. The committee is selected from the block hash and slot — unpredictable before the block is produced.</p>
+        <div class="docs-callout">A finalized block cannot be reorged under any circumstances short of breaking Dilithium3. At 33% attacker share, the probability of corrupting 2/3 of the committee is ~10⁻⁴⁴.</div>
+        <p class="docs-p">Each attestation is bound to the public key registered on-chain for that identity. An attacker cannot forge an attestation for another node without its private key. Attestations from nodes outside the committee are rejected before signature verification.</p>
       </div>
       <div class="docs-section" id="doc-ledger">
         <div class="docs-h2">Ledger</div>

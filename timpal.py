@@ -843,6 +843,10 @@ class Wallet:
             }
         if self.genesis_block_hash:
             data["genesis_block_hash"] = self.genesis_block_hash
+        # Store GENESIS_TIME so the node can detect wallets from a previous network launch.
+        # On load, if the stored genesis_time doesn't match the current GENESIS_TIME the
+        # user is shown a clear message to delete their old files and create a new wallet.
+        data["genesis_time"] = GENESIS_TIME
         if seed_phrase:
             data["seed_phrase_hash"] = hashlib.sha256(seed_phrase.encode()).hexdigest()
         tmp = path + ".tmp"
@@ -853,6 +857,23 @@ class Wallet:
     def load(self, path: str = WALLET_FILE, password: str = None):
         with open(path, "r") as f:
             data = json.load(f)
+        # Detect wallets from a previous network launch.
+        # Any wallet whose genesis_time doesn't match the current GENESIS_TIME
+        # was created on a different network and must not be used.
+        saved_genesis = data.get("genesis_time", 0)
+        if saved_genesis != GENESIS_TIME:
+            print("\n  " + "╔" + "═" * 62 + "╗")
+            print("  ║  OLD WALLET DETECTED — ACTION REQUIRED                       ║")
+            print("  ╠" + "═" * 62 + "╣")
+            print("  ║  Your wallet was created on a previous Timpal network.       ║")
+            print("  ║  You must delete your old files and create a new wallet.     ║")
+            print("  ║                                                              ║")
+            print("  ║  Run these commands, then restart:                           ║")
+            print("  ║    rm ~/.timpal_wallet.json                                  ║")
+            print("  ║    rm ~/.timpal_ledger.json                                  ║")
+            print("  ║    rm ~/.timpal_pubkeys.db                                   ║")
+            print("  " + "╚" + "═" * 62 + "╝\n")
+            exit(1)
         self.public_key         = bytes.fromhex(data["public_key"])
         self.device_id          = data["device_id"]
         self.genesis_block_hash = data.get("genesis_block_hash")

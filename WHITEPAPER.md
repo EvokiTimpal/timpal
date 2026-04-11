@@ -308,7 +308,7 @@ Sybil resistance operates at five independent layers:
 
 ### 6.2 Double-Spend Prevention
 
-Every node validates sender balance against the full chain before accepting any transaction. Within a single block, each sender's cumulative debit is tracked across all transactions in that block — a sender cannot include multiple transactions that collectively exceed their balance. After a chain reorganization, transactions no longer funded by surviving block rewards are automatically removed from the ledger.
+Every node validates sender balance against the full chain before accepting any transaction. Within a single block, each sender's cumulative debit is tracked across all transactions in that block — a sender cannot include multiple transactions that collectively exceed their balance. After a chain reorganization, the balances are recomputed from the surviving chain — if a sender's block reward was on the reorged-out branch, their balance drops accordingly. Any subsequent block attempting to include their transaction will fail the balance check and reject it. Transactions expire from the mempool after 100 slots (~17 minutes) if not included in a block.
 
 ### 6.3 Quantum Resistance
 

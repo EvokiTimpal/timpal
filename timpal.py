@@ -1508,10 +1508,12 @@ class Ledger:
             return False
 
         # Rule 6: maturation check
-        # Genesis bootstrap exception: if no identities exist yet (chain has never
-        # produced a block), the maturation check is waived so the first block can
-        # be produced. Once any block is accepted the winner self-registers and
-        # Rule 6 applies normally from that point forward.
+        # Maturation (MIN_IDENTITY_AGE slots) only applies post-genesis (slot >= 1000).
+        # During genesis phase (slots 0-999) any registered identity may produce blocks
+        # immediately — Sybil resistance via maturation is not needed when only the
+        # founding nodes are present and no pre-existing chain can be exploited.
+        # Genesis bootstrap: if no identities exist at all, waive the check entirely
+        # so the very first block can be produced.
         first_seen = self.identities.get(wid)
         if first_seen is None:
             if self.identities:
@@ -1519,7 +1521,7 @@ class Ledger:
                 return False
             # Genesis bootstrap: no identities at all — waive maturation check.
             # Rule 5 already verified sha256(pubkey)==wid for this branch.
-        elif slot - first_seen < MIN_IDENTITY_AGE:
+        elif slot >= 1000 and slot - first_seen < MIN_IDENTITY_AGE:
             return False
 
         # Rule 7: slot validity
@@ -3330,17 +3332,17 @@ class Node:
                         self._compete(current_slot, tip_hash)
                         competed = True
                 else:
-                    selected = select_competitors(
-                        identities_snapshot, tip_hash, current_slot,
-                        identity_last_attest=last_attest_snapshot
-                    )
-                    # Genesis bootstrap: if no identities are registered yet
-                    # (chain has never produced a block) this node is always
-                    # eligible to compete. Without this, select_competitors
-                    # returns [] forever and the chain can never start.
-                    if not selected and not identities_snapshot:
-                        selected = [self.wallet.device_id]
-                    if self.wallet.device_id in selected:
+                    # Genesis phase (slots 0-999): any registered identity competes
+                    # immediately — no maturation delay. Maturation (MIN_IDENTITY_AGE
+                    # slots) only applies after slot 1000 when Sybil resistance matters.
+                    # During genesis there are only the founding nodes — no Sybil risk.
+                    if identities_snapshot:
+                        # Identities exist — compete if this node is registered
+                        if self.wallet.device_id in identities_snapshot:
+                            self._compete(current_slot, tip_hash)
+                            competed = True
+                    else:
+                        # Genesis bootstrap: no identities at all yet — always compete
                         self._compete(current_slot, tip_hash)
                         competed = True
 
@@ -3428,8 +3430,12 @@ class Node:
                 first_seen = self.ledger.identities.get(did)
                 if first_seen is None:
                     return  # unregistered identity
-                if slot - first_seen < MIN_IDENTITY_AGE:
-                    return  # not yet mature
+                # Maturation check: only applies at slot >= 1000 (post-genesis).
+                # During genesis phase (slots 0-999) any registered identity may
+                # compete immediately — Sybil resistance via maturation is not
+                # needed when only the founding nodes are present.
+                if slot >= 1000 and slot - first_seen < MIN_IDENTITY_AGE:
+                    return  # not yet mature (post-genesis only)
                 # Activity filter: dormant identities may not compete
                 if slot > first_seen + IDENTITY_GRACE_PERIOD:
                     last_a = self.ledger.identity_last_attest.get(did, first_seen)

@@ -4252,7 +4252,7 @@ class Node:
         # Record in personal history
         self.ledger.my_transactions.append(tx_dict)
         self.ledger.save()
-        print(f"\n  ↑ Sent {amount_tmpl:.8f} TMPL to {recipient_id[:20]}... fee={fee/UNIT:.6f}\n  > ",
+        print(f"\n  ↑ Sent {amount_units/UNIT:.8f} TMPL to {recipient_id[:20]}... fee={fee/UNIT:.6f}\n  > ",
               end="", flush=True)
         return {"ok": True}
 
@@ -4569,7 +4569,7 @@ if __name__ == "__main__":
             sock.close()
             result = json.loads(resp.decode().strip())
             if result.get("ok"):
-                print(f"Sent {amount:.8f} TMPL to {recipient[:24]}...")
+                print(f"Sent {amount_str} TMPL to {recipient[:24]}...")
             else:
                 print(f"Failed: {result.get('error', 'unknown')}")
         except ConnectionRefusedError:

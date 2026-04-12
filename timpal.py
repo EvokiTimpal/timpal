@@ -23,7 +23,7 @@ try:
     from dilithium_py.dilithium import Dilithium3
 except ImportError:
     print("\n  [!] dilithium-py not installed.")
-    print("  Run: pip3 install dilithium-py cryptography pycryptodome\n")
+    print("  Run: pip3 install dilithium-py cryptography pycryptodome miniupnpc\n")
     exit(1)
 
 try:
@@ -32,7 +32,14 @@ try:
     from cryptography.hazmat.backends import default_backend
 except ImportError:
     print("\n  [!] cryptography not installed.")
-    print("  Run: pip3 install dilithium-py cryptography pycryptodome\n")
+    print("  Run: pip3 install dilithium-py cryptography pycryptodome miniupnpc\n")
+    exit(1)
+
+try:
+    import miniupnpc as _miniupnpc_check
+except ImportError:
+    print("\n  [!] miniupnpc not installed.")
+    print("  Run: pip3 install dilithium-py cryptography pycryptodome miniupnpc\n")
     exit(1)
 
 # ── Version ────────────────────────────────────────────────────────────────────
@@ -2272,6 +2279,7 @@ class Network:
         self._global_tx_count      = 0
         self._global_rate_lock     = threading.Lock()
         self._last_global_rate_slot= -1
+        self._upnp_mapped          = False   # True once UPnP port mapping succeeds
 
     def _get_local_ip(self) -> str:
         try:
@@ -3009,12 +3017,50 @@ class Network:
                 self._sync_ledger()
             time.sleep(120)
 
+    def _upnp_map(self) -> bool:
+        """Attempt to open an inbound port mapping via UPnP.
+
+        Tries miniupnpc first (pip3 install miniupnpc), then falls back to
+        the built-in miniupnp via miniupnpc. Silent on failure — UPnP is
+        best-effort. Returns True if mapping was created."""
+        try:
+            import miniupnpc
+            u = miniupnpc.UPnP()
+            u.discoverdelay = 200
+            u.discover()
+            u.selectigd()
+            ext_ip = u.externalipaddress()
+            result = u.addportmapping(
+                self.port, "TCP", u.lanaddr, self.port,
+                "Timpal P2P", ""
+            )
+            if result:
+                self._upnp_mapped = True
+                self.local_ip = u.lanaddr
+                print(f"\n  [UPnP] Port {self.port} mapped — external IP: {ext_ip}\n  > ",
+                      end="", flush=True)
+                return True
+        except ImportError:
+            pass  # miniupnpc not installed — silent
+        except Exception:
+            pass  # router doesn't support UPnP — silent
+        return False
+
+    def _upnp_renew_loop(self):
+        """Renew UPnP mapping every 10 minutes — most routers expire mappings."""
+        time.sleep(30)
+        self._upnp_map()   # initial attempt
+        while self._running:
+            time.sleep(600)
+            if self._upnp_mapped:
+                self._upnp_map()   # renew
+
     def start(self):
         self._running = True
         self._load_peers()
         for fn in (self._listen_tcp, self._broadcast_loop,
                    self._listen_discovery, self._bootstrap_connect,
-                   self._periodic_sync):
+                   self._periodic_sync, self._upnp_renew_loop):
             threading.Thread(target=fn, daemon=True).start()
 
     def stop(self):

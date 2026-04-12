@@ -41,7 +41,7 @@ TIMPAL answers each of those problems directly.
 The result is a network where any person with a Mac, Windows, or Linux computer can participate on equal terms — earning rewards through the lottery, sending TMPL to anyone on the network, and holding value in a wallet that does not depend on the continued irrelevance of quantum computing.
 
 ```
-pip3 install dilithium-py cryptography pycryptodome mnemonic qrcode
+pip3 install dilithium-py cryptography pycryptodome mnemonic qrcode miniupnpc
 curl -O https://raw.githubusercontent.com/EvokiTimpal/timpal/main/timpal.py
 python3 timpal.py
 ```

@@ -11,7 +11,7 @@ It is also built for the threat the rest of the industry is pretending does not 
 
 **Step 1 — Install dependencies:**
 ```
-pip3 install dilithium-py cryptography pycryptodome mnemonic qrcode
+pip3 install dilithium-py cryptography pycryptodome mnemonic qrcode miniupnpc
 ```
 
 **Step 2 — Download TIMPAL:**
@@ -46,7 +46,7 @@ ssh root@YOUR_SERVER_IP
 ```bash
 apt update && apt upgrade -y
 apt install -y python3 python3-pip git screen
-pip3 install dilithium-py cryptography pycryptodome mnemonic qrcode --break-system-packages
+pip3 install dilithium-py cryptography pycryptodome mnemonic qrcode miniupnpc --break-system-packages
 ```
 
 **Step 3 — Download Timpal**
@@ -145,7 +145,7 @@ A server node stays in the active identity pool continuously, earns block reward
 
 - Python 3.8+
 - Mac, Linux, Windows
-- Dependencies: `dilithium-py cryptography pycryptodome mnemonic qrcode`
+- Dependencies: `dilithium-py cryptography pycryptodome mnemonic qrcode miniupnpc`
 
 ---
 

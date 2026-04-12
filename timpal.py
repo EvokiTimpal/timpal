@@ -3548,6 +3548,25 @@ class Node:
                     return
                 self.ledger.save()
 
+            # Attest our own block immediately.
+            # CRITICAL: _on_block_received attests blocks received from peers
+            # (changed=True path). But when we produce our OWN block, the
+            # broadcast comes back via _on_block_received with changed=False
+            # (Rule 10 - duplicate slot) so no attestation is triggered there.
+            # Without this step, self-produced blocks are never finalized and
+            # Rule 9 (parent must be finalized, slot >= 1000) stalls the chain
+            # permanently after the first post-genesis block.
+            block_hash = compute_block_hash(block)
+            committee  = select_attestation_committee(
+                self.ledger.identities,
+                self.ledger.identity_last_attest,
+                block_hash, slot
+            )
+            if self.wallet.device_id in committee:
+                attest = produce_attestation(block_hash, slot, self.wallet)
+                self.network.broadcast(attest)
+                self._on_attest_received(attest)
+
             # Remove included transactions from mempool
             with self._mempool_lock:
                 for tx in txs:
